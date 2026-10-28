@@ -1,0 +1,127 @@
+{
+ "_capture": {
+  "tool": "chat-capture",
+  "version": "0.1.0",
+  "platform": "chatgpt",
+  "kind": "conversation",
+  "id": "00000000-0000-4000-8000-000000000000",
+  "source_url": "https://chatgpt.com/c/00000000-0000-4000-8000-000000000000",
+  "endpoint": "/backend-api/conversation/00000000-0000-4000-8000-000000000000",
+  "retrieved_at": "2026-10-28T19:19:06.845Z",
+  "browser_tz": "America/Chicago",
+  "redacted": "safe_urls (links from other conversations), request ids and UI metadata removed for the fixture"
+ },
+ "data": {
+  "title": "Reply relay test",
+  "create_time": 1793215018.616973,
+  "update_time": 1793215054.199279,
+  "conversation_id": "00000000-0000-4000-8000-000000000000",
+  "default_model_slug": "gpt-6-thinking",
+  "is_temporary_chat": false,
+  "mapping": {
+   "client-created-root": {
+    "id": "client-created-root",
+    "message": null,
+    "parent": null,
+    "children": [
+     "90839243-7bf7-41ba-ac97-38676f01bb25"
+    ]
+   },
+   "90839243-7bf7-41ba-ac97-38676f01bb25": {
+    "id": "90839243-7bf7-41ba-ac97-38676f01bb25",
+    "message": {
+     "id": "90839243-7bf7-41ba-ac97-38676f01bb25",
+     "author": {
+      "role": "user",
+      "name": null,
+      "metadata": {}
+     },
+     "create_time": 1793215045.668,
+     "update_time": 1793215054.168357,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "Relay test from Claude (relay-kit live check). Please reply with exactly this line and nothing else: RELAY-OK 1"
+      ]
+     },
+     "status": "finished_successfully",
+     "end_turn": null,
+     "weight": 1,
+     "metadata": {},
+     "recipient": "all",
+     "channel": null
+    },
+    "parent": "client-created-root",
+    "children": [
+     "a232bddc-aaac-4f88-b60d-9864c54ed940"
+    ]
+   },
+   "a232bddc-aaac-4f88-b60d-9864c54ed940": {
+    "id": "a232bddc-aaac-4f88-b60d-9864c54ed940",
+    "message": {
+     "id": "a232bddc-aaac-4f88-b60d-9864c54ed940",
+     "author": {
+      "role": "assistant",
+      "name": null,
+      "metadata": {}
+     },
+     "create_time": 1793215050.003567,
+     "update_time": 1793215050.003567,
+     "content": {
+      "content_type": "reasoning_recap",
+      "content": "Worked for a couple of seconds"
+     },
+     "status": "finished_successfully",
+     "end_turn": false,
+     "weight": 1,
+     "metadata": {
+      "reasoning_status": "reasoning_ended",
+      "finished_duration_sec": 2,
+      "model_slug": "gpt-6-thinking"
+     },
+     "recipient": "all",
+     "channel": null
+    },
+    "parent": "90839243-7bf7-41ba-ac97-38676f01bb25",
+    "children": [
+     "1c77719a-f774-4be6-96c0-afcd1863a6ec"
+    ]
+   },
+   "1c77719a-f774-4be6-96c0-afcd1863a6ec": {
+    "id": "1c77719a-f774-4be6-96c0-afcd1863a6ec",
+    "message": {
+     "id": "1c77719a-f774-4be6-96c0-afcd1863a6ec",
+     "author": {
+      "role": "assistant",
+      "name": null,
+      "metadata": {}
+     },
+     "create_time": 1793215050.009225,
+     "update_time": 1793215052.786786,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "RELAY-OK 1"
+      ]
+     },
+     "status": "finished_successfully",
+     "end_turn": true,
+     "weight": 1,
+     "metadata": {
+      "finish_details": {
+       "type": "stop"
+      },
+      "is_complete": true,
+      "content_references": [],
+      "model_slug": "gpt-6-thinking"
+     },
+     "recipient": "all",
+     "channel": "final"
+    },
+    "parent": "a232bddc-aaac-4f88-b60d-9864c54ed940",
+    "children": []
+   }
+  },
+  "current_node": "1c77719a-f774-4be6-96c0-afcd1863a6ec"
+ }
+}
