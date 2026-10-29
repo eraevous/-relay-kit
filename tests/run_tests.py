@@ -177,7 +177,10 @@ def ledger_tests():
     d = ledger_dir("renumbered-output")
     p = d / FIXTURE.name
     p.write_text(p.read_text(encoding="utf-8").replace("outputs/HO-20261028-001.md", "outputs/HO-20261028-009.md"), encoding="utf-8")
-    case("ledger: check flags an Expected output naming another handoff's file", run(LEDGER, "--dir", d, "check")[0] != 0)
+    rc, so, _ = run(LEDGER, "--dir", d, "check")
+    r = setstate(d, "sent", "claude:relay-kit", "x")
+    case("ledger: check warns (doesn't block) on an Expected output naming another handoff's file",
+         rc == 0 and "WARNING" in so and "HO-20261028-009" in so and r[0] == 0, so + r[2])
 
     d = TMP / "ledger" / "block-draft"
     rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--to", "chatgpt:b", "--title", "T")

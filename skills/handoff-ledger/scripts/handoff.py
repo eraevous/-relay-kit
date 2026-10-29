@@ -210,7 +210,7 @@ def problems_in(text, stem, outputs_dir):
     exp = re.search(r"^## Expected output[ \t]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
     for other in re.findall(r"outputs/(HO-\d{8}-\d{3})\.md", exp.group(1) if exp else ""):
         if other != stem:
-            out.append(f"Expected output names outputs/{other}.md, but this handoff is {stem} (renumbered?)")
+            out.append(f"warning: Expected output names outputs/{other}.md, but this handoff is {stem} (renumbered?)")
     if not log:
         out.append("empty log")
         return out, meta, log
@@ -333,6 +333,7 @@ def cmd_set(a):
         text = p.read_text(encoding="utf-8")
         digest = hashlib.sha256(text.encode()).hexdigest()
         problems, meta, log = problems_in(text, p.stem, a.dir / "outputs")
+        problems = [x for x in problems if not x.startswith("warning:")]   # warnings never block
         if problems:
             raise Refused("the file has problems; fix them first (or record 'blocked' by hand):\n  " + "\n  ".join(problems))
         states = [e["state"] for e in log]
@@ -359,6 +360,7 @@ def cmd_set(a):
         if a.last_processed:
             new_text = re.sub(r"^last_processed:.*$", f"last_processed: {a.last_processed}", new_text, count=1, flags=re.M)
         after, _, _ = problems_in(new_text, p.stem, a.dir / "outputs")
+        after = [x for x in after if not x.startswith("warning:")]
         if after:
             raise Refused("the update would leave the file invalid:\n  " + "\n  ".join(after))
         if hashlib.sha256(p.read_text(encoding="utf-8").encode()).hexdigest() != digest:
@@ -398,9 +400,13 @@ def cmd_check(a):
         total += [f"{p.name}: {x}" for x in problems]
     if (a.dir / LOCK).exists():
         total.append(f"{LOCK} exists: an update is running or was interrupted")
+    warnings = [x for x in total if ": warning: " in x]
+    total = [x for x in total if ": warning: " not in x]
+    for w in warnings:
+        print("WARNING", w.replace(": warning: ", ": ", 1))
     for t in total:
         print("PROBLEM", t)
-    print(f"{len(files)} handoff(s), {len(total)} problem(s)")
+    print(f"{len(files)} handoff(s), {len(total)} problem(s)" + (f", {len(warnings)} warning(s)" if warnings else ""))
     sys.exit(1 if total else 0)
 
 
