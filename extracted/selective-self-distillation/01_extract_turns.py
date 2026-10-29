@@ -26,6 +26,7 @@ def relay_pattern(names):
 RELAY = relay_pattern(ASSISTANTS)
 CAPTURE_MARK = re.compile(r'^\s*(<!--.*?-->|---)\s*$')
 
+# relay-kit/paste-markers@1: FROM: ... END FROM blocks and >""" pastes
 FROM_BLOCK = re.compile(r'^\W*FROM:[^\n]*\n[\s\S]*?(?:^\s*END FROM\s*$|\Z)', re.M | re.I)
 
 def strip_pastes(t, delim):

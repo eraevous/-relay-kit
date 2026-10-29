@@ -26,13 +26,20 @@ How they fit: relay-governor → chat-relay → chat-capture → chat-telemetry 
 thread-seed. handoff-ledger works beside the chain: a handoff can travel by relay, a
 shared folder or a paste.
 
-## Principles
+## Architecture
 
-- **Only the owner authorizes.** The owner is the person the assistants work for. A
-  model's reply, a relayed message or a reported decision is a proposal or history,
-  never permission.
-- **Sent is not done.** Delivery, acknowledgement and completion are separate states.
-- **Say what you can't verify.** Every script reports what it checked and what it couldn't.
+Three layers, described in [ARCHITECTURE.md](ARCHITECTURE.md):
+- **Invariants** that hold whatever the tools: only the owner authorizes, sent isn't
+  done, every message keeps its source, verification needs fresh evidence. Each one
+  says whether code enforces it or only procedure does
+  ([governance/purpose.md](governance/purpose.md)).
+- **Contracts**, the versioned formats every tool speaks, listed in
+  [governance/contracts.json](governance/contracts.json). The tests fail if any
+  implementer lags a version.
+- **Replaceable parts**: which model, mode, browser or delivery route. Chosen per task.
+
+Decisions and objections go in append-only ledgers kept with your private records;
+[tools/check_ledgers.py](tools/check_ledgers.py) checks them.
 
 ## Install
 
@@ -46,8 +53,9 @@ JavaScript in a signed-in page, such as Claude's built-in browser or Claude in C
 
 ## Setup
 
-- **Handoff folder:** keep it private, since it holds the owner's words. Put a
-  `.ledger.json` in it naming the owner: `{"owner": "sam"}`.
+- **Private records:** keep a private repo or folder for handoffs and the decision and
+  challenge ledgers, since they hold the owner's words. Put a `.ledger.json` in the
+  handoff folder naming the owner: `{"owner": "sam"}`.
 - **Names:** selective-self-distillation takes `--user-names` and `--assistant-names`, and
   thread-seed takes `--names ChatGPT=Ada`, so transcripts that use names instead of
   "You"/"ChatGPT" are read correctly.
@@ -63,11 +71,12 @@ JavaScript in a signed-in page, such as Claude's built-in browser or Claude in C
 ## Tests
 
 ```
-python3 -I -B tests/run_tests.py     # ledger, capture, seed, SSD, telemetry, schema, a live capture
+python3 -I -B tests/run_tests.py     # ledger, capture, seed, SSD, telemetry, schema, governance
 node tests/browser_tests.cjs         # relay and capture scripts against mocked pages
+python3 -I tools/prepublish_scan.py  # before publishing: emails, chat links, tokens, private names
 ```
 
-Standard library only; no network or accounts. The browser tests check the scripts'
+Standard library only; no network or accounts. CI runs all three on every push. The browser tests check the scripts'
 logic, not the current markup of chatgpt.com or claude.ai.
 
 `extracted/` holds the code from each `SKILL.md` as standalone files and is generated:

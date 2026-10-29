@@ -1,0 +1,58 @@
+{
+  "rule": "A contract changes only by a new version. The spec, every implementer and the tests change in the same commit, and the change is recorded in decisions.jsonl. tests/run_tests.py checks that every file below carries the current marker.",
+  "contracts": [
+    {
+      "id": "relay-kit/conversation@1",
+      "what": "Normalized conversation JSON and message ids (T3u, T3a, T3a2), and the same ids in Markdown markers.",
+      "spec": "docs/conversation-schema.md",
+      "implementers": [
+        "skills/chat-capture/SKILL.md",
+        "skills/thread-seed/SKILL.md",
+        "skills/selective-self-distillation/SKILL.md",
+        "skills/chat-telemetry/SKILL.md"
+      ],
+      "tests": [
+        "schema: renderer tags the version and gives every message a unique mid",
+        "schema: an unknown version is refused by seed, SSD and telemetry"
+      ]
+    },
+    {
+      "id": "relay-kit/handoff@1",
+      "what": "The handoff file: front matter, sections, states, log line, and the folder's .ledger.json owner setting.",
+      "spec": "skills/handoff-ledger/SKILL.md",
+      "implementers": [
+        "skills/handoff-ledger/scripts/handoff.py"
+      ],
+      "tests": [
+        "ledger: prepared -> sent -> acknowledged -> completed, then check",
+        "ledger: a handoff from a newer contract version is refused"
+      ]
+    },
+    {
+      "id": "relay-kit/paste-markers@1",
+      "what": "Marking relayed and pasted material: a FROM: first line, FROM: ... END FROM blocks, and >\"\"\" pastes.",
+      "spec": "docs/paste-markers.md",
+      "implementers": [
+        "skills/selective-self-distillation/SKILL.md",
+        "skills/thread-seed/SKILL.md",
+        "skills/chat-telemetry/SKILL.md"
+      ],
+      "tests": [
+        "ssd: a FROM ... END FROM block after your words is stripped from own text",
+        "seed: a FROM block inside your message is flagged as a paste, speaker stays you"
+      ]
+    },
+    {
+      "id": "relay-kit/relay-result@1",
+      "what": "chat-relay's reply statuses: done (explicit completion signal), unconfirmed (text stopped, no signal), pending.",
+      "spec": "skills/chat-relay/SKILL.md",
+      "implementers": [
+        "skills/relay-governor/SKILL.md"
+      ],
+      "tests": [
+        "relay: text that stops changing without a signal is never \"done\"",
+        "relay: explicit ChatGPT completion -> done"
+      ]
+    }
+  ]
+}

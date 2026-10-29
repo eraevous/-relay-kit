@@ -408,6 +408,7 @@ def main(argv=None):
     ap.add_argument("-o", "--outdir", default=".")
     ap.add_argument("--tz", default="America/Chicago")
     ap.add_argument("--hang-seconds", type=float, default=120)
+    # relay-kit/paste-markers@1: a turn opening with FROM: is relayed
     ap.add_argument("--relay-pattern", default=r"^\**FROM:\s")
     ap.add_argument("--title", default="Conversation telemetry")
     a = ap.parse_args(argv)

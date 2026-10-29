@@ -1,0 +1,19 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      # Python 3.11+ and Node come with the runner image; the kit uses the standard library only.
+      - name: Core tests
+        run: python3 -I -B tests/run_tests.py
+      - name: Browser-script tests
+        run: node tests/browser_tests.cjs
+      - name: Pre-publish scan (emails, chat links, tokens)
+        run: python3 -I tools/prepublish_scan.py

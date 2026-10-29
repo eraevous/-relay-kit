@@ -18,6 +18,7 @@ file existing says nothing about its quality; hand edits bypass all of this
 not tamper-evident: keep the folder in git for a history you can trust."""
 import argparse, datetime as dt, hashlib, json, os, pathlib, re, sys
 
+CONTRACT = "relay-kit/handoff@1"   # file format, states and log line; see governance/contracts.json
 STATES = ["prepared", "sent", "acknowledged", "in_progress", "completed", "blocked", "cancelled"]
 FINAL = {"completed", "cancelled"}
 NEXT = {
@@ -57,6 +58,7 @@ from: {frm}
 to: {to}
 created: {now}
 status: prepared
+contract: relay-kit/handoff@1
 source: {source}
 last_processed: {last}
 reply_to: {reply_to}
@@ -193,6 +195,8 @@ def problems_in(text, stem, outputs_dir):
     for k in REQUIRED:
         if not meta.get(k):
             out.append(f"missing '{k}'")
+    if meta.get("contract", CONTRACT) != CONTRACT:
+        out.append(f"contract {meta.get('contract')!r}; this script reads {CONTRACT}")
     if meta.get("id") and meta["id"] != stem:
         out.append(f"id {meta['id']} doesn't match file name")
     for s in SECTIONS:

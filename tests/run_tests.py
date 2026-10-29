@@ -84,7 +84,7 @@ def ledger_tests():
     for name, state, by, note in [("can't skip delivery", "acknowledged", "chatgpt:ada", "x"),
                                   ("wrong sender refused", "sent", "chatgpt:ada", "x"),
                                   ("sent needs a note", "sent", "claude:relay-kit", None),
-                                  ("only Sam cancels", "cancelled", "claude:relay-kit", "x")]:
+                                  ("only the owner cancels", "cancelled", "claude:relay-kit", "x")]:
         case(f"ledger: {name}", setstate(ledger_dir(name.replace(' ', '-').replace("'", '')), state, by, note)[0] != 0)
 
     d = ledger_dir("output-required")
@@ -341,6 +341,71 @@ def schema_tests():
          r_seed[0] != 0 and r_ssd[0] != 0 and r_tel[0] != 0, str([r_seed[2][-80:], r_ssd[2][-80:], r_tel[2][-80:]]))
 
 
+def governance_tests():
+    """The architecture's own rules: contracts, invariants, ledgers."""
+    test_src = (KIT / "tests" / "run_tests.py").read_text(encoding="utf-8") + (KIT / "tests" / "browser_tests.cjs").read_text(encoding="utf-8")
+    def test_exists(name):
+        tail = name.split(": ", 1)[-1]
+        return tail.replace('\\"', '"') in test_src.replace('\\"', '"')
+
+    reg = json.loads((KIT / "governance" / "contracts.json").read_text(encoding="utf-8"))
+    missing = []
+    for c in reg["contracts"]:
+        for f in [c["spec"]] + c["implementers"]:
+            path = KIT / f
+            if not path.exists():
+                missing.append(f"{c['id']}: {f} missing")
+            elif c["id"] not in path.read_text(encoding="utf-8"):
+                missing.append(f"{c['id']}: {f} doesn't name this version")
+        missing += [f"{c['id']}: no test '{n}'" for n in c["tests"] if not test_exists(n)]
+    case("governance: every contract's spec and implementers carry its version; its tests exist",
+         not missing, "; ".join(missing))
+
+    purpose = (KIT / "governance" / "purpose.md").read_text(encoding="utf-8")
+    sections = re.split(r"^## ", purpose, flags=re.M)[1:]
+    pids = [s.split()[0] for s in sections]
+    bad = [s.split()[0] for s in sections if "- Enforced by:" not in s]
+    cited = re.findall(r"`([a-z]+(?: \([^)]*\))?: [^`]+)`", purpose)
+    gone = [n for n in cited if not test_exists(n)]
+    case("governance: every invariant states its enforcement and cites real tests",
+         pids and not bad and not gone, f"no enforcement: {bad}; missing tests: {gone}")
+    arch = (KIT / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    case("governance: ARCHITECTURE.md lists exactly the invariants in purpose.md",
+         re.findall(r"^\| (P-\d\d) \|", arch, re.M) == pids, str(pids))
+
+    chk = KIT / "tools" / "check_ledgers.py"
+    g = TMP / "gov-ok"; g.mkdir()
+    dec = [dict(id="DEC-001", date="2026-10-28", status="adopted", decision="d", scope="s", decider="owner", basis='"yes"', locator="chat"),
+           dict(id="DEC-002", date="2026-10-28", status="proposed", decision="d2", scope="s")]
+    ch = [dict(id="CH-001", date="2026-10-28", status="open", concern="c", raised_by="x")]
+    (g / "decisions.jsonl").write_text("".join(json.dumps(d) + "\n" for d in dec), encoding="utf-8")
+    (g / "challenges.jsonl").write_text("".join(json.dumps(c) + "\n" for c in ch), encoding="utf-8")
+    case("ledgers: a valid decision and challenge ledger passes", run(chk, "--dir", g)[0] == 0)
+    b = TMP / "gov-bad"; b.mkdir()
+    bad_dec = [dict(id="DEC-001", date="2026-10-28", status="adopted", decision="d", scope="s"),
+               dict(id="DEC-003", date="28 Oct", status="maybe", decision="d", scope="s")]
+    (b / "decisions.jsonl").write_text("".join(json.dumps(d) + "\n" for d in bad_dec), encoding="utf-8")
+    (b / "challenges.jsonl").write_text(json.dumps(dict(id="CH-001", date="2026-10-28", status="resolved", concern="c", raised_by="x")) + "\n", encoding="utf-8")
+    rc, so, _ = run(chk, "--dir", b)
+    case("ledgers: missing basis, skipped id, bad date/status and unexplained resolution are all caught",
+         rc != 0 and all(k in so for k in ("'basis' is required", "expected DEC-002", "YYYY-MM-DD", "status must be", "'resolution' is required")), so)
+    gi = TMP / "gov-git"; gi.mkdir()
+    (gi / "decisions.jsonl").write_text(json.dumps(dec[0]) + "\n", encoding="utf-8")
+    git = lambda *a: subprocess.run(["git", "-C", str(gi), *a], capture_output=True, text=True)
+    git("init", "-q"); git("add", "."); git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x")
+    (gi / "decisions.jsonl").write_text(json.dumps(dict(dec[0], decision="rewritten")) + "\n", encoding="utf-8")
+    rc, so, _ = run(chk, "--dir", gi, "--git")
+    (gi / "decisions.jsonl").write_text(json.dumps(dec[0]) + "\n" + json.dumps(dec[1]) + "\n", encoding="utf-8")
+    rc2, so2, _ = run(chk, "--dir", gi, "--git")
+    case("ledgers: --git catches an edited earlier line and allows appending", rc != 0 and "append-only" in so and rc2 == 0, so + so2)
+
+    d = ledger_dir("newer-contract")
+    p = d / FIXTURE.name
+    p.write_text(p.read_text(encoding="utf-8").replace("status: prepared\n", "status: prepared\ncontract: relay-kit/handoff@2\n"), encoding="utf-8")
+    case("ledger: a handoff from a newer contract version is refused",
+         run(LEDGER, "--dir", d, "check")[0] != 0 and setstate(d, "sent", "claude:relay-kit", "x")[0] != 0)
+
+
 # ---------------- telemetry ----------------
 def telemetry_tests():
     tel = load("telemetry", X / "chat-telemetry" / "01_chat_telemetry.py")
@@ -391,6 +456,7 @@ if __name__ == "__main__":
     capture_tests()
     live_fixture_tests()
     schema_tests()
+    governance_tests()
     telemetry_tests()
     evidence_tests()
     failed = [r for r in RESULTS if not r[1]]
