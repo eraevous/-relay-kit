@@ -1,3 +1,4 @@
+// relay-kit/relay-result@1: status is done | unconfirmed | pending (see SKILL.md, step 5).
 // chat-relay send + wait. MODE 'send' clicks Send, then waits; MODE 'wait' only waits (use it when a
 // previous call returned 'pending' or 'unconfirmed', passing that baseline). Stays under the browser
 // tool's ~45 s limit.

@@ -1,5 +1,7 @@
 # Marking pasted material
 
+Contract: `relay-kit/paste-markers@1`.
+
 Marker the kit's parsers already recognize (the first line `FROM: <name>`):
 
 ```

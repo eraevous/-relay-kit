@@ -158,6 +158,7 @@ Normalized .json is the canonical input; .md works when it was rendered by chat-
 import argparse, json, re, sys
 
 FROM = re.compile(r'^\W*FROM:\s*\**\s*([^\n*→>]+?)\s*(?:→|->|\*|$)', re.I)
+# relay-kit/paste-markers@1
 PASTE = re.compile(r'^>\s*["“”]{3}|^\W*FROM:\s', re.M)   # >""" paste, or a FROM: block after the first line
 ASSISTANTS = ['Claude', 'ChatGPT', 'Gemini', 'Copilot']   # --names adds the new labels (ChatGPT=Ada adds Ada)
 def here_pattern(names):

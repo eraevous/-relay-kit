@@ -34,6 +34,9 @@ automatic monitoring unless they set that up separately.
 
 ## The file
 
+Contract: `relay-kit/handoff@1` (this file format, the states and the log line).
+New handoffs carry it as `contract:` in their front matter; files without it are read as @1.
+
 ```markdown
 ---
 id: HO-20261028-001
@@ -42,6 +45,7 @@ from: claude:research       # agent:lane — who wrote it
 to: chatgpt:review          # who should do it
 created: 2026-10-28T14:00Z
 status: prepared
+contract: relay-kit/handoff@1
 source: https://chatgpt.com/c/...   # conversation this came from, or "none"
 last_processed: T6a                  # last message read and accounted for (see Checkpoints)
 reply_to:                            # id this answers, if any

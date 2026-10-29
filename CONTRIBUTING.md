@@ -3,7 +3,9 @@
 Thanks for considering a contribution.
 
 1. Fork the repository and create a branch.
-2. Make your change, with tests where the project has them.
+2. Make your change, with tests (`python3 -I -B tests/run_tests.py` and
+   `node tests/browser_tests.cjs`). Changing a format? Read the contract rule in
+   [ARCHITECTURE.md](ARCHITECTURE.md): new version, every implementer in the same change.
 3. Open a pull request and check the CLA box in the template.
 
 ## License

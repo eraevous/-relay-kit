@@ -47,7 +47,7 @@ Sending posts a message from the user's account, so:
 4. **Confirm** under the consent rules above, unless the request already settled it.
 5. **Send and wait.** Run `send_wait.js` with `MODE_PLACEHOLDER` = `'send'` and `BASELINE_PLACEHOLDER` = `0`. Each call stays under the browser tool's roughly 45-second limit.
    - If it returns `status: 'pending'`, run it again with `'wait'` and the returned `baseline`, until it returns `done`. Give up after about 10 minutes and report the partial state.
-   - `done` means the page gave an explicit completion signal. `unconfirmed` means the text stopped changing without one, which also happens when a model pauses for tools. Treat it as pending: check the page (stop button, tool activity, last message) or wait again. Never relay an `unconfirmed` reply onward without saying so.
+   - Result statuses (contract `relay-kit/relay-result@1`): `done` means the page gave an explicit completion signal. `unconfirmed` means the text stopped changing without one, which also happens when a model pauses for tools. Treat it as pending: check the page (stop button, tool activity, last message) or wait again. Never relay an `unconfirmed` reply onward without saying so.
    - A tool timeout doesn't mean the send failed. Check the page (URL, last message) before doing anything again, and **never resend blindly**.
 6. **Return** the reply verbatim, plus the conversation URL.
    - If the URL is a saved conversation (`/c/<id>` or `/chat/<id>`) and the user wants a record, run chat-capture on it. That gives timestamps, model and full Markdown.
@@ -118,6 +118,7 @@ The scripts try all of these. On the first successful run of an unverified row, 
 ## send_wait.js
 
 ```javascript
+// relay-kit/relay-result@1: status is done | unconfirmed | pending (see SKILL.md, step 5).
 // chat-relay send + wait. MODE 'send' clicks Send, then waits; MODE 'wait' only waits (use it when a
 // previous call returned 'pending' or 'unconfirmed', passing that baseline). Stays under the browser
 // tool's ~45 s limit.
