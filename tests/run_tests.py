@@ -154,6 +154,39 @@ def ledger_tests():
                  + "- 2026-10-28T09:00Z | sent | claude:relay-kit | before it was drafted\n", encoding="utf-8")
     case("ledger: check flags log lines out of time order", run(LEDGER, "--dir", d, "check")[0] != 0)
 
+    # The 2026-10-29 collision: two sessions, two clones, the same new id.
+    origin = TMP / "ids-origin.git"
+    g = lambda cwd, *a: subprocess.run(["git", "-C", str(cwd), *a], capture_output=True, text=True)
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], capture_output=True)
+    A, B = TMP / "ids-A", TMP / "ids-B"
+    for c in (A, B):
+        subprocess.run(["git", "clone", "-q", str(origin), str(c)], capture_output=True)
+        g(c, "config", "user.name", "t"); g(c, "config", "user.email", "t@t")
+    (B / "handoffs").mkdir()
+    (B / "handoffs" / ".keep").write_text("")
+    g(B, "add", "."); g(B, "commit", "-qm", "init"); g(B, "push", "-q", "origin", "main")
+    g(A, "pull", "-q", "origin", "main")
+    rc, hid_a, _ = run(LEDGER, "--dir", A / "handoffs", "new", "--from", "claude:aec", "--to", "codex:aec", "--title", "AEC work")
+    g(A, "add", "."); g(A, "commit", "-qm", "aec handoff"); g(A, "push", "-q", "origin", "main")
+    rc2, hid_b, err_b = run(LEDGER, "--dir", B / "handoffs", "new", "--from", "claude:rk", "--to", "claude:builder", "--title", "Pilot")
+    case("ledger: new skips an id another clone already pushed", rc == 0 and rc2 == 0 and hid_a != hid_b and hid_b.endswith("-002"),
+         f"{hid_a} / {hid_b} {err_b}")
+    tpl = (A / "handoffs" / f"{hid_a}.md").read_text(encoding="utf-8")
+    case("ledger: an unfilled Authorized section says not to start", "NOT AUTHORIZED YET" in tpl)
+
+    d = ledger_dir("renumbered-output")
+    p = d / FIXTURE.name
+    p.write_text(p.read_text(encoding="utf-8").replace("outputs/HO-20261028-001.md", "outputs/HO-20261028-009.md"), encoding="utf-8")
+    rc, so, _ = run(LEDGER, "--dir", d, "check")
+    r = setstate(d, "sent", "claude:relay-kit", "x")
+    case("ledger: check warns (doesn't block) on an Expected output naming another handoff's file",
+         rc == 0 and "WARNING" in so and "HO-20261028-009" in so and r[0] == 0, so + r[2])
+
+    d = TMP / "ledger" / "block-draft"
+    rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--to", "chatgpt:b", "--title", "T")
+    r = run(LEDGER, "--dir", d, "set", hid, "blocked", "--by", "claude:a", "--note", "reported run without authorization")
+    case("ledger: an unfilled draft can be marked blocked", r[0] == 0 and run(LEDGER, "--dir", d, "check")[0] == 0, r[2])
+
     d = ledger_dir("log-inside")
     setstate(d, "sent", "claude:relay-kit", "x")
     txt = (d / FIXTURE.name).read_text(encoding="utf-8")

@@ -16,7 +16,7 @@ Not enforced: --by is a typed name, not an authenticated identity; an output
 file existing says nothing about its quality; hand edits bypass all of this
 (`check` finds the damage afterwards). The log is append-only by convention,
 not tamper-evident: keep the folder in git for a history you can trust."""
-import argparse, datetime as dt, hashlib, json, os, pathlib, re, sys
+import argparse, datetime as dt, hashlib, json, os, pathlib, re, subprocess, sys
 
 CONTRACT = "relay-kit/handoff@1"   # file format, states and log line; see governance/contracts.json
 STATES = ["prepared", "sent", "acknowledged", "in_progress", "completed", "blocked", "cancelled"]
@@ -68,7 +68,8 @@ reply_to: {reply_to}
 TODO
 
 ## Authorized
-- TODO: quote the owner exactly, with a locator (thread URL or message id, date)
+- TODO: NOT AUTHORIZED YET. A recipient must not start this handoff until this line
+  quotes the owner exactly, with a locator (thread URL or message id, date).
 - Approving: TODO (the proposal or question their words answer, quoted or linked)
 - Permits: TODO (the actions this approval covers)
 - Doesn't cover: TODO (or "anything not listed above")
@@ -204,8 +205,12 @@ def problems_in(text, stem, outputs_dir):
             out.append(f"missing section '## {s}'")
     if sections and sections[-1] != "Log":
         out.append("'## Log' must be the last section")
-    if meta.get("status") not in ("prepared", "cancelled") and TODO_RE.search(text):
+    if meta.get("status") not in ("prepared", "blocked", "cancelled") and TODO_RE.search(text):
         out.append("still has TODO placeholders after leaving 'prepared'")
+    exp = re.search(r"^## Expected output[ \t]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+    for other in re.findall(r"outputs/(HO-\d{8}-\d{3})\.md", exp.group(1) if exp else ""):
+        if other != stem:
+            out.append(f"warning: Expected output names outputs/{other}.md, but this handoff is {stem} (renumbered?)")
     if not log:
         out.append("empty log")
         return out, meta, log
@@ -273,6 +278,22 @@ def atomic_write(p, text):
     os.replace(tmp, p)
 
 
+def ids_in_git(d):
+    """Handoff ids that exist in any commit or branch git knows about, after a best-effort
+    fetch. Another session may have taken an id in its own clone and pushed it."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, timeout=60)
+    try:
+        if git("rev-parse", "--git-dir").returncode != 0:
+            return set(), "not a git repository: only this folder was checked"
+        fetched = git("fetch", "--quiet", "--all").returncode == 0
+        names = git("log", "--all", "--name-only", "--format=", "--", ".").stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return set(), "git unavailable: only this folder was checked"
+    ids = set(re.findall(r"(HO-\d{8}-\d{3})\.md", names))
+    return ids, None if fetched else "fetch failed: checked local history and branches only"
+
+
 def cmd_new(a):
     for name in ("from", "to", "title", "source", "last_processed", "reply_to"):
         single_line(f"--{name.replace('_', '-')}", getattr(a, "frm" if name == "from" else name))
@@ -285,8 +306,13 @@ def cmd_new(a):
     text_for = lambda hid: TEMPLATE.format(id=hid, title=a.title, frm=a.frm, to=a.to, now=now(),
                                            source=a.source or "none", last=a.last_processed or "none",
                                            reply_to=a.reply_to or "")
+    taken, note = ids_in_git(a.dir)
+    if note:
+        print(f"note: {note}", file=sys.stderr)
     for n in range(1, 1000):
         hid = f"HO-{day}-{n:03d}"
+        if hid in taken:   # used in another clone, branch or earlier commit: never reuse
+            continue
         try:
             with open(a.dir / f"{hid}.md", "x", encoding="utf-8", newline="\n") as f:
                 f.write(text_for(hid))
@@ -307,6 +333,7 @@ def cmd_set(a):
         text = p.read_text(encoding="utf-8")
         digest = hashlib.sha256(text.encode()).hexdigest()
         problems, meta, log = problems_in(text, p.stem, a.dir / "outputs")
+        problems = [x for x in problems if not x.startswith("warning:")]   # warnings never block
         if problems:
             raise Refused("the file has problems; fix them first (or record 'blocked' by hand):\n  " + "\n  ".join(problems))
         states = [e["state"] for e in log]
@@ -333,6 +360,7 @@ def cmd_set(a):
         if a.last_processed:
             new_text = re.sub(r"^last_processed:.*$", f"last_processed: {a.last_processed}", new_text, count=1, flags=re.M)
         after, _, _ = problems_in(new_text, p.stem, a.dir / "outputs")
+        after = [x for x in after if not x.startswith("warning:")]
         if after:
             raise Refused("the update would leave the file invalid:\n  " + "\n  ".join(after))
         if hashlib.sha256(p.read_text(encoding="utf-8").encode()).hexdigest() != digest:
@@ -372,9 +400,13 @@ def cmd_check(a):
         total += [f"{p.name}: {x}" for x in problems]
     if (a.dir / LOCK).exists():
         total.append(f"{LOCK} exists: an update is running or was interrupted")
+    warnings = [x for x in total if ": warning: " in x]
+    total = [x for x in total if ": warning: " not in x]
+    for w in warnings:
+        print("WARNING", w.replace(": warning: ", ": ", 1))
     for t in total:
         print("PROBLEM", t)
-    print(f"{len(files)} handoff(s), {len(total)} problem(s)")
+    print(f"{len(files)} handoff(s), {len(total)} problem(s)" + (f", {len(warnings)} warning(s)" if warnings else ""))
     sys.exit(1 if total else 0)
 
 
