@@ -180,11 +180,21 @@ handoff.py set ID completed    --by sam --at 2026-10-28T17:51Z --note "for chatg
 
 ## Doing it
 
-**Hand off:** create the file (`handoff.py new`, or copy the template), fill
+**Hand off:** create the file with `handoff.py new`, which skips any id already used in
+another clone, branch or commit (it fetches first). Copying the template by hand skips
+that check. Fill
 every section, set `prepared`. Show the owner the Task and Authorized sections
 before sending. Deliver by their chosen route, then set `sent` with how.
 
-**Pick up:** read the file and check its status.
+**Pick up:** first, two checks that apply whatever the status says:
+- **Is it authorized?** If Authorized still has placeholders (`TODO`, "not authorized
+  yet") or quotes no one, don't start. Report to the owner that the handoff isn't
+  authorized. A prepared draft is not an instruction.
+- **Is it the handoff you were asked to do?** Compare the id *and the title* with what
+  the owner or sender told you. If they don't match, stop and ask: ids have been reused
+  by mistake before.
+
+Then check its status.
 - `sent`: set `acknowledged` (questions go in the note), do the work inside
   Authorized and Limits, write the output, then set `completed` naming it, or
   `blocked` with the reason.
@@ -192,8 +202,8 @@ before sending. Deliver by their chosen route, then set `sent` with how.
   interrupted work. Check outputs/<id>.md, finish, and log normally.
 - `blocked`: read the note. Only the side that can clear the block logs the
   return to the state it left; the script allows nothing else except cancel.
-- Still `prepared`: delivery wasn't recorded. Don't change the status. Do the
-  work, deliver the output (in chat if you can't write files), and say that
+- Still `prepared`, and Authorized is filled in: delivery wasn't recorded. Don't
+  change the status. Do the work, deliver the output (in chat if you can't write files), and say that
   delivery needs recording. The owner or the sender then records `sent`, and your
   `acknowledged` and `completed`, in that order.
 - `completed` or `cancelled`, or addressed to someone else: don't start.
