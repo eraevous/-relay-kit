@@ -14,17 +14,19 @@ and prints, in order of what needs attention:
   2. what waits on the owner: proposed decisions nobody has superseded, and handoffs
      whose Authorized section is still unfilled;
   3. open handoffs by state, with who holds each one, flagging any whose output is
-     already filed but whose state was never closed;
+     already filed but whose state was never closed, and any that has waited past
+     --stale-hours (sent with no acknowledgement, or claimed with no progress logged);
   4. open challenges;
   5. where the coordination index is and its last change-log line;
   6. what it couldn't check.
 
 It changes nothing; `git fetch` only updates remote-tracking refs (skip it with
 --no-fetch). Standard library only."""
-import argparse, importlib.util, json, pathlib, re, subprocess, sys
+import argparse, datetime as dt, importlib.util, json, pathlib, re, subprocess, sys
 
 KIT = pathlib.Path(__file__).resolve().parent.parent
 LEDGER = KIT / "skills" / "handoff-ledger" / "scripts" / "handoff.py"
+WAITING = {"sent": "NO ACK", "acknowledged": "STALE CLAIM", "in_progress": "STALE CLAIM"}   # timeout, as in a job queue's visibility timeout
 HOLDER = {"prepared": "from", "sent": "to", "acknowledged": "to", "in_progress": "to", "blocked": "from"}
 
 
@@ -66,7 +68,15 @@ def freshness(root, fetch, gaps):
         ", uncommitted changes" if dirty else "")
 
 
-def handoffs(root, gaps):
+def age_hours(at):
+    try:
+        t = dt.datetime.fromisoformat(at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (dt.datetime.now(dt.timezone.utc) - t).total_seconds() / 3600
+
+
+def handoffs(root, gaps, stale_hours):
     d = root / "handoffs"
     if not d.is_dir():
         gaps.append("no handoffs/ folder")
@@ -89,6 +99,9 @@ def handoffs(root, gaps):
             unauthorized.append(f"{meta.get('id')}  {meta.get('title', '')}")
         last = log[-1] if log else {}
         flag = "  OUTPUT FILED, state not closed" if (d / "outputs" / f"{meta.get('id')}.md").exists() else ""
+        age = age_hours(last.get("at", "")) if last else None
+        if st in WAITING and age is not None and age > stale_hours:
+            flag += f"  {WAITING[st]} for {age / 24:.1f} days"
         rows.append((st, meta.get("id"), meta.get(HOLDER.get(st, "to"), "?"), meta.get("title", ""),
                      f"{last.get('at', '')} {last.get('actor', '')}".strip() + flag))
     return rows, unauthorized
@@ -112,11 +125,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", type=pathlib.Path, default=pathlib.Path("."))
     ap.add_argument("--no-fetch", action="store_true")
+    ap.add_argument("--stale-hours", type=float, default=24,
+                    help="flag a sent handoff with no acknowledgement, or a claimed one with no log line, after this long (default 24)")
     a = ap.parse_args()
     root, gaps = a.root, []
 
     fresh = freshness(root, not a.no_fetch, gaps)
-    rows, unauthorized = handoffs(root, gaps)
+    rows, unauthorized = handoffs(root, gaps, a.stale_hours)
     decs = jsonl(root / "governance" / "decisions.jsonl", gaps)
     chs = jsonl(root / "governance" / "challenges.jsonl", gaps)
     superseded = {x.get("supersedes") for x in decs if x.get("supersedes")}
