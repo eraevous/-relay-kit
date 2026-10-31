@@ -439,6 +439,60 @@ def governance_tests():
          run(LEDGER, "--dir", d, "check")[0] != 0 and setstate(d, "sent", "claude:relay-kit", "x")[0] != 0)
 
 
+# ---------------- status (starting back up) ----------------
+def status_tests():
+    st = KIT / "tools" / "status.py"
+    r = TMP / "status-root"
+    d = ledger_dir("status")                      # fixture: prepared, Authorized filled
+    shutil.copytree(d, r / "handoffs")
+    fx = FIXTURE.read_text(encoding="utf-8")
+    unauth = re.sub(r"(## Authorized[ \t]*\n).*?(?=^## )", r"\1TODO: NOT AUTHORIZED YET.\n\n", fx.replace(HID, "HO-20261028-002"), flags=re.S | re.M)
+    (r / "handoffs" / "HO-20261028-002.md").write_text(unauth, encoding="utf-8")
+    (r / "handoffs" / "outputs" / f"{HID}.md").write_text("result\n", encoding="utf-8")
+    (r / "governance").mkdir()
+    rows = [dict(id="DEC-001", date="2026-10-28", status="proposed", decision="old idea", scope="s"),
+            dict(id="DEC-002", date="2026-10-29", status="adopted", decision="replaces old idea", scope="s", supersedes="DEC-001",
+                 decider="owner", basis='"yes"', locator="chat"),
+            dict(id="DEC-003", date="2026-10-30", status="proposed", decision="pending idea", scope="s")]
+    (r / "governance" / "decisions.jsonl").write_text("".join(json.dumps(x) + "\n" for x in rows), encoding="utf-8")
+    chs = [dict(id="CH-001", date="2026-10-29", status="open", concern="first worry", raised_by="x"),
+           dict(id="CH-002", date="2026-10-30", status="resolved", concern="first worry fixed", raised_by="x", resolution="fixed", resolves="CH-001"),
+           dict(id="CH-003", date="2026-10-30", status="open", concern="second worry", raised_by="x")]
+    (r / "governance" / "challenges.jsonl").write_text("".join(json.dumps(x) + "\n" for x in chs), encoding="utf-8")
+    bad = TMP / "gov-bad-resolves"; bad.mkdir()
+    (bad / "challenges.jsonl").write_text(json.dumps(dict(chs[1], id="CH-001", resolves="CH-009")) + "\n", encoding="utf-8")
+    chk = KIT / "tools" / "check_ledgers.py"
+    case("ledgers: 'resolves' must name an earlier challenge",
+         run(chk, "--dir", r / "governance")[0] == 0 and run(chk, "--dir", bad)[0] != 0)
+    before = {p: p.read_bytes() for p in r.rglob("*") if p.is_file()}
+    rc, out, err = run(st, "--root", r, "--no-fetch")
+    waiting = out.split("== Waiting on the owner")[1].split("==")[0] if "== Waiting on the owner" in out else ""
+    case("status: lists unsuperseded proposals and unauthorized handoffs as waiting on the owner",
+         rc == 0 and "DEC-003" in waiting and "DEC-001" not in waiting and "HO-20261028-002" in waiting and HID not in waiting, out + err)
+    case("status: flags a handoff whose output is filed but whose state was never closed",
+         re.search(rf"{HID} .*OUTPUT FILED, state not closed", out) is not None, out)
+    open_part = out.split("== Open challenges")[1].split("==")[0] if "== Open challenges" in out else ""
+    case("status: a challenge closed by a later 'resolves' line isn't listed as open",
+         "CH-003" in open_part and "CH-001" not in open_part, open_part)
+    case("status: says what it couldn't check (no git, no index) and changes nothing",
+         all(k in out for k in ("not a git repository", "threads.md"))
+         and before == {p: p.read_bytes() for p in r.rglob("*") if p.is_file()}, out)
+
+    g = lambda cwd, *a: subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                                        capture_output=True, text=True)
+    remote, c1, c2 = TMP / "st-remote.git", TMP / "st-c1", TMP / "st-c2"
+    g(TMP, "init", "-q", "--bare", "-b", "main", str(remote))
+    g(TMP, "clone", "-q", str(remote), str(c1))
+    g(c1, "checkout", "-q", "-b", "main"); (c1 / "threads.md").write_text("# index\n- 2026-10-31 | x | created\n", encoding="utf-8")
+    g(c1, "add", "."); g(c1, "commit", "-qm", "a"); g(c1, "push", "-q", "-u", "origin", "main")
+    g(TMP, "clone", "-q", str(remote), str(c2))
+    (c1 / "threads.md").write_text("# index\n- 2026-10-31 | x | created\n- 2026-10-31 | y | moved\n", encoding="utf-8")
+    g(c1, "commit", "-qam", "b"); g(c1, "push", "-q")
+    rc, out, err = run(st, "--root", c2)
+    case("status: a copy behind the shared one is told to pull first",
+         rc == 0 and "1 behind" in out and "PULL FIRST" in out and "last change: - 2026-10-31 | x | created" in out, out + err)
+
+
 # ---------------- telemetry ----------------
 def telemetry_tests():
     tel = load("telemetry", X / "chat-telemetry" / "01_chat_telemetry.py")
@@ -490,6 +544,7 @@ if __name__ == "__main__":
     live_fixture_tests()
     schema_tests()
     governance_tests()
+    status_tests()
     telemetry_tests()
     evidence_tests()
     failed = [r for r in RESULTS if not r[1]]
