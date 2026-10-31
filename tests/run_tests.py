@@ -455,6 +455,15 @@ def status_tests():
                  decider="owner", basis='"yes"', locator="chat"),
             dict(id="DEC-003", date="2026-10-30", status="proposed", decision="pending idea", scope="s")]
     (r / "governance" / "decisions.jsonl").write_text("".join(json.dumps(x) + "\n" for x in rows), encoding="utf-8")
+    chs = [dict(id="CH-001", date="2026-10-29", status="open", concern="first worry", raised_by="x"),
+           dict(id="CH-002", date="2026-10-30", status="resolved", concern="first worry fixed", raised_by="x", resolution="fixed", resolves="CH-001"),
+           dict(id="CH-003", date="2026-10-30", status="open", concern="second worry", raised_by="x")]
+    (r / "governance" / "challenges.jsonl").write_text("".join(json.dumps(x) + "\n" for x in chs), encoding="utf-8")
+    bad = TMP / "gov-bad-resolves"; bad.mkdir()
+    (bad / "challenges.jsonl").write_text(json.dumps(dict(chs[1], id="CH-001", resolves="CH-009")) + "\n", encoding="utf-8")
+    chk = KIT / "tools" / "check_ledgers.py"
+    case("ledgers: 'resolves' must name an earlier challenge",
+         run(chk, "--dir", r / "governance")[0] == 0 and run(chk, "--dir", bad)[0] != 0)
     before = {p: p.read_bytes() for p in r.rglob("*") if p.is_file()}
     rc, out, err = run(st, "--root", r, "--no-fetch")
     waiting = out.split("== Waiting on the owner")[1].split("==")[0] if "== Waiting on the owner" in out else ""
@@ -462,8 +471,11 @@ def status_tests():
          rc == 0 and "DEC-003" in waiting and "DEC-001" not in waiting and "HO-20261028-002" in waiting and HID not in waiting, out + err)
     case("status: flags a handoff whose output is filed but whose state was never closed",
          re.search(rf"{HID} .*OUTPUT FILED, state not closed", out) is not None, out)
-    case("status: says what it couldn't check (no git, no challenges, no index) and changes nothing",
-         all(k in out for k in ("not a git repository", "challenges.jsonl", "threads.md"))
+    open_part = out.split("== Open challenges")[1].split("==")[0] if "== Open challenges" in out else ""
+    case("status: a challenge closed by a later 'resolves' line isn't listed as open",
+         "CH-003" in open_part and "CH-001" not in open_part, open_part)
+    case("status: says what it couldn't check (no git, no index) and changes nothing",
+         all(k in out for k in ("not a git repository", "threads.md"))
          and before == {p: p.read_bytes() for p in r.rglob("*") if p.is_file()}, out)
 
     g = lambda cwd, *a: subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *a],

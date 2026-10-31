@@ -121,7 +121,8 @@ def main():
     chs = jsonl(root / "governance" / "challenges.jsonl", gaps)
     superseded = {x.get("supersedes") for x in decs if x.get("supersedes")}
     waiting = [x for x in decs if x.get("status") == "proposed" and x.get("id") not in superseded]
-    open_ch = [x for x in chs if x.get("status") == "open"]
+    closed = {x.get("resolves") for x in chs if x.get("resolves")}
+    open_ch = [x for x in chs if x.get("status") == "open" and x.get("id") not in closed]
 
     print("== Copy")
     print(fresh or "unknown (see Not checked)")

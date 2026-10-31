@@ -21,6 +21,7 @@ challenges.jsonl, one object per line:
   concern   the objection
   raised_by who raised it
   resolution required unless open
+  resolves  optional: an earlier CH id this line closes (the earlier line stays as written)
 
 With --git, also checks that both files only grew since the last commit, or since
 --base REF (append-only):
@@ -85,7 +86,12 @@ def check_decisions(rows):
 
 def check_challenges(rows):
     out = check_ids("challenges.jsonl", rows, "CH")
+    seen = set()
     for n, r in rows:
+        res = r.get("resolves")
+        if res and res not in seen:
+            out.append(f"challenges.jsonl:{n}: resolves {res!r}, which isn't an earlier challenge")
+        seen.add(r.get("id"))
         where = f"challenges.jsonl:{n}"
         if r.get("status") not in CH_STATUS:
             out.append(f"{where}: status must be one of {sorted(CH_STATUS)}")
