@@ -62,6 +62,18 @@ JavaScript in a signed-in page, such as Claude's built-in browser or Claude in C
 - **Time zone:** defaults to America/Chicago; pass `--tz`. Without IANA time zone data
   (e.g. Windows without `tzdata`), the scripts fall back to UTC and say so.
 
+## Starting back up
+
+After closing a session or restarting, the records are the state; no chat has to be
+open. From a fresh clone of the private records (and any copy of this kit):
+
+    python3 tools/status.py --root path/to/records
+
+It fetches, then prints whether this copy is behind the shared one, what waits on the
+owner (proposed decisions, handoffs nobody is authorized to start), open handoffs and who
+holds each, open challenges, the coordination index's last change, and what it couldn't
+check. It changes nothing. A new assistant session can run it as its first step.
+
 ## Docs
 
 - [Conversation schema](docs/conversation-schema.md): the shared format and message ids (`T3a2`).
