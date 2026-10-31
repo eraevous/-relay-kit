@@ -79,6 +79,8 @@ check. It changes nothing. A new assistant session can run it as its first step.
 - [Conversation schema](docs/conversation-schema.md): the shared format and message ids (`T3a2`).
 - [Marking pasted material](docs/paste-markers.md): phone-friendly `FROM:` … `END FROM` blocks.
 - [Cold catch-up test](docs/cold-test.md): checking whether a fresh assistant can pick up a handoff.
+- [Prior art](docs/prior-art.md): the established patterns for collisions, races, timeouts and
+  handoffs, and where the kit stands on each.
 
 ## Tests
 

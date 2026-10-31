@@ -477,6 +477,11 @@ def status_tests():
     case("status: says what it couldn't check (no git, no index) and changes nothing",
          all(k in out for k in ("not a git repository", "threads.md"))
          and before == {p: p.read_bytes() for p in r.rglob("*") if p.is_file()}, out)
+    sent = setstate(r / "handoffs", "sent", "claude:relay-kit", "delivered")
+    rc1, fresh, _ = run(st, "--root", r, "--no-fetch")
+    rc2, late, _ = run(st, "--root", r, "--no-fetch", "--stale-hours", "-1")
+    case("status: a sent handoff with no acknowledgement is flagged only after the timeout",
+         sent[0] == 0 and "NO ACK" not in fresh and re.search(rf"{HID} +sent .*NO ACK for", late) is not None, sent[2] + late)
 
     g = lambda cwd, *a: subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *a],
                                         capture_output=True, text=True)
