@@ -31,18 +31,28 @@ async function sendWait(s) {
   };
   const send = button('Send message', () => clicked.push('message'));
   const other = button('Send feedback', () => clicked.push('feedback'));
-  const buttons = s.feedbackFirst ? [other, send] : [send];
+  const buttons = s.noSendInForm ? [] : s.feedbackFirst ? [other, send] : [send];
   if (s.stopButton) buttons.push(button('Stop streaming', () => {}));
+  const outside = button('Send message', () => clicked.push('outside-form'));   // e.g. a Send in some other widget
+  const form = { querySelectorAll: (sel) => (sel === 'button' ? buttons.filter((b) => b !== other || s.feedbackInForm) : []) };
+  const composerEl = { offsetParent: {}, getClientRects: () => [1], closest: (sel) => (/form/.test(sel) ? form : null) };
+  const composerSels = /prompt|chat-input|ProseMirror|textbox|textarea|contenteditable/;
+  const form2 = { querySelectorAll: () => [button('Send message', () => clicked.push('form2'))] };
+  const composerEl2 = { offsetParent: {}, getClientRects: () => [1], closest: (sel) => (/form/.test(sel) ? form2 : null) };
+  const wb = { offsetParent: {}, getClientRects: () => [1], closest: (sel) => (/form|fieldset/.test(sel) ? null : {}) };   // a writing block
   const context = {
-    document: { querySelectorAll: (sel) => (sel === 'button' ? buttons : polls && !/prompt|chat-input|ProseMirror|textbox/.test(sel) ? [reply] : []) },
+    document: { querySelectorAll: (sel) => (sel === 'button' ? [outside, ...buttons]
+      : composerSels.test(sel) ? (s.writingBlockFirst && /ProseMirror/.test(sel) ? [wb]
+        : s.noComposer || sel !== 'textarea' ? [] : s.twoForms ? [composerEl, composerEl2] : [composerEl])
+      : polls ? [reply] : []) },
     location: { href: 'https://example.invalid/fixture' },
     Date: { now: () => elapsed },
     setTimeout: (cb) => { elapsed += 1500; polls += 1; cb(); },
   };
   const src = fs.readFileSync(path.join(KIT, 'extracted', 'chat-relay', '02_send_wait.js'), 'utf8')
     .replace('MODE_PLACEHOLDER', JSON.stringify('send')).replace('BASELINE_PLACEHOLDER', '0');
-  const out = await vm.runInNewContext(src, context, { timeout: 2000 });
-  return { ...out, clicked };
+  try { return { ...(await vm.runInNewContext(src, context, { timeout: 2000 })), clicked }; }
+  catch (e) { return { error: String(e.message || e), clicked }; }
 }
 
 async function scrape(messages) {
@@ -65,6 +75,10 @@ async function scrape(messages) {
 
 // A tiny page: `els` maps a selector to the elements it returns. Each element knows its form
 // (or none) and whether it sits inside a message, which is all the composer rules look at.
+function mkForm(name, buttons = [button('Send message', () => {})]) {
+  return { name, querySelectorAll: (sel) => (sel === 'button' ? buttons : []) };
+}
+
 function textarea(form, track) {
   let value = '';
   const proto = { set value(t) { value = t; track.push(['set', form && form.name]); }, get value() { return value; } };
@@ -81,13 +95,14 @@ function writingBlock(track) {   // editable, visible, inside a message, not in 
 
 async function fill(els = null) {
   const track = [];
-  const form = { name: 'composer-form' };
+  const form = mkForm('composer-form');
   const page = els ? els(track) : { '#prompt-textarea': [textarea(form, track)] };
   const context = {
     document: { querySelectorAll: (s) => (s === 'button' ? [button('Send feedback', () => {}), button('Send message', () => {})] : page[s] || []),
                 execCommand: () => track.push(['execCommand']) },
     window: { getSelection: () => ({ selectAllChildren: () => {}, deleteFromDocument: () => {} }) },
-    Event: class {}, DataTransfer: class { setData() {} }, ClipboardEvent: class {}, setTimeout: (cb) => cb(),
+    Event: class {}, DataTransfer: class { setData(_, v) { this.v = v; } },
+    ClipboardEvent: class { constructor(_, o) { this.text = o && o.clipboardData && o.clipboardData.v; } }, setTimeout: (cb) => cb(),
   };
   const src = fs.readFileSync(path.join(KIT, 'extracted', 'chat-relay', '01_fill.js'), 'utf8')
     .replace('TEXT_PLACEHOLDER', JSON.stringify('A bounded test.\nSecond line.'));
@@ -99,14 +114,34 @@ async function fill(els = null) {
   const f = await fill();
   check('fill: textarea filled and the real Send button found', f.matches && f.send_enabled, f);
   // CH-011: a visible writing block comes first in the selector order; the composer is a textarea in the form.
-  let w = await fill((t) => ({ 'div.ProseMirror[contenteditable="true"]': [writingBlock(t)], 'textarea': [textarea({ name: 'f1' }, t)] }));
+  let w = await fill((t) => ({ 'div.ProseMirror[contenteditable="true"]': [writingBlock(t)], 'textarea': [textarea(mkForm('f1'), t)] }));
   check('fill: skips a writing block outside the form and fills the composer in it',
     w.matches && w.composer === 'textarea' && w.skipped_outside_form === 1 && !w.track.some(([, who]) => who === 'writing-block'), w);
   w = await fill((t) => ({ 'div.ProseMirror[contenteditable="true"]': [writingBlock(t)] }));
   check('fill: with only a writing block on the page it refuses, touching nothing',
     /not found inside an input form/.test(w.error || '') && w.track.length === 0, w);
-  w = await fill((t) => ({ '#prompt-textarea': [textarea({ name: 'f1' }, t)], 'textarea': [textarea({ name: 'f2' }, t)] }));
+  w = await fill((t) => ({ '#prompt-textarea': [textarea(mkForm('f1'), t)], 'textarea': [textarea(mkForm('f2'), t)] }));
   check('fill: two input forms with composers: it refuses to guess', /2 input forms/.test(w.error || '') && w.track.length === 0, w);
+  // An edit box inside a form but inside a message (ChatGPT's edit-message box) isn't the composer.
+  w = await fill((t) => {
+    const edit = textarea(mkForm('edit-form'), t);
+    edit.closest = (sel) => (/form/.test(sel) ? { name: 'edit-form', querySelectorAll: () => [] } : /article|data-turn/.test(sel) ? {} : null);
+    return { '#prompt-textarea': [edit], 'textarea': [textarea(mkForm('f1'), t)] };
+  });
+  check('fill: an editable inside a form but inside a message is skipped',
+    w.matches && w.composer === 'textarea' && !w.track.some(([, who]) => who === 'edit-form'), w);
+  // Claude.ai-style: a contenteditable composer in a fieldset is still found and filled.
+  w = await fill((t) => {
+    const fs_ = mkForm('fieldset');
+    const ce = { tagName: 'DIV', offsetParent: {}, getClientRects: () => [1], className: 'ProseMirror', innerText: '',
+      focus: () => t.push(['focus', 'fieldset']), closest: (sel) => (/fieldset/.test(sel) ? fs_ : null),
+      dispatchEvent(ev) { this.innerText = ev.text || ''; t.push(['paste', 'fieldset']); } };
+    return { 'fieldset [contenteditable="true"]': [ce] };
+  });
+  check('fill: a composer in a fieldset (Claude.ai style) is found and filled', w.matches && w.composer === 'fieldset [contenteditable="true"]', w);
+  // A Send button outside the composer's form doesn't count as the composer's Send.
+  w = await fill((t) => ({ 'textarea': [textarea(mkForm('f1', []), t)] }));
+  check('fill: no Send in the composer\'s form means send_button false, even with one elsewhere', w.matches && w.send_button === false, w);
 
   let r = await sendWait({ text: 'Finished response.', completeValue: '' });
   check('relay: explicit ChatGPT completion -> done', r.status === 'done', r);
@@ -121,6 +156,14 @@ async function fill(els = null) {
   check('relay: a visible stop button overrides a completion attribute', r.status !== 'done', r);
   r = await sendWait({ text: 'Unrelated.', completeValue: '', feedbackFirst: true });
   check('relay: clicks "Send message", never "Send feedback"', r.clicked.join() === 'message', r.clicked);
+  r = await sendWait({ text: 'x', completeValue: '', noSendInForm: true });
+  check('relay: never clicks a Send button outside the composer\'s form', r.error && r.clicked.length === 0, r);
+  r = await sendWait({ text: 'Finished.', completeValue: '', writingBlockFirst: true });
+  check('relay: a writing block ahead of the composer doesn\'t stop it finding the right Send', r.clicked.join() === 'message', r);
+  r = await sendWait({ text: 'x', completeValue: '', twoForms: true });
+  check('relay: two input forms with composers: it clicks nothing', /More than one input form/.test(r.error || '') && r.clicked.length === 0, r);
+  r = await sendWait({ text: 'x', completeValue: '', noComposer: true });
+  check('relay: with no composer in a form it clicks nothing', /Composer not found/.test(r.error || '') && r.clicked.length === 0, r);
   r = await sendWait({ text: 'Generating.', streaming: 'true' });
   check('relay: streaming reply stays pending', r.status === 'pending', r);
 

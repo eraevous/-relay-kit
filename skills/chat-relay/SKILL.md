@@ -88,13 +88,14 @@ The scripts try all of these. On the first successful run of an unverified row, 
   const MSG = '[data-message-author-role], [data-content-search-unit-key], [data-turn], article, .font-claude-response';
   const area = (e) => (e.closest && e.closest('form, fieldset')) || null;
   const usable = (e) => vis(e) && area(e) && !e.closest(MSG);
-  let box = null, via = null, skipped = 0;
-  const others = [];
+  let box = null, via = null;
+  const others = [], skippedSet = new Set();
   for (const s of cands) for (const e of document.querySelectorAll(s)) {
     if (!vis(e)) continue;
-    if (!usable(e)) { skipped++; continue; }
+    if (!usable(e)) { skippedSet.add(e); continue; }
     if (!box) { box = e; via = s; } else if (area(e) !== area(box) && !others.includes(e)) others.push(e);
   }
+  const skipped = skippedSet.size;
   if (!box) throw new Error(`Composer not found inside an input form (${skipped} editable area(s) elsewhere skipped, e.g. writing blocks). Use the find tool ("Ask", "Message") and check the target before typing.`);
   if (others.length) throw new Error(`${others.length + 1} input forms have a composer; not guessing which. Use the find tool and check the target.`);
   box.focus();
@@ -120,10 +121,8 @@ The scripts try all of these. On the first successful run of an unverified row, 
   const norm = (s) => s.replace(/\s+/g, ' ').trim();
   const isSend = (b) => vis(b) && (/^send( message| prompt)?$/i.test((b.getAttribute('aria-label') || '').trim())
     || /^send-button$/.test(b.getAttribute('data-testid') || ''));
-  let sendBtn = null;
-  for (let el = box, i = 0; el && !sendBtn && i < 8; i++, el = el.parentElement)
-    if (el.querySelectorAll) sendBtn = [...el.querySelectorAll('button')].find(isSend) || null;
-  sendBtn = sendBtn || [...document.querySelectorAll('button')].find(isSend) || null;
+  // Only the composer's own form counts: a Send button elsewhere is someone else's.
+  const sendBtn = [...area(box).querySelectorAll('button')].find(isSend) || null;
   return { composer: via, skipped_outside_form: skipped, method, expected_chars: TEXT.length, got_chars: got.length,
            matches: norm(got) === norm(TEXT), send_button: !!sendBtn, send_enabled: !!sendBtn && !sendBtn.disabled };
 })(TEXT_PLACEHOLDER)
@@ -148,20 +147,27 @@ The scripts try all of these. On the first successful run of an unverified row, 
   const SEND_LABEL = /^send( message| prompt)?$/i;
   const isSend = (b) => vis(b) && (SEND_LABEL.test((b.getAttribute('aria-label') || '').trim())
     || /^send-button$/.test(b.getAttribute('data-testid') || ''));
-  const composerSel = ['#prompt-textarea', 'textarea[name="prompt"]', '[data-testid="chat-input"]',
-    'div.ProseMirror[contenteditable="true"]', '[contenteditable="true"][role="textbox"]'];
+  const composerSel = ['#prompt-textarea', 'textarea[name="prompt"]', 'textarea#mobile-composer-prompt',   // same list as fill.js
+    '[data-testid="chat-input"]', 'div.ProseMirror[contenteditable="true"]',
+    '[contenteditable="true"][role="textbox"]', 'fieldset [contenteditable="true"]', 'textarea'];
   const MSG = '[data-message-author-role], [data-content-search-unit-key], [data-turn], article, .font-claude-response';
   const inForm = (e) => vis(e) && e.closest && e.closest('form, fieldset') && !e.closest(MSG);   // never a writing block (CH-011)
-  const composer = () => { for (const s of composerSel) { const e = [...document.querySelectorAll(s)].find(inForm); if (e) return e; } return null; };
-  const sendButton = () => {
-    // Prefer a Send button near the composer, so "Send feedback" and similar elsewhere are never clicked.
-    let el = composer();
-    for (let i = 0; el && i < 8; i++, el = el.parentElement) {
-      if (!el.querySelectorAll) continue;
-      const b = [...el.querySelectorAll('button')].find(isSend);
-      if (b) return b;
+  const composer = () => {   // exactly one input form may hold a composer, as in fill.js
+    let first = null;
+    for (const s of composerSel) for (const e of document.querySelectorAll(s)) {
+      if (!inForm(e)) continue;
+      if (!first) first = e;
+      else if (e.closest('form, fieldset') !== first.closest('form, fieldset'))
+        throw new Error('More than one input form has a composer: not guessing which Send to click. Check the page.');
     }
-    return [...document.querySelectorAll('button')].find(isSend) || null;
+    return first;
+  };
+  const sendButton = () => {
+    // Only a Send button in the composer's own form or fieldset, so "Send feedback" and any
+    // Send elsewhere on the page are never clicked. No composer, no click.
+    const c = composer();
+    if (!c) throw new Error('Composer not found inside an input form: not clicking any Send button. Check the page.');
+    return [...c.closest('form, fieldset').querySelectorAll('button')].find(isSend) || null;
   };
   const replySel = [
     '[data-content-search-unit-key$=":assistant"]',                                 // ChatGPT, 2026-10 markup

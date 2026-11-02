@@ -75,9 +75,12 @@ def freshness(root, fetch, gaps):
 
 
 def age_hours(at):
+    """Hours since a log time, or None if it isn't a time with a zone (never crash on a bad line)."""
     try:
-        t = dt.datetime.fromisoformat(at.replace("Z", "+00:00"))
+        t = dt.datetime.fromisoformat(str(at).replace("Z", "+00:00"))
     except ValueError:
+        return None
+    if t.tzinfo is None:
         return None
     return (dt.datetime.now(dt.timezone.utc) - t).total_seconds() / 3600
 
@@ -203,15 +206,57 @@ def ci_state(root, gaps):
     return text, None if ack else f"RED {head}: failing checks nobody has acknowledged (comment on the alert issue)"
 
 
-def hits(targets, patterns):
-    """Pairs (target, pattern) that overlap: a target matches a glob, or a glob matches a target
-    (both directions, so 'src/api/*' and 'src/api/client.py' meet either way)."""
+def norm(x, base=None):
+    """One spelling per thing: URLs lose query, fragment and trailing slash; paths use '/', lose
+    './' and a trailing '/', and are made relative to `base` (the repo) when absolute inside it."""
+    x = x.strip()
+    if "://" in x:
+        return re.sub(r"[?#].*$", "", x).rstrip("/")
+    x = x.replace("\\", "/")
+    if base is not None and x.startswith("/"):
+        try:
+            x = pathlib.Path(x).resolve().relative_to(pathlib.Path(base).resolve()).as_posix()
+        except ValueError:
+            pass
+    while x.startswith("./"):
+        x = x[2:]
+    return x.rstrip("/") or x
+
+
+GLOB = re.compile(r"[*?\[]")
+
+
+def covers(pat, path):
+    return path == pat or fnmatch.fnmatch(path, pat) or path.startswith(pat + "/")
+
+
+def hits(targets, patterns, files=()):
+    """Pairs (target, pattern) that overlap, both already normalized. Glob semantics are fnmatch's:
+    '*' also crosses '/', so 'src/*.py' covers 'src/a/b.py'. A plain directory covers what's under
+    it ('src/db' and 'src/db/models.py'), and a glob matches a target in either direction. Two
+    globs overlap when some tracked file (`files`) matches both ('src/*/client.py' and
+    'src/api/*.py' meet at src/api/client.py)."""
     out = []
     for t in targets:
         for pat in patterns:
-            if t == pat or fnmatch.fnmatch(t, pat) or fnmatch.fnmatch(pat, t):
+            if covers(pat, t) or covers(t, pat) or (GLOB.search(t) and GLOB.search(pat)
+                                                     and any(covers(t, f) and covers(pat, f) for f in files)):
                 out.append((t, pat))
     return out
+
+
+def gh_pages(path, per_page, gaps, what, max_pages=5):
+    """All pages of a list endpoint, up to max_pages; says so in gaps if it stopped early."""
+    rows = []
+    for page in range(1, max_pages + 1):
+        got = api(f"{path}{'&' if '?' in path else '?'}per_page={per_page}&page={page}")
+        if not isinstance(got, list):
+            raise ValueError(f"unexpected reply for {path}")
+        rows += got
+        if len(got) < per_page:
+            return rows
+    gaps.append(f"{what}: stopped after {max_pages * per_page}; later ones weren't read")
+    return rows
 
 
 def overlaps(root, targets, me, lane, hours, repo_dir, gaps):
@@ -219,8 +264,19 @@ def overlaps(root, targets, me, lane, hours, repo_dir, gaps):
     Reads only what exists: handoffs' optional `touches:`, recent log lines from other sessions in
     the lane, open pull requests' changed files, and failing checks where the files live."""
     led, out = load_ledger(), []
-    me_base, me_session = (me.split("#", 1) + [""])[:2] if me else ("", "")
+    parsed_me = led.parse_actor(me) if me else None
+    me_base, me_session = (parsed_me[0], parsed_me[1] or "") if parsed_me else ("", "")
+    if not lane and parsed_me and not parsed_me[1]:
+        gaps.append(f"RELAYKIT_ACTOR '{me}' has no session (the owner?): pass --lane to look for other sessions")
+        me_base = ""
     lane = (lane or me_base).lower()
+    targets = [norm(t, repo_dir) for t in targets]
+    tracked = []
+    if any(GLOB.search(t) for t in targets):   # two globs can only be compared through real files
+        try:
+            tracked = git(repo_dir, "ls-files").splitlines()
+        except (RuntimeError, FileNotFoundError):
+            gaps.append("not a git checkout: a glob was compared with other globs by text only")
     recent = {}
     d = root / "handoffs"
     for p in sorted(d.glob("HO-*.md")) if d.is_dir() else []:
@@ -230,8 +286,8 @@ def overlaps(root, targets, me, lane, hours, repo_dir, gaps):
             continue
         hid, st = led.alias(meta.get("id", p.stem)), meta.get("status", "?")
         if st not in led.FINAL and meta.get("touches"):
-            pats = [x.strip() for x in meta["touches"].split(",") if x.strip()]
-            for t, pat in hits(targets, pats):
+            pats = [norm(x) for x in meta["touches"].split(",") if x.strip()]   # a comma inside a URL: write %2C
+            for t, pat in hits(targets, pats, tracked):
                 holder = meta.get(HOLDER.get(st, "to"), "?")
                 out.append(f"handoff {hid} ({st}, with {holder}) touches {pat}: matches {t}")
         for e in log:
@@ -251,13 +307,14 @@ def overlaps(root, targets, me, lane, hours, repo_dir, gaps):
     repo = github_repo(repo_dir, gaps, "open pull requests") if files else None
     if repo:
         try:
-            for pr in api(f"repos/{repo}/pulls?state=open&per_page=50"):
-                changed = [f.get("filename", "") for f in api(f"repos/{repo}/pulls/{pr['number']}/files?per_page=100")]
-                for t, pat in hits(files, changed):
+            for pr in gh_pages(f"repos/{repo}/pulls?state=open", 50, gaps, f"open pull requests on {repo}"):
+                changed = [f.get("filename", "") for f in gh_pages(f"repos/{repo}/pulls/{pr['number']}/files", 100, gaps,
+                                                                   f"files of PR #{pr['number']}")]
+                for t, pat in hits(files, changed, tracked):
                     out.append(f"open PR #{pr['number']} ({pr.get('user', {}).get('login', '?')}: {pr.get('title', '')[:60]}) changes {pat}")
-        except (RuntimeError, ValueError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        except (RuntimeError, ValueError, TypeError, KeyError, FileNotFoundError, subprocess.TimeoutExpired) as e:
             gaps.append(f"open pull requests on {repo} weren't read ({str(e).splitlines()[0] if str(e) else e})")
-    if repo and pathlib.Path(repo_dir).resolve() != pathlib.Path(root).resolve():
+    if repo and pathlib.Path(repo_dir).resolve() != pathlib.Path(root).resolve():   # root's own checks are shown above
         line, _ = ci_state(repo_dir, gaps)
         if line and line.startswith("RED"):
             out.append(f"failing checks where these files live: {line.splitlines()[0]}")

@@ -12,13 +12,14 @@
   const MSG = '[data-message-author-role], [data-content-search-unit-key], [data-turn], article, .font-claude-response';
   const area = (e) => (e.closest && e.closest('form, fieldset')) || null;
   const usable = (e) => vis(e) && area(e) && !e.closest(MSG);
-  let box = null, via = null, skipped = 0;
-  const others = [];
+  let box = null, via = null;
+  const others = [], skippedSet = new Set();
   for (const s of cands) for (const e of document.querySelectorAll(s)) {
     if (!vis(e)) continue;
-    if (!usable(e)) { skipped++; continue; }
+    if (!usable(e)) { skippedSet.add(e); continue; }
     if (!box) { box = e; via = s; } else if (area(e) !== area(box) && !others.includes(e)) others.push(e);
   }
+  const skipped = skippedSet.size;
   if (!box) throw new Error(`Composer not found inside an input form (${skipped} editable area(s) elsewhere skipped, e.g. writing blocks). Use the find tool ("Ask", "Message") and check the target before typing.`);
   if (others.length) throw new Error(`${others.length + 1} input forms have a composer; not guessing which. Use the find tool and check the target.`);
   box.focus();
@@ -44,10 +45,8 @@
   const norm = (s) => s.replace(/\s+/g, ' ').trim();
   const isSend = (b) => vis(b) && (/^send( message| prompt)?$/i.test((b.getAttribute('aria-label') || '').trim())
     || /^send-button$/.test(b.getAttribute('data-testid') || ''));
-  let sendBtn = null;
-  for (let el = box, i = 0; el && !sendBtn && i < 8; i++, el = el.parentElement)
-    if (el.querySelectorAll) sendBtn = [...el.querySelectorAll('button')].find(isSend) || null;
-  sendBtn = sendBtn || [...document.querySelectorAll('button')].find(isSend) || null;
+  // Only the composer's own form counts: a Send button elsewhere is someone else's.
+  const sendBtn = [...area(box).querySelectorAll('button')].find(isSend) || null;
   return { composer: via, skipped_outside_form: skipped, method, expected_chars: TEXT.length, got_chars: got.length,
            matches: norm(got) === norm(TEXT), send_button: !!sendBtn, send_enabled: !!sendBtn && !sendBtn.disabled };
 })(TEXT_PLACEHOLDER)

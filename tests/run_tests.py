@@ -790,6 +790,31 @@ def coordination_tests():
     case("case C decoys: your own session isn't a warning; unrelated files and other lanes are silent; a thread URL claim is seen",
          "another session" not in o1 and "touches src/api/*.py" in o1 and "none found" in oo
          and "touches https://chatgpt.com/c/thread-x" in ot and "open PR" not in ot, o1 + "\n--\n" + oo + "\n--\n" + ot)
+    # Review of #7: one thing, several spellings; a bad log time doesn't stop status.
+    h_db = run(LEDGER, "--dir", hd, "new", "--from", "claude:aec", "--to", "codex:aec", "--title", "db",
+               "--touches", "src/db", env=env_s1)[1]
+    spell = {"./src/api/client.py": "touches src/api/*.py", str(c1 / "src" / "api" / "client.py"): "touches src/api/*.py",
+             "src\\api\\client.py": "touches src/api/*.py", "src/db/models.py": "touches src/db",
+             "https://chatgpt.com/c/thread-x/?model=x": "touches https://chatgpt.com/c/thread-x"}
+    seen = {t: over(run(st_, "--root", c1, "--repo", c1, "--no-fetch", "--no-ci", "--touching", t,
+                        env=dict(envc, RELAYKIT_ACTOR="claude:mtg#s5"))[1]) for t in spell}
+    case("case C: ./paths, absolute paths, backslashes, a directory claim and a URL with a query all match",
+         all(want in seen[t] for t, want in spell.items()) and "open PR #12" in seen["./src/api/client.py"]
+         and "open PR #12" in seen[str(c1 / "src" / "api" / "client.py")], json.dumps(seen, indent=1))
+    (c1 / "src" / "api").mkdir(parents=True); (c1 / "src" / "api" / "client.py").write_text("x\n")
+    g(c1, "add", "src"); g(c1, "commit", "-qm", "code")
+    globs = over(run(st_, "--root", c1, "--repo", c1, "--no-fetch", "--no-ci", "--touching", "src/*/client.py",
+                     env=dict(envc, RELAYKIT_ACTOR="claude:mtg#s5"))[1])
+    nomatch = over(run(st_, "--root", c1, "--repo", c1, "--no-fetch", "--no-ci", "--touching", "lib/*/client.py",
+                       env=dict(envc, RELAYKIT_ACTOR="claude:mtg#s5"))[1])
+    case("case C: two globs overlap when a tracked file matches both; globs meeting no common file don't",
+         "touches src/api/*.py: matches src/*/client.py" in globs and "none found" in nomatch, globs + "\n--\n" + nomatch)
+    f_db = hd / f"{h_db}.md"
+    f_db.write_text(f_db.read_text(encoding="utf-8").replace("| prepared |", "| prepared |", 1)
+                    + "- 2026-11-02T17:25 | sent | claude:aec#s9 | no time zone\n", encoding="utf-8")
+    rc_bad, out_bad, err_bad = run(st_, "--root", c1, "--no-fetch", "--no-ci", "--touching", "src/db/x.py",
+                                   env=dict(envc, RELAYKIT_ACTOR="claude:aec#s2"))
+    case("status: a log time without a zone doesn't crash it", rc_bad == 0 and "== Not checked" in out_bad, err_bad[-300:])
     stale = [sk.name + "/" + f.name for sk in (KIT / "skills").iterdir() if (sk / "scripts").is_dir()
              for f in (sk / "scripts").glob("*") if f.is_file()
              and (not (X / sk.name / f.name).exists() or (X / sk.name / f.name).read_bytes() != f.read_bytes())]
