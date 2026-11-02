@@ -16,7 +16,9 @@
     || /^send-button$/.test(b.getAttribute('data-testid') || ''));
   const composerSel = ['#prompt-textarea', 'textarea[name="prompt"]', '[data-testid="chat-input"]',
     'div.ProseMirror[contenteditable="true"]', '[contenteditable="true"][role="textbox"]'];
-  const composer = () => { for (const s of composerSel) { const e = [...document.querySelectorAll(s)].find(vis); if (e) return e; } return null; };
+  const MSG = '[data-message-author-role], [data-content-search-unit-key], [data-turn], article, .font-claude-response';
+  const inForm = (e) => vis(e) && e.closest && e.closest('form, fieldset') && !e.closest(MSG);   // never a writing block (CH-011)
+  const composer = () => { for (const s of composerSel) { const e = [...document.querySelectorAll(s)].find(inForm); if (e) return e; } return null; };
   const sendButton = () => {
     // Prefer a Send button near the composer, so "Send feedback" and similar elsewhere are never clicked.
     let el = composer();

@@ -27,7 +27,7 @@ is unique among the actors in the folder (claude:aec#01N4); the files keep the l
 
 It changes nothing; `git fetch` only updates remote-tracking refs (skip it with
 --no-fetch). Standard library only."""
-import argparse, datetime as dt, importlib.util, json, pathlib, re, subprocess, sys
+import argparse, datetime as dt, fnmatch, importlib.util, json, os, pathlib, re, subprocess, sys
 
 KIT = pathlib.Path(__file__).resolve().parent.parent
 LEDGER = KIT / "skills" / "handoff-ledger" / "scripts" / "handoff.py"
@@ -125,25 +125,33 @@ def short_actors(lines):
     return [re.sub(r"([\w.-]+:[\w.-]+)#([\w-]+)", lambda m: m.group(1) + "#" + short(m.group(2)), l) for l in lines]
 
 
-def ci_state(root, gaps):
-    """(summary line, needs-attention line or None) for the checks on the shared branch."""
-    gh = __import__("os").environ.get("RELAYKIT_GH", "gh")
+def github_repo(root, gaps, what):
+    """owner/name of root's origin on GitHub, or None (with a note in gaps)."""
     try:
         url = git(root, "remote", "get-url", "origin")
     except (RuntimeError, FileNotFoundError):
-        gaps.append("no git remote: checks on the shared branch weren't read")
-        return None, None
+        gaps.append(f"no git remote at {root}: {what} weren't read")
+        return None
     m = re.search(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?$", url)
     if not m:
-        gaps.append("remote isn't on GitHub: checks on the shared branch weren't read")
-        return None, None
-    repo = m.group(1)
+        gaps.append(f"{root}'s remote isn't on GitHub: {what} weren't read")
+        return None
+    return m.group(1)
 
-    def api(path):
-        p = subprocess.run([gh, "api", path], capture_output=True, text=True, timeout=60)
-        if p.returncode:
-            raise RuntimeError(p.stderr.strip() or "gh api failed")
-        return json.loads(p.stdout)
+
+def api(path):
+    gh = os.environ.get("RELAYKIT_GH", "gh")
+    p = subprocess.run([gh, "api", path], capture_output=True, text=True, timeout=60)
+    if p.returncode:
+        raise RuntimeError(p.stderr.strip() or "gh api failed")
+    return json.loads(p.stdout)
+
+
+def ci_state(root, gaps):
+    """(summary line, needs-attention line or None) for the checks on the shared branch."""
+    repo = github_repo(root, gaps, "checks on the shared branch")
+    if not repo:
+        return None, None
     try:
         branch = api(f"repos/{repo}").get("default_branch", "main")
         runs = api(f"repos/{repo}/actions/runs?branch={branch}&event=push&per_page=20").get("workflow_runs", [])
@@ -195,6 +203,67 @@ def ci_state(root, gaps):
     return text, None if ack else f"RED {head}: failing checks nobody has acknowledged (comment on the alert issue)"
 
 
+def hits(targets, patterns):
+    """Pairs (target, pattern) that overlap: a target matches a glob, or a glob matches a target
+    (both directions, so 'src/api/*' and 'src/api/client.py' meet either way)."""
+    out = []
+    for t in targets:
+        for pat in patterns:
+            if t == pat or fnmatch.fnmatch(t, pat) or fnmatch.fnmatch(pat, t):
+                out.append((t, pat))
+    return out
+
+
+def overlaps(root, targets, me, lane, hours, repo_dir, gaps):
+    """Warnings, never locks (HO-20261101-005 item 5): other work already touching `targets`.
+    Reads only what exists: handoffs' optional `touches:`, recent log lines from other sessions in
+    the lane, open pull requests' changed files, and failing checks where the files live."""
+    led, out = load_ledger(), []
+    me_base, me_session = (me.split("#", 1) + [""])[:2] if me else ("", "")
+    lane = (lane or me_base).lower()
+    recent = {}
+    d = root / "handoffs"
+    for p in sorted(d.glob("HO-*.md")) if d.is_dir() else []:
+        try:
+            meta, log, _, _ = led.parse_text(p.read_text(encoding="utf-8"), p.stem)
+        except led.Refused:
+            continue
+        hid, st = led.alias(meta.get("id", p.stem)), meta.get("status", "?")
+        if st not in led.FINAL and meta.get("touches"):
+            pats = [x.strip() for x in meta["touches"].split(",") if x.strip()]
+            for t, pat in hits(targets, pats):
+                holder = meta.get(HOLDER.get(st, "to"), "?")
+                out.append(f"handoff {hid} ({st}, with {holder}) touches {pat}: matches {t}")
+        for e in log:
+            parsed = led.parse_actor(e["actor"])
+            if not parsed or not lane or parsed[0] != lane or not parsed[1] or parsed[1] == me_session:
+                continue
+            age = age_hours(e["at"])
+            if age is not None and age <= hours:
+                key = f"{parsed[0]}#{parsed[1]}"
+                if key not in recent or e["at"] > recent[key][0]:
+                    recent[key] = (e["at"], hid, e["state"])
+    for key, (at, hid, st) in sorted(recent.items()):
+        out.append(f"another session in {lane} was active {at}: {key} ({st} on {hid})")
+    if not lane:
+        gaps.append("no lane (set RELAYKIT_ACTOR or --lane): other sessions in the lane weren't looked for")
+    files = [t for t in targets if "://" not in t]
+    repo = github_repo(repo_dir, gaps, "open pull requests") if files else None
+    if repo:
+        try:
+            for pr in api(f"repos/{repo}/pulls?state=open&per_page=50"):
+                changed = [f.get("filename", "") for f in api(f"repos/{repo}/pulls/{pr['number']}/files?per_page=100")]
+                for t, pat in hits(files, changed):
+                    out.append(f"open PR #{pr['number']} ({pr.get('user', {}).get('login', '?')}: {pr.get('title', '')[:60]}) changes {pat}")
+        except (RuntimeError, ValueError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+            gaps.append(f"open pull requests on {repo} weren't read ({str(e).splitlines()[0] if str(e) else e})")
+    if repo and pathlib.Path(repo_dir).resolve() != pathlib.Path(root).resolve():
+        line, _ = ci_state(repo_dir, gaps)
+        if line and line.startswith("RED"):
+            out.append(f"failing checks where these files live: {line.splitlines()[0]}")
+    return out
+
+
 def jsonl(path, gaps):
     if not path.exists():
         gaps.append(f"no {path.parent.name}/{path.name}")
@@ -214,6 +283,11 @@ def main():
     ap.add_argument("--root", type=pathlib.Path, default=pathlib.Path("."))
     ap.add_argument("--no-fetch", action="store_true")
     ap.add_argument("--no-ci", action="store_true", help="don't read the checks on the shared branch")
+    ap.add_argument("--touching", nargs="+", metavar="PATH",
+                    help="before writing: warn about other work touching these paths, globs or thread URLs")
+    ap.add_argument("--lane", help="your lane (default: from RELAYKIT_ACTOR)")
+    ap.add_argument("--repo", type=pathlib.Path, help="the checkout the --touching paths are in (default: --root)")
+    ap.add_argument("--hours", type=float, default=4, help="how recent another session's activity counts (default 4)")
     ap.add_argument("--stale-hours", type=float, default=24,
                     help="flag a sent handoff with no acknowledgement, or a claimed one with no log line, after this long (default 24)")
     a = ap.parse_args()
@@ -236,6 +310,15 @@ def main():
     ci, alarm = (None, None) if a.no_ci else ci_state(root, gaps)
     print("\n== Checks on the shared branch")
     print(ci or ("not read (--no-ci)" if a.no_ci else "unknown (see Not checked)"))
+
+    if a.touching:
+        me = os.environ.get("RELAYKIT_ACTOR", "")
+        found = overlaps(root, a.touching, me, a.lane, a.hours, a.repo or root, gaps)
+        print(f"\n== Overlaps with {', '.join(a.touching)}  (warnings, not locks)")
+        for l in short_actors(found) or ["none found in what was checked"]:
+            print(l)
+        if found:
+            print("Before writing: tell the other side (an FYI handoff, or a note to the owner) or wait.")
 
     print("\n== Waiting on the owner")
     if alarm:

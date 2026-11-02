@@ -763,6 +763,33 @@ def coordination_tests():
     case("protect: after delivery, Authorized can gain an update but not be rewritten",
          rc_add == 0 and rc_rw != 0 and "Authorized' was rewritten" in so_rw, so_add + so_rw)
 
+    # Case C (item 5): shared interface across files. Warnings only, from what's already recorded.
+    g, c1, _ = git_world("c-C")
+    g(c1, "remote", "set-url", "origin", "https://github.com/o/r.git")
+    hd = c1 / "handoffs"
+    env_s1 = {"RELAYKIT_ACTOR": "claude:aec#s1"}
+    h_api = run(LEDGER, "--dir", hd, "new", "--from", "claude:aec", "--to", "codex:aec", "--title", "change the api",
+                "--touches", "src/api/*.py, https://chatgpt.com/c/thread-x", env=env_s1)[1]
+    h_doc = run(LEDGER, "--dir", hd, "new", "--from", "claude:aec", "--to", "codex:aec", "--title", "docs",
+                "--touches", "docs/*", env=env_s1)[1]
+    stub_c = {"repos/o/r/pulls/12/files": [dict(filename="src/api/client.py"), dict(filename="README.md")],
+              "repos/o/r/pulls": [dict(number=12, title="Rework client", user=dict(login="codex-bot"))],
+              "repos/o/r": dict(default_branch="main")}
+    (TMP / "gh-C.json").write_text(json.dumps(stub_c), encoding="utf-8")
+    envc = {"RELAYKIT_GH": str(gh), "GH_STUB_DATA": str(TMP / "gh-C.json")}
+    st_ = KIT / "tools" / "status.py"
+    over = lambda out: out.split("== Overlaps")[1].split("\n== ")[0] if "== Overlaps" in out else ""
+    me2 = run(st_, "--root", c1, "--no-fetch", "--no-ci", "--touching", "src/api/client.py", env=dict(envc, RELAYKIT_ACTOR="claude:aec#s2"))[1]
+    me1 = run(st_, "--root", c1, "--no-fetch", "--no-ci", "--touching", "src/api/client.py", env=dict(envc, RELAYKIT_ACTOR="claude:aec#s1"))[1]
+    other = run(st_, "--root", c1, "--no-fetch", "--no-ci", "--touching", "src/db/models.py", env=dict(envc, RELAYKIT_ACTOR="claude:mtg#s3"))[1]
+    thread = run(st_, "--root", c1, "--no-fetch", "--no-ci", "--touching", "https://chatgpt.com/c/thread-x", env=dict(envc, RELAYKIT_ACTOR="claude:rk#s4"))[1]
+    o2, o1, oo, ot = over(me2), over(me1), over(other), over(thread)
+    case("case C (shared interface): warns about a handoff whose touches cover the file, an open PR changing it, and another session in the lane",
+         "touches src/api/*.py: matches src/api/client.py" in o2
+         and "open PR #12 (codex-bot" in o2 and "another session in claude:aec" in o2 and "#s1" in o2 and "docs" not in o2, me2)
+    case("case C decoys: your own session isn't a warning; unrelated files and other lanes are silent; a thread URL claim is seen",
+         "another session" not in o1 and "touches src/api/*.py" in o1 and "none found" in oo
+         and "touches https://chatgpt.com/c/thread-x" in ot and "open PR" not in ot, o1 + "\n--\n" + oo + "\n--\n" + ot)
     stale = [sk.name + "/" + f.name for sk in (KIT / "skills").iterdir() if (sk / "scripts").is_dir()
              for f in (sk / "scripts").glob("*") if f.is_file()
              and (not (X / sk.name / f.name).exists() or (X / sk.name / f.name).read_bytes() != f.read_bytes())]

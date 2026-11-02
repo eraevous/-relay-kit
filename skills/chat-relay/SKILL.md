@@ -68,6 +68,8 @@ The scripts try all of these. On the first successful run of an unverified row, 
 - A plain `textarea` needs React's native value setter plus an `input` event; setting `.value` alone doesn't register.
 - Rich editors (ProseMirror) take a synthetic paste event, with `execCommand('insertText')` as the fallback.
 - With the browser pane hidden, the page may lag in drawing the conversation, but the message still goes through.
+- **Writing blocks are editable.** ChatGPT replies can contain writing blocks: ProseMirror editors inside the message that save edits to the server. They look like a composer to a naive selector. `fill.js` only accepts a composer inside an input form (`form` or `fieldset`), outside any message, and refuses when two forms qualify (CH-011: a relay once pasted into a writing block and changed an earlier reply).
+- **Another session may be talking to the same thread.** Before sending, check the last message: if a reply is still streaming or a relay you didn't send has just arrived, wait for it to finish rather than interleaving (2026-11-01: two sessions wrote to one coordination thread five minutes apart).
 
 ## fill.js
 
@@ -80,9 +82,21 @@ The scripts try all of these. On the first successful run of an unverified row, 
     '[data-testid="chat-input"]', 'div.ProseMirror[contenteditable="true"]',
     '[contenteditable="true"][role="textbox"]', 'fieldset [contenteditable="true"]', 'textarea',
   ];
-  let box = null, via = null;
-  for (const s of cands) { const e = [...document.querySelectorAll(s)].find(vis); if (e) { box = e; via = s; break; } }
-  if (!box) throw new Error('Composer not found. Use the find tool (e.g. "Ask", "Reply", "Message") and type instead.');
+  // The composer sits in the input form. Editable areas elsewhere are not it: ChatGPT's writing
+  // blocks are editable, autosaved ProseMirror editors inside messages, and pasting into one
+  // changes an earlier message for good (CH-011, 2026-11-01). Skip them, and refuse to guess.
+  const MSG = '[data-message-author-role], [data-content-search-unit-key], [data-turn], article, .font-claude-response';
+  const area = (e) => (e.closest && e.closest('form, fieldset')) || null;
+  const usable = (e) => vis(e) && area(e) && !e.closest(MSG);
+  let box = null, via = null, skipped = 0;
+  const others = [];
+  for (const s of cands) for (const e of document.querySelectorAll(s)) {
+    if (!vis(e)) continue;
+    if (!usable(e)) { skipped++; continue; }
+    if (!box) { box = e; via = s; } else if (area(e) !== area(box) && !others.includes(e)) others.push(e);
+  }
+  if (!box) throw new Error(`Composer not found inside an input form (${skipped} editable area(s) elsewhere skipped, e.g. writing blocks). Use the find tool ("Ask", "Message") and check the target before typing.`);
+  if (others.length) throw new Error(`${others.length + 1} input forms have a composer; not guessing which. Use the find tool and check the target.`);
   box.focus();
   let method;
   if (box.tagName === 'TEXTAREA' || box.tagName === 'INPUT') {
@@ -110,7 +124,7 @@ The scripts try all of these. On the first successful run of an unverified row, 
   for (let el = box, i = 0; el && !sendBtn && i < 8; i++, el = el.parentElement)
     if (el.querySelectorAll) sendBtn = [...el.querySelectorAll('button')].find(isSend) || null;
   sendBtn = sendBtn || [...document.querySelectorAll('button')].find(isSend) || null;
-  return { composer: via, method, expected_chars: TEXT.length, got_chars: got.length,
+  return { composer: via, skipped_outside_form: skipped, method, expected_chars: TEXT.length, got_chars: got.length,
            matches: norm(got) === norm(TEXT), send_button: !!sendBtn, send_enabled: !!sendBtn && !sendBtn.disabled };
 })(TEXT_PLACEHOLDER)
 ```
@@ -136,7 +150,9 @@ The scripts try all of these. On the first successful run of an unverified row, 
     || /^send-button$/.test(b.getAttribute('data-testid') || ''));
   const composerSel = ['#prompt-textarea', 'textarea[name="prompt"]', '[data-testid="chat-input"]',
     'div.ProseMirror[contenteditable="true"]', '[contenteditable="true"][role="textbox"]'];
-  const composer = () => { for (const s of composerSel) { const e = [...document.querySelectorAll(s)].find(vis); if (e) return e; } return null; };
+  const MSG = '[data-message-author-role], [data-content-search-unit-key], [data-turn], article, .font-claude-response';
+  const inForm = (e) => vis(e) && e.closest && e.closest('form, fieldset') && !e.closest(MSG);   // never a writing block (CH-011)
+  const composer = () => { for (const s of composerSel) { const e = [...document.querySelectorAll(s)].find(inForm); if (e) return e; } return null; };
   const sendButton = () => {
     // Prefer a Send button near the composer, so "Send feedback" and similar elsewhere are never clicked.
     let el = composer();

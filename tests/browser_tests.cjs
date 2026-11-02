@@ -63,23 +63,50 @@ async function scrape(messages) {
   return context.window.__chatcap.data.messages;
 }
 
-async function fill() {
+// A tiny page: `els` maps a selector to the elements it returns. Each element knows its form
+// (or none) and whether it sits inside a message, which is all the composer rules look at.
+function textarea(form, track) {
   let value = '';
-  const proto = { set value(t) { value = t; }, get value() { return value; } };
-  const box = Object.assign(Object.create(proto), { tagName: 'TEXTAREA', offsetParent: {}, getClientRects: () => [1],
-    focus: () => {}, dispatchEvent: () => {}, parentElement: null });
+  const proto = { set value(t) { value = t; track.push(['set', form && form.name]); }, get value() { return value; } };
+  return Object.assign(Object.create(proto), { tagName: 'TEXTAREA', offsetParent: {}, getClientRects: () => [1], className: '',
+    focus: () => track.push(['focus', form && form.name]), dispatchEvent: () => {}, parentElement: null,
+    closest: (sel) => (/form/.test(sel) ? form : null) });
+}
+
+function writingBlock(track) {   // editable, visible, inside a message, not in any form (CH-011)
+  return { tagName: 'DIV', offsetParent: {}, getClientRects: () => [1], className: 'ProseMirror content-xaiQhS', innerText: 'an earlier block',
+    focus: () => track.push(['focus', 'writing-block']), dispatchEvent: () => track.push(['write', 'writing-block']), parentElement: null,
+    closest: (sel) => (/form/.test(sel) ? null : /data-message-author-role|article/.test(sel) ? {} : null) };
+}
+
+async function fill(els = null) {
+  const track = [];
+  const form = { name: 'composer-form' };
+  const page = els ? els(track) : { '#prompt-textarea': [textarea(form, track)] };
   const context = {
-    document: { querySelectorAll: (s) => (s === 'button' ? [button('Send feedback', () => {}), button('Send message', () => {})] : s === '#prompt-textarea' ? [box] : []) },
-    Event: class {}, setTimeout: (cb) => cb(),
+    document: { querySelectorAll: (s) => (s === 'button' ? [button('Send feedback', () => {}), button('Send message', () => {})] : page[s] || []),
+                execCommand: () => track.push(['execCommand']) },
+    window: { getSelection: () => ({ selectAllChildren: () => {}, deleteFromDocument: () => {} }) },
+    Event: class {}, DataTransfer: class { setData() {} }, ClipboardEvent: class {}, setTimeout: (cb) => cb(),
   };
   const src = fs.readFileSync(path.join(KIT, 'extracted', 'chat-relay', '01_fill.js'), 'utf8')
     .replace('TEXT_PLACEHOLDER', JSON.stringify('A bounded test.\nSecond line.'));
-  return vm.runInNewContext(src, context, { timeout: 2000 });
+  try { return { ...(await vm.runInNewContext(src, context, { timeout: 2000 })), track }; }
+  catch (e) { return { error: String(e.message || e), track }; }
 }
 
 (async () => {
   const f = await fill();
   check('fill: textarea filled and the real Send button found', f.matches && f.send_enabled, f);
+  // CH-011: a visible writing block comes first in the selector order; the composer is a textarea in the form.
+  let w = await fill((t) => ({ 'div.ProseMirror[contenteditable="true"]': [writingBlock(t)], 'textarea': [textarea({ name: 'f1' }, t)] }));
+  check('fill: skips a writing block outside the form and fills the composer in it',
+    w.matches && w.composer === 'textarea' && w.skipped_outside_form === 1 && !w.track.some(([, who]) => who === 'writing-block'), w);
+  w = await fill((t) => ({ 'div.ProseMirror[contenteditable="true"]': [writingBlock(t)] }));
+  check('fill: with only a writing block on the page it refuses, touching nothing',
+    /not found inside an input form/.test(w.error || '') && w.track.length === 0, w);
+  w = await fill((t) => ({ '#prompt-textarea': [textarea({ name: 'f1' }, t)], 'textarea': [textarea({ name: 'f2' }, t)] }));
+  check('fill: two input forms with composers: it refuses to guess', /2 input forms/.test(w.error || '') && w.track.length === 0, w);
 
   let r = await sendWait({ text: 'Finished response.', completeValue: '' });
   check('relay: explicit ChatGPT completion -> done', r.status === 'done', r);

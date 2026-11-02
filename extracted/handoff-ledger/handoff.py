@@ -84,6 +84,7 @@ contract: relay-kit/handoff@2
 source: {source}
 last_processed: {last}
 reply_to: {reply_to}
+touches: {touches}
 ---
 
 ## Task
@@ -374,7 +375,7 @@ def lane_code(frm):
 
 
 def cmd_new(a):
-    for name in ("from", "to", "title", "source", "last_processed", "reply_to"):
+    for name in ("from", "to", "title", "source", "last_processed", "reply_to", "touches"):
         single_line(f"--{name.replace('_', '-')}", getattr(a, "frm" if name == "from" else name))
     single_line("--from", a.frm, allow_pipe=False)
     if "#" in a.frm:
@@ -394,7 +395,7 @@ def cmd_new(a):
     day = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
     text_for = lambda hid: TEMPLATE.format(id=hid, title=a.title, frm=a.frm, to=a.to, now=now(), by=by,
                                            source=a.source or "none", last=a.last_processed or "none",
-                                           reply_to=a.reply_to or "")
+                                           reply_to=a.reply_to or "", touches=a.touches or "")
     taken, note = ids_in_git(a.dir)
     if note:
         print(f"note: {note}", file=sys.stderr)
@@ -629,6 +630,7 @@ def main():
     n.add_argument("--reply-to")
     n.add_argument("--by", help="the sender with a session (claude:aec#01N4); default $RELAYKIT_ACTOR")
     n.add_argument("--lane", help="lane code in the id (default: .ledger.json 'lanes', else from --from)")
+    n.add_argument("--touches", help="optional: comma-separated paths, globs or thread URLs this work will change; status.py --touching warns others")
     s = sub.add_parser("set")
     s.add_argument("id")
     s.add_argument("state", choices=STATES)
