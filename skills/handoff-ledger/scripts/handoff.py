@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
 """Handoff ledger: create, update, list and check handoff files. Standard library only.
 
-Enforced: handoff ids of the form HO-YYYYMMDD-NNN that stay inside --dir; the
-whole record is validated before any update, with the same rules `check` uses;
-legal state moves (blocked returns only to the state it left); notes on sent,
-blocked and completed; an output file before completed; single-line fields; log
-lines written inside the Log section; and --by matching the declared sender
-(sent) or recipient (acknowledged, in_progress, completed), or the owner. The owner's
-name comes from <dir>/.ledger.json ({"owner": "sam"}); without it the name is "owner".
-Writes go to a temporary file that replaces the original, under a lock file,
-and are refused if the file changed after it was read. --at records an event after
+Enforced: handoff ids (@2: HO-LANE-YYYYMMDD-XXXX, random; @1: HO-YYYYMMDD-NNN) that
+stay inside --dir; `new` never replaces a file or reuses an id seen in git; the whole
+record is validated before any update, with the same rules `check` uses; legal state
+moves (blocked returns only to the state it left); notes on sent, blocked and completed,
+and on any step recorded --for someone else; an output file before completed;
+single-line fields; log lines written inside the Log section; an actor with a session
+(claude:aec#01N4) on @2 files; and --by (or --for) matching the declared sender (sent)
+or recipient (acknowledged, in_progress, completed), or the owner. The owner's name
+comes from <dir>/.ledger.json ({"owner": "sam"}); without it the name is "owner".
+Writes go to a temporary file that replaces the original, under a lock file, and are
+refused if the file changed after it was read, if --expect names another state, or if
+the upstream branch changed the file since this clone last pulled. `check --base REF`
+also refuses removed handoffs and changed headers or earlier log lines. --at records an event after
 the fact: the log line takes the event time and the note gets "(recorded <now>)".
 
 Not enforced: --by is a typed name, not an authenticated identity; an output
 file existing says nothing about its quality; hand edits bypass all of this
 (`check` finds the damage afterwards). The log is append-only by convention,
 not tamper-evident: keep the folder in git for a history you can trust."""
-import argparse, datetime as dt, hashlib, json, os, pathlib, re, subprocess, sys
+import argparse, datetime as dt, hashlib, json, os, pathlib, re, secrets, subprocess, sys
 
-CONTRACT = "relay-kit/handoff@1"   # file format, states and log line; see governance/contracts.json
+CONTRACT = "relay-kit/handoff@2"   # file format, states and log line; see governance/contracts.json
+READS = {"relay-kit/handoff@1", CONTRACT}   # @1 files stay valid; files without `contract:` are @1
 STATES = ["prepared", "sent", "acknowledged", "in_progress", "completed", "blocked", "cancelled"]
 FINAL = {"completed", "cancelled"}
 NEXT = {
@@ -33,18 +38,34 @@ RECIPIENT_STATES = {"acknowledged", "in_progress", "completed"}
 OWNER = "owner"   # replaced at start-up by <dir>/.ledger.json, if present
 
 
-def load_owner(d):
+LANES = {}       # optional lane codes from <dir>/.ledger.json: {"lanes": {"relay-kit": "RK"}}
+
+
+def load_config(d):
     cfg = pathlib.Path(d) / ".ledger.json"
     if not cfg.exists():
-        return "owner"
+        return "owner", {}
     try:
-        name = str(json.loads(cfg.read_text(encoding="utf-8")).get("owner", "")).strip().lower()
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        name = str(data.get("owner", "")).strip().lower()
+        lanes = {str(k).lower(): str(v).upper() for k, v in (data.get("lanes") or {}).items()}
     except (ValueError, AttributeError):
         raise Refused(f"{cfg} isn't valid JSON like {{\"owner\": \"sam\"}}")
     if not name or not re.fullmatch(r"[\w.:-]+", name):
         raise Refused(f"{cfg}: owner must be one word (letters, digits, . : - _)")
-    return name
-ID_RE = re.compile(r"^HO-\d{8}-\d{3}$")
+    if any(not re.fullmatch(r"[A-Z0-9]{1,12}", v) for v in lanes.values()):
+        raise Refused(f"{cfg}: lane codes must be 1-12 letters or digits")
+    return name, lanes
+
+
+def load_owner(d):
+    return load_config(d)[0]
+# handoff@1: HO-YYYYMMDD-NNN (sequential per day). handoff@2: HO-<LANE>-YYYYMMDD-<4 random
+# Crockford base32>, which two sessions can create offline without colliding (DEC-008, HO-20261101-005).
+B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+ID_PAT = r"HO-(?:\d{8}-\d{3}|[A-Z0-9]{1,12}-\d{8}-[0-9A-HJKMNP-TV-Z]{4})"
+ID_RE = re.compile(rf"^{ID_PAT}$")
+ACTOR_RE = re.compile(r"^([\w.:-]+?)(?:#([\w-]+))?(?: for ([\w.:-]+))?$")
 REQUIRED = ["id", "title", "from", "to", "created", "status", "source", "last_processed"]
 SECTIONS = ["Task", "Authorized", "Proposals", "Context", "Expected output", "Limits", "Log"]
 LOG_RE = re.compile(r"^- (\S+) \| (\w+) \| ([^|]+?) \|(?: (.*))?$")
@@ -58,7 +79,7 @@ from: {frm}
 to: {to}
 created: {now}
 status: prepared
-contract: relay-kit/handoff@1
+contract: relay-kit/handoff@2
 source: {source}
 last_processed: {last}
 reply_to: {reply_to}
@@ -87,7 +108,7 @@ Write the result to outputs/{id}.md.
 TODO
 
 ## Log
-- {now} | prepared | {frm} | drafted
+- {now} | prepared | {by} | drafted
 """
 
 
@@ -123,6 +144,37 @@ def single_line(name, value, allow_pipe=True):
         raise Refused(f"{name} must be one line")
     if not allow_pipe and "|" in value:
         raise Refused(f"{name} can't contain '|'")
+
+
+def parse_actor(field):
+    """'claude:aec#01N4 for codex:aec' -> ('claude:aec', '01N4', 'codex:aec'). A lane names an
+    activity; '#session' names who in it acted; 'for X' records X's step on X's behalf."""
+    m = ACTOR_RE.match(field.strip())
+    if not m:
+        return None
+    return m.group(1).lower(), m.group(2), (m.group(3) or "").lower() or None
+
+
+def alias(hid):
+    """Display alias: 'AEC K7QF' for HO-AEC-20261101-K7QF; @1 ids are shown as they are."""
+    m = re.match(r"^HO-([A-Z0-9]{1,12})-\d{8}-(\w{4})$", hid)
+    return f"{m.group(1)} {m.group(2)}" if m else hid
+
+
+def actor_error(meta, state, field, contract, note):
+    """Rules on the log line's actor field. Name matching only: typed names, not identities."""
+    parsed = parse_actor(field)
+    if not parsed:
+        return f"actor '{field}' isn't 'name', 'name#session' or 'name#session for party'"
+    base, session, party = parsed
+    if contract != "relay-kit/handoff@1" and base != OWNER and not session:
+        return f"actor '{field}' needs a session ('{base}#<session id>'): a lane isn't an actor"
+    if party:
+        if party == base:
+            return f"'{field}': 'for' names someone else"
+        if not (note or "").strip():
+            return f"'{field}' records a step for {party}; the note must say where that came from"
+    return owner_error(meta, state, party or base)
 
 
 def owner_error(meta, state, by):
@@ -192,12 +244,13 @@ def problems_in(text, stem, outputs_dir):
     except Refused as e:
         return [str(e)], None, []
     if not ID_RE.match(stem):
-        out.append(f"file name {stem} isn't a handoff id (HO-YYYYMMDD-NNN)")
+        out.append(f"file name {stem} isn't a handoff id (HO-LANE-YYYYMMDD-XXXX, or @1's HO-YYYYMMDD-NNN)")
     for k in REQUIRED:
         if not meta.get(k):
             out.append(f"missing '{k}'")
-    if meta.get("contract", CONTRACT) != CONTRACT:
-        out.append(f"contract {meta.get('contract')!r}; this script reads {CONTRACT}")
+    contract = meta.get("contract") or "relay-kit/handoff@1"
+    if contract not in READS:
+        out.append(f"contract {contract!r}; this script reads {', '.join(sorted(READS))}")
     if meta.get("id") and meta["id"] != stem:
         out.append(f"id {meta['id']} doesn't match file name")
     for s in SECTIONS:
@@ -208,7 +261,7 @@ def problems_in(text, stem, outputs_dir):
     if meta.get("status") not in ("prepared", "blocked", "cancelled") and TODO_RE.search(text):
         out.append("still has TODO placeholders after leaving 'prepared'")
     exp = re.search(r"^## Expected output[ \t]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
-    for other in re.findall(r"outputs/(HO-\d{8}-\d{3})\.md", exp.group(1) if exp else ""):
+    for other in re.findall(rf"outputs/({ID_PAT})\.md", exp.group(1) if exp else ""):
         if other != stem:
             out.append(f"warning: Expected output names outputs/{other}.md, but this handoff is {stem} (renumbered?)")
     if not log:
@@ -224,8 +277,15 @@ def problems_in(text, stem, outputs_dir):
         if err:
             out.append(f"log line {i + 1}: {err}")
     for i, e in enumerate(log, 1):
-        if i > 1:
-            err = owner_error(meta, e["state"], e["actor"])
+        if i == 1:
+            parsed = parse_actor(e["actor"])
+            if contract != "relay-kit/handoff@1":
+                if not parsed or parsed[2] or parsed[0] not in (meta.get("from", "").lower(), OWNER):
+                    out.append(f"log line 1: drafted by '{e['actor']}', not the sender ({meta.get('from')}) or the owner")
+                elif parsed[0] != OWNER and not parsed[1]:
+                    out.append(f"log line 1: actor '{e['actor']}' needs a session ('{parsed[0]}#<session id>')")
+        else:
+            err = actor_error(meta, e["state"], e["actor"], contract, e["note"])
             if err:
                 out.append(f"log line {i}: {err}")
         if e["state"] in NOTE_REQUIRED and not e["note"]:
@@ -239,7 +299,7 @@ def problems_in(text, stem, outputs_dir):
 
 def resolve(d, hid):
     if not ID_RE.match(hid):
-        raise Refused(f"'{hid}' isn't a handoff id (HO-YYYYMMDD-NNN)")
+        raise Refused(f"'{hid}' isn't a handoff id (HO-LANE-YYYYMMDD-XXXX, or HO-YYYYMMDD-NNN)")
     base = d.resolve()
     p = (base / f"{hid}.md").resolve()
     if p.parent != base:
@@ -290,45 +350,110 @@ def ids_in_git(d):
         names = git("log", "--all", "--name-only", "--format=", "--", ".").stdout
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return set(), "git unavailable: only this folder was checked"
-    ids = set(re.findall(r"(HO-\d{8}-\d{3})\.md", names))
+    ids = set(re.findall(rf"({ID_PAT})\.md", names))
     return ids, None if fetched else "fetch failed: checked local history and branches only"
+
+
+def lane_code(frm):
+    """Lane code for ids: .ledger.json's "lanes" map, else the name after ':' in letters and digits."""
+    name = frm.split(":", 1)[-1].split("#", 1)[0].lower()
+    if name in LANES:
+        return LANES[name]
+    code = re.sub(r"[^A-Z0-9]", "", name.upper())[:12]
+    if not code:
+        raise Refused(f"can't make a lane code from --from '{frm}'; pass --lane")
+    return code
 
 
 def cmd_new(a):
     for name in ("from", "to", "title", "source", "last_processed", "reply_to"):
         single_line(f"--{name.replace('_', '-')}", getattr(a, "frm" if name == "from" else name))
     single_line("--from", a.frm, allow_pipe=False)
+    if "#" in a.frm:
+        raise Refused("--from names the lane (claude:aec); put the session in --by (claude:aec#01N4)")
+    by = a.by or os.environ.get("RELAYKIT_ACTOR") or ""
+    single_line("--by", by, allow_pipe=False)
+    parsed = parse_actor(by) if by else None
+    if not parsed or parsed[2] or (parsed[0] != a.frm.lower() and parsed[0] != OWNER) or (parsed[0] != OWNER and not parsed[1]):
+        raise Refused(f"--by (or RELAYKIT_ACTOR) must be the sender with a session, like {a.frm}#<session id>, or the owner")
     if a.reply_to and not ID_RE.match(a.reply_to):
         raise Refused(f"--reply-to '{a.reply_to}' isn't a handoff id")
+    lane = (a.lane or lane_code(a.frm)).upper()
+    if not re.fullmatch(r"[A-Z0-9]{1,12}", lane):
+        raise Refused(f"--lane '{a.lane}' must be 1-12 letters or digits")
     a.dir.mkdir(parents=True, exist_ok=True)
     (a.dir / "outputs").mkdir(exist_ok=True)
     day = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
-    text_for = lambda hid: TEMPLATE.format(id=hid, title=a.title, frm=a.frm, to=a.to, now=now(),
+    text_for = lambda hid: TEMPLATE.format(id=hid, title=a.title, frm=a.frm, to=a.to, now=now(), by=by,
                                            source=a.source or "none", last=a.last_processed or "none",
                                            reply_to=a.reply_to or "")
     taken, note = ids_in_git(a.dir)
     if note:
         print(f"note: {note}", file=sys.stderr)
-    for n in range(1, 1000):
-        hid = f"HO-{day}-{n:03d}"
+    forced = [x for x in os.environ.get("RELAYKIT_TEST_SUFFIXES", "").split(",") if x]   # tests only: replay a collision
+    for i in range(50):
+        suffix = forced[i] if i < len(forced) else "".join(secrets.choice(B32) for _ in range(4))
+        hid = f"HO-{lane}-{day}-{suffix}"
         if hid in taken:   # used in another clone, branch or earlier commit: never reuse
             continue
-        try:
+        try:   # "x": refuses to replace a file that already exists
             with open(a.dir / f"{hid}.md", "x", encoding="utf-8", newline="\n") as f:
                 f.write(text_for(hid))
         except FileExistsError:
             continue
         print(hid)
         return
-    raise Refused(f"no free id left for {day}")
+    raise Refused("couldn't find a free id in 50 tries")
+
+
+def shared_copy_error(p, fetch):
+    """Compare-and-swap against the shared copy: refuse if the upstream branch holds a different
+    version of this handoff than the one this clone last pulled. Returns (error, note)."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(p.parent), *args], capture_output=True, text=True, timeout=60)
+    try:
+        if git("rev-parse", "--git-dir").returncode != 0:
+            return None, None
+        if git("rev-parse", "--abbrev-ref", "@{upstream}").returncode != 0:
+            return None, "no upstream branch: the shared copy wasn't compared"
+        fetched = (git("fetch", "--quiet").returncode == 0) if fetch else False
+        rel = git("ls-files", "--full-name", "--", p.name).stdout.strip() or \
+            git("rev-parse", "--show-prefix").stdout.strip() + p.name
+        base = git("merge-base", "HEAD", "@{upstream}").stdout.strip()
+        mine = git("rev-parse", f"{base}:{rel}") if base else None
+        theirs = git("rev-parse", f"@{{upstream}}:{rel}")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None, "git unavailable: the shared copy wasn't compared"
+    note = None if fetched or not fetch else "fetch failed: compared with the last fetch"
+    if not fetch:
+        note = "--no-fetch: compared with the last fetch"
+    if theirs.returncode != 0:
+        return None, note   # not on the shared branch yet
+    # changed upstream since this clone's last common point with it (local, unpushed commits are fine)
+    if mine is None or mine.returncode != 0 or mine.stdout.strip() != theirs.stdout.strip():
+        return (f"the shared copy of {p.name} changed since this clone last pulled; pull, re-read it and "
+                "retry (someone else may have taken or moved it)"), note
+    return None, note
 
 
 def cmd_set(a):
+    a.by = a.by or os.environ.get("RELAYKIT_ACTOR") or ""
+    if not a.by:
+        raise Refused("--by is required (or set RELAYKIT_ACTOR)")
     single_line("--by", a.by, allow_pipe=False)
+    single_line("--for", a.for_)
+    if a.for_ and " " in a.for_.strip():
+        raise Refused("--for is one name, like codex:aec")
+    actor = a.by.strip() + (f" for {a.for_.strip()}" if a.for_ else "")
     single_line("--note", a.note)
     single_line("--last-processed", a.last_processed)
     single_line("--at", a.at)
     p = resolve(a.dir, a.id)
+    err, note = shared_copy_error(p, not a.no_fetch)
+    if note:
+        print(f"note: {note}", file=sys.stderr)
+    if err:
+        raise Refused(err)
     with Lock(a.dir.resolve()):
         text = p.read_text(encoding="utf-8")
         digest = hashlib.sha256(text.encode()).hexdigest()
@@ -337,7 +462,10 @@ def cmd_set(a):
         if problems:
             raise Refused("the file has problems; fix them first (or record 'blocked' by hand):\n  " + "\n  ".join(problems))
         states = [e["state"] for e in log]
-        for err in (legal(states, a.state), owner_error(meta, a.state, a.by)):
+        if a.expect and states[-1] != a.expect:
+            raise Refused(f"expected '{a.expect}' but it is '{states[-1]}': someone else moved it; re-read it first")
+        contract = meta.get("contract") or "relay-kit/handoff@1"
+        for err in (legal(states, a.state), actor_error(meta, a.state, actor, contract, a.note)):
             if err:
                 raise Refused(err)
         if a.state in NOTE_REQUIRED and not a.note:
@@ -352,7 +480,7 @@ def cmd_set(a):
         if a.at:   # recording after the fact: the line carries the event time, the note the recording time
             when = event_time(a.at, log[-1]["at"])
             note = f"{note or ''} (recorded {now()})".strip()
-        line = f"- {when} | {a.state} | {a.by} |" + (f" {note}" if note else "")
+        line = f"- {when} | {a.state} | {actor} |" + (f" {note}" if note else "")
         _, _, _, span = parse_text(text, p.stem)
         log_text = text[span[0]:span[1]].rstrip("\n")
         new_text = text[:span[0]] + (log_text + "\n" if log_text else "") + line + "\n" + text[span[1]:].lstrip("\n")
@@ -380,7 +508,7 @@ def cmd_list(a):
         if a.status and meta.get("status") != a.status:
             continue
         last = log[-1] if log else {}
-        rows.append((meta.get("id", p.stem), meta.get("status", "?"), meta.get("from", ""), meta.get("to", ""),
+        rows.append((alias(meta.get("id", p.stem)), meta.get("status", "?"), meta.get("from", ""), meta.get("to", ""),
                      f"{meta.get('title', '')}  [{last.get('at', '')} {last.get('actor', '')}]"))
     if not rows:
         print("no handoffs")
@@ -388,9 +516,45 @@ def cmd_list(a):
         print(f"{r[0]}  {r[1]:<12} {r[2]} -> {r[3]}  {r[4]}")
 
 
+FIXED = ("id", "from", "to", "created")
+
+
+def history_problems(d, base):
+    """Against git revision `base`: no handoff removed, its id/from/to/created unchanged, and its
+    earlier log lines still first, in order (protected writes, after a merge as well)."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, timeout=60)
+    prefix = git("rev-parse", "--show-prefix").stdout.strip()
+    listed = git("ls-tree", "--name-only", base, "--", ".")
+    if listed.returncode != 0:
+        return [f"--base {base}: {listed.stderr.strip() or 'not a git revision'}"]
+    out = []
+    for name in listed.stdout.split():
+        name = name.rsplit("/", 1)[-1]
+        if not re.match(rf"^{ID_PAT}\.md$", name):
+            continue
+        p = d / name
+        if not p.exists():
+            out.append(f"{name}: removed since {base}")
+            continue
+        try:
+            old_meta, old_log, _, _ = parse_text(git("show", f"{base}:{prefix}{name}").stdout, name)
+            meta, log, _, _ = parse_text(p.read_text(encoding="utf-8"), name)
+        except Refused:
+            continue   # unreadable either side: problems_in reports it
+        for k in FIXED:
+            if old_meta.get(k, "") != meta.get(k, ""):
+                out.append(f"{name}: '{k}' changed since {base} ({old_meta.get(k)!r} -> {meta.get(k)!r}); open a new handoff instead")
+        if log[:len(old_log)] != old_log:
+            out.append(f"{name}: earlier log lines changed since {base}; the log is append-only")
+    return out
+
+
 def cmd_check(a):
     total, ids = [], {}
     files = sorted(a.dir.glob("HO-*.md"))
+    if a.base:
+        total += history_problems(a.dir, a.base)
     for p in files:
         problems, meta, _ = problems_in(p.read_text(encoding="utf-8"), p.stem, a.dir / "outputs")
         if meta and meta.get("id") in ids:
@@ -421,20 +585,26 @@ def main():
     n.add_argument("--source")
     n.add_argument("--last-processed")
     n.add_argument("--reply-to")
+    n.add_argument("--by", help="the sender with a session (claude:aec#01N4); default $RELAYKIT_ACTOR")
+    n.add_argument("--lane", help="lane code in the id (default: .ledger.json 'lanes', else from --from)")
     s = sub.add_parser("set")
     s.add_argument("id")
     s.add_argument("state", choices=STATES)
-    s.add_argument("--by", required=True)
+    s.add_argument("--by", help="who is writing, with a session (claude:aec#01N4); default $RELAYKIT_ACTOR")
+    s.add_argument("--for", dest="for_", help="record this step for another party (e.g. a chat-only recipient); the note says where it came from")
+    s.add_argument("--expect", choices=STATES, help="refuse unless the handoff is in this state now (compare-and-swap)")
+    s.add_argument("--no-fetch", action="store_true", help="compare with the shared copy as last fetched")
     s.add_argument("--note")
     s.add_argument("--last-processed")
     s.add_argument("--at", help="when the event happened, if recording it later (ISO, e.g. 2026-10-28T17:51Z)")
     l = sub.add_parser("list")
     l.add_argument("--status", choices=STATES)
-    sub.add_parser("check")
+    c = sub.add_parser("check")
+    c.add_argument("--base", help="git revision: also check no handoff was removed or had its header or earlier log lines changed")
     a = ap.parse_args()
-    global OWNER
+    global OWNER, LANES
     try:
-        OWNER = load_owner(a.dir)
+        OWNER, LANES = load_config(a.dir)
         {"new": cmd_new, "set": cmd_set, "list": cmd_list, "check": cmd_check}[a.cmd](a)
     except Refused as e:
         sys.exit(f"refused: {e}")

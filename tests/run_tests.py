@@ -56,18 +56,18 @@ def ledger_tests():
         case("ledger: shipped handoff folder passes check", rc == 0, out)
 
     d = TMP / "ledger" / "no-config"
-    rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--to", "chatgpt:b", "--title", "T")
+    rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
     r1 = run(LEDGER, "--dir", d, "set", hid, "cancelled", "--by", "sam", "--note", "x")
     r2 = run(LEDGER, "--dir", d, "set", hid, "cancelled", "--by", "owner", "--note", "x")
     case("ledger: with no .ledger.json the owner is 'owner'", r1[0] != 0 and r2[0] == 0, r1[2] + r2[2])
     d = TMP / "ledger" / "named-owner"
-    run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--to", "chatgpt:b", "--title", "T")
+    run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
     (d / ".ledger.json").write_text('{"owner": "Sam"}', encoding="utf-8")
     hid = next(d.glob("HO-*.md")).stem
     r3 = run(LEDGER, "--dir", d, "set", hid, "cancelled", "--by", "sam", "--note", "x")
     case("ledger: .ledger.json names the owner (case-insensitive)", r3[0] == 0, r3[2])
     d = TMP / "ledger" / "bad-config"
-    run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--to", "chatgpt:b", "--title", "T")
+    run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
     (d / ".ledger.json").write_text('{"owner": "two words"}', encoding="utf-8")
     case("ledger: a malformed owner setting is refused", run(LEDGER, "--dir", d, "list")[0] != 0)
 
@@ -112,7 +112,7 @@ def ledger_tests():
     case("ledger: set refuses an already-inconsistent file, unchanged", r[0] != 0 and p.read_text(encoding="utf-8") == before, r[2])
 
     d = TMP / "ledger" / "unfinished"
-    rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:test", "--to", "chatgpt:test", "--title", "Draft")
+    rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:test", "--by", "claude:test#t1", "--to", "chatgpt:test", "--title", "Draft")
     r = setstate(d, "sent", "claude:test", "x", hid=hid)
     case("ledger: a TODO-filled draft can't be sent", rc == 0 and r[0] != 0, r[2])
 
@@ -166,10 +166,11 @@ def ledger_tests():
     (B / "handoffs" / ".keep").write_text("")
     g(B, "add", "."); g(B, "commit", "-qm", "init"); g(B, "push", "-q", "origin", "main")
     g(A, "pull", "-q", "origin", "main")
-    rc, hid_a, _ = run(LEDGER, "--dir", A / "handoffs", "new", "--from", "claude:aec", "--to", "codex:aec", "--title", "AEC work")
+    rc, hid_a, _ = run(LEDGER, "--dir", A / "handoffs", "new", "--from", "claude:aec", "--by", "claude:aec#t1", "--to", "codex:aec", "--title", "AEC work")
     g(A, "add", "."); g(A, "commit", "-qm", "aec handoff"); g(A, "push", "-q", "origin", "main")
-    rc2, hid_b, err_b = run(LEDGER, "--dir", B / "handoffs", "new", "--from", "claude:rk", "--to", "claude:builder", "--title", "Pilot")
-    case("ledger: new skips an id another clone already pushed", rc == 0 and rc2 == 0 and hid_a != hid_b and hid_b.endswith("-002"),
+    rc2, hid_b, err_b = run(LEDGER, "--dir", B / "handoffs", "new", "--from", "claude:rk", "--by", "claude:rk#t1", "--to", "claude:builder", "--title", "Pilot")
+    case("ledger: new gives two clones different ids, each carrying its lane",
+         rc == 0 and rc2 == 0 and hid_a != hid_b and hid_a.startswith("HO-AEC-") and hid_b.startswith("HO-RK-"),
          f"{hid_a} / {hid_b} {err_b}")
     tpl = (A / "handoffs" / f"{hid_a}.md").read_text(encoding="utf-8")
     case("ledger: an unfilled Authorized section says not to start", "NOT AUTHORIZED YET" in tpl)
@@ -183,8 +184,8 @@ def ledger_tests():
          rc == 0 and "WARNING" in so and "HO-20261028-009" in so and r[0] == 0, so + r[2])
 
     d = TMP / "ledger" / "block-draft"
-    rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--to", "chatgpt:b", "--title", "T")
-    r = run(LEDGER, "--dir", d, "set", hid, "blocked", "--by", "claude:a", "--note", "reported run without authorization")
+    rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:a", "--by", "claude:a#t1", "--to", "chatgpt:b", "--title", "T")
+    r = run(LEDGER, "--dir", d, "set", hid, "blocked", "--by", "claude:a#t1", "--note", "reported run without authorization")
     case("ledger: an unfilled draft can be marked blocked", r[0] == 0 and run(LEDGER, "--dir", d, "check")[0] == 0, r[2])
 
     d = ledger_dir("log-inside")
@@ -434,7 +435,7 @@ def governance_tests():
 
     d = ledger_dir("newer-contract")
     p = d / FIXTURE.name
-    p.write_text(p.read_text(encoding="utf-8").replace("status: prepared\n", "status: prepared\ncontract: relay-kit/handoff@2\n"), encoding="utf-8")
+    p.write_text(p.read_text(encoding="utf-8").replace("status: prepared\n", "status: prepared\ncontract: relay-kit/handoff@3\n"), encoding="utf-8")
     case("ledger: a handoff from a newer contract version is refused",
          run(LEDGER, "--dir", d, "check")[0] != 0 and setstate(d, "sent", "claude:relay-kit", "x")[0] != 0)
 
@@ -498,6 +499,195 @@ def status_tests():
          rc == 0 and "1 behind" in out and "PULL FIRST" in out and "last change: - 2026-10-31 | x | created" in out, out + err)
 
 
+# ---------------- coordination invariants (HO-20261101-005) ----------------
+# The reviewer's replayable cases from dogfood-001: A shared handoff id, B independent work, C shared
+# interface across files (item 5, scoped only: no test), D expired lease, E red CI. Each item
+# has a violation and a decoy (a legitimate action the guard must not block).
+H2 = "HO-RK-20261028-K7QF"
+
+
+def fixture2(d, hid=H2):
+    """The frozen fixture as a handoff@2 file: lane-coded id, contract, sessions on the actor."""
+    t = FIXTURE.read_text(encoding="utf-8").replace(HID, hid).replace("status: prepared\n", "status: prepared\ncontract: relay-kit/handoff@2\n")
+    t = re.sub(r"(\| prepared \| )claude:relay-kit( \|)", r"\1claude:relay-kit#s0\2", t)
+    (d / f"{hid}.md").write_text(t, encoding="utf-8")
+    return d / f"{hid}.md"
+
+
+def git_world(name):
+    """A bare 'shared copy' and two clones with a handoff folder, like two sessions' checkouts."""
+    origin, c1, c2 = TMP / f"{name}.git", TMP / f"{name}-1", TMP / f"{name}-2"
+    g = lambda cwd, *a: subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                                       capture_output=True, text=True)
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], capture_output=True)
+    subprocess.run(["git", "clone", "-q", str(origin), str(c1)], capture_output=True)
+    (c1 / "handoffs" / "outputs").mkdir(parents=True)
+    (c1 / "handoffs" / ".ledger.json").write_text('{"owner": "sam", "lanes": {"relay-kit": "RK"}}', encoding="utf-8")
+    (c1 / "handoffs" / "outputs" / ".keep").write_text("")
+    g(c1, "checkout", "-q", "-b", "main"); g(c1, "add", "."); g(c1, "commit", "-qm", "init"); g(c1, "push", "-q", "-u", "origin", "main")
+    subprocess.run(["git", "clone", "-q", str(origin), str(c2)], capture_output=True)
+    return g, c1, c2
+
+
+def coordination_tests():
+    # item 1: identity. A lane isn't an actor; the owner needs no session.
+    d = TMP / "c-identity"; (d / "outputs").mkdir(parents=True)
+    (d / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    fixture2(d)
+    r_lane = setstate(d, "sent", "claude:relay-kit", "x", hid=H2)
+    r_sess = setstate(d, "sent", "claude:relay-kit#s1", "x", hid=H2)
+    r_own = setstate(d, "acknowledged", "sam", "read", hid=H2)
+    case("ledger: @2 needs a session on every actor; the owner needs none",
+         r_lane[0] != 0 and "session" in r_lane[2] and r_sess[0] == 0 and r_own[0] == 0
+         and run(LEDGER, "--dir", d, "check")[0] == 0, r_lane[2] + r_sess[2] + r_own[2])
+    st = load("status", KIT / "tools" / "status.py")
+    short = st.short_actors(["a claude:aec#01GZK2Kne8fYjfQ x", "b claude:relay-kit#01GZK2KmPhikGJM x", "c claude:aec#01N4bRwz x"])
+    case("identity: sessions with near-identical ids stay apart when shortened",
+         short == ["a claude:aec#01GZK2Kn x", "b claude:relay-kit#01GZK2Km x", "c claude:aec#01N4 x"], str(short))
+    d = TMP / "c-new-by"
+    rc, _, err = run(LEDGER, "--dir", d, "new", "--from", "claude:aec", "--by", "claude:aec", "--to", "codex:aec", "--title", "T")
+    rc2, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:aec", "--to", "codex:aec", "--title", "T", env={"RELAYKIT_ACTOR": "claude:aec#01N4"})
+    case("identity: new refuses a lane as the drafter and takes the session from RELAYKIT_ACTOR",
+         rc != 0 and rc2 == 0 and f"| prepared | claude:aec#01N4 |" in (d / f"{hid}.md").read_text(encoding="utf-8"), err)
+
+    # item 6: recording a step for someone else (the skill/checker conflict in CH-012)
+    d = TMP / "c-for"; (d / "outputs").mkdir(parents=True)
+    (d / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    fixture2(d)
+    setstate(d, "sent", "claude:relay-kit#s1", "pasted", hid=H2)
+    bare = run(LEDGER, "--dir", d, "set", H2, "acknowledged", "--by", "claude:relay-kit#s1", "--note", "from its reply")
+    nonote = run(LEDGER, "--dir", d, "set", H2, "acknowledged", "--by", "claude:relay-kit#s1", "--for", "chatgpt:ada")
+    wrong = run(LEDGER, "--dir", d, "set", H2, "acknowledged", "--by", "claude:relay-kit#s1", "--for", "chatgpt:bob", "--note", "x")
+    ok = run(LEDGER, "--dir", d, "set", H2, "acknowledged", "--by", "claude:relay-kit#s1", "--for", "chatgpt:ada", "--note", "from its reply, chat T4a")
+    (d / "outputs" / f"{H2}.md").write_text("result\n", encoding="utf-8")
+    done = run(LEDGER, "--dir", d, "set", H2, "completed", "--by", "claude:relay-kit#s1", "--for", "chatgpt:ada", "--note", "outputs/" + H2 + ".md, filed from its reply")
+    txt = (d / f"{H2}.md").read_text(encoding="utf-8")
+    case("for: a recipient step recorded by someone else needs --for the recipient and a source note",
+         bare[0] != 0 and nonote[0] != 0 and wrong[0] != 0 and ok[0] == 0 and done[0] == 0
+         and "| acknowledged | claude:relay-kit#s1 for chatgpt:ada |" in txt and run(LEDGER, "--dir", d, "check")[0] == 0,
+         " / ".join(x[2] for x in (bare, nonote, wrong, ok, done)))
+
+    # item 3: protected writes
+    d = TMP / "c-expect"; (d / "outputs").mkdir(parents=True)
+    (d / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    fixture2(d)
+    stale = run(LEDGER, "--dir", d, "set", H2, "sent", "--by", "claude:relay-kit#s1", "--expect", "sent", "--note", "x")
+    fresh = run(LEDGER, "--dir", d, "set", H2, "sent", "--by", "claude:relay-kit#s1", "--expect", "prepared", "--note", "x")
+    case("protect: --expect refuses a write against a state that moved, and allows the right one",
+         stale[0] != 0 and "expected" in stale[2] and fresh[0] == 0, stale[2] + fresh[2])
+
+    g, c1, c2 = git_world("c-history")
+    f = fixture2(c1 / "handoffs")
+    g(c1, "add", "."); g(c1, "commit", "-qm", "h"); base = g(c1, "rev-parse", "HEAD").stdout.strip()
+    setstate(c1 / "handoffs", "sent", "claude:relay-kit#s1", "appended", hid=H2)
+    rc_append, so_append, _ = run(LEDGER, "--dir", c1 / "handoffs", "check", "--base", base)
+    good = f.read_text(encoding="utf-8")
+    f.write_text(good.replace("to: chatgpt:ada", "to: codex:other").replace("| drafted", "| drafted (edited)"), encoding="utf-8")
+    rc_edit, so_edit, _ = run(LEDGER, "--dir", c1 / "handoffs", "check", "--base", base)
+    f.write_text(good, encoding="utf-8")
+    f.rename(f.with_name("HO-RK-20261028-ZZZZ.md"))
+    rc_rm, so_rm, _ = run(LEDGER, "--dir", c1 / "handoffs", "check", "--base", base)
+    case("protect: check --base allows appending, refuses a rewritten header or log and a removed handoff",
+         rc_append == 0 and rc_edit != 0 and "'to' changed" in so_edit and "earlier log lines" in so_edit
+         and rc_rm != 0 and f"{H2}.md: removed" in so_rm, so_append + so_edit + so_rm)
+
+    chk = KIT / "tools" / "check_ledgers.py"
+    gl = TMP / "c-ledgers"; gl.mkdir()
+    gg = lambda *a: subprocess.run(["git", "-C", str(gl), "-c", "user.name=t", "-c", "user.email=t@t", *a], capture_output=True, text=True)
+    row = lambda i, who: json.dumps(dict(id=f"DEC-00{i}", date="2026-11-01", status="proposed", decision="d", scope="s", recorded_by=who)) + "\n"
+    (gl / "decisions.jsonl").write_text(row(1, "claude:aec"), encoding="utf-8")
+    gg("init", "-q"); gg("add", "."); gg("commit", "-qm", "x")
+    (gl / "decisions.jsonl").write_text(row(1, "claude:aec") + row(2, "sam") + row(3, "claude:aec#01N4"), encoding="utf-8")
+    rc_ok, so_ok, _ = run(chk, "--dir", gl, "--git")
+    (gl / "decisions.jsonl").write_text(row(1, "claude:aec") + row(2, "claude:aec"), encoding="utf-8")
+    rc_lane, so_lane, _ = run(chk, "--dir", gl, "--git")
+    (gl / "decisions.jsonl").write_text(row(1, "claude:aec"), encoding="utf-8")
+    (gl / ".gitattributes").write_text("*.jsonl merge=union\n", encoding="utf-8")
+    rc_union, so_union, _ = run(chk, "--dir", gl, "--git")
+    case("protect: new ledger lines need a session recorder (old lines and the owner are fine); merge=union is refused",
+         rc_ok == 0 and rc_lane != 0 and "names a lane" in so_lane and rc_union != 0 and "merge=union" in so_union,
+         so_ok + so_lane + so_union)
+
+    # A: shared handoff id. Online, new skips an id another clone pushed; offline, git conflicts.
+    g, c1, c2 = git_world("c-A")
+    env = {"RELAYKIT_ACTOR": "claude:relay-kit#s1", "RELAYKIT_TEST_SUFFIXES": "AAAA,BBBB"}
+    r1 = run(LEDGER, "--dir", c1 / "handoffs", "new", "--from", "claude:relay-kit", "--to", "codex:x", "--title", "one", env=env)
+    g(c1, "add", "."); g(c1, "commit", "-qm", "one"); g(c1, "push", "-q")
+    r2 = run(LEDGER, "--dir", c2 / "handoffs", "new", "--from", "claude:relay-kit", "--to", "codex:x", "--title", "two",
+             env=dict(env, RELAYKIT_ACTOR="claude:relay-kit#s2"))
+    online = r1[1].endswith("-AAAA") and r2[1].endswith("-BBBB")
+    g3, d1, d2 = git_world("c-A-offline")
+    for c, t in ((d1, "one"), (d2, "two")):
+        run(LEDGER, "--dir", c / "handoffs", "new", "--from", "claude:relay-kit", "--to", "codex:x", "--title", t,
+            env=dict(env, RELAYKIT_TEST_SUFFIXES="AAAA"))
+        g3(c, "add", "."); g3(c, "commit", "-qm", t)
+    g3(d1, "push", "-q")
+    merged = g3(d2, "pull", "-q", "--no-rebase", "origin", "main")
+    case("case A (shared id): online, the second clone skips the pushed id; offline, the clash is a git conflict, never a silent merge",
+         online and merged.returncode != 0 and "CONFLICT" in (merged.stdout + merged.stderr), f"{r1[1]} {r2[1]} {merged.stdout}{merged.stderr}")
+
+    # B: independent work in one lane: two sessions, two handoffs, no refusals (no false blocking).
+    g, c1, c2 = git_world("c-B")
+    h1 = run(LEDGER, "--dir", c1 / "handoffs", "new", "--from", "claude:relay-kit", "--to", "codex:x", "--title", "one",
+             env={"RELAYKIT_ACTOR": "claude:relay-kit#s1"})[1]
+    g(c1, "add", "."); g(c1, "commit", "-qm", "one"); g(c1, "push", "-q")
+    h2 = run(LEDGER, "--dir", c2 / "handoffs", "new", "--from", "claude:relay-kit", "--to", "codex:x", "--title", "two",
+             env={"RELAYKIT_ACTOR": "claude:relay-kit#s2"})[1]
+    g(c2, "add", "."); g(c2, "commit", "-qm", "two"); g(c2, "pull", "-q", "--rebase", "origin", "main"); g(c2, "push", "-q")
+    b1 = run(LEDGER, "--dir", c1 / "handoffs", "set", h1, "blocked", "--by", "claude:relay-kit#s1", "--note", "waiting")
+    b2 = run(LEDGER, "--dir", c2 / "handoffs", "set", h2, "blocked", "--by", "claude:relay-kit#s2", "--note", "waiting")
+    case("case B (independent work): two sessions in one lane, each on its own handoff, are never refused",
+         h1 != h2 and b1[0] == 0 and b2[0] == 0, b1[2] + b2[2])
+
+    # D: expired lease. s1 claimed, went quiet; the owner reassigned on the shared copy; s1's stale write is refused.
+    g, c1, c2 = git_world("c-D")
+    fixture2(c1 / "handoffs")
+    for st_, who in (("sent", "claude:relay-kit#s0"), ("acknowledged", "chatgpt:ada#s1")):
+        setstate(c1 / "handoffs", st_, who, "x", hid=H2)
+    g(c1, "add", "."); g(c1, "commit", "-qm", "claimed"); g(c1, "push", "-q")
+    g(c2, "pull", "-q")
+    own = run(LEDGER, "--dir", c2 / "handoffs", "set", H2, "blocked", "--by", "sam", "--expect", "acknowledged", "--note", "lease expired; reassigning")
+    g(c2, "commit", "-qam", "owner"); g(c2, "push", "-q")
+    late = setstate(c1 / "handoffs", "in_progress", "chatgpt:ada#s1", "back", hid=H2)
+    g(c1, "pull", "-q")
+    after = run(LEDGER, "--dir", c1 / "handoffs", "set", H2, "in_progress", "--by", "chatgpt:ada#s1", "--expect", "acknowledged", "--note", "back")
+    case("case D (expired lease): a stale writer is refused by the shared-copy check, and --expect catches it after a pull",
+         own[0] == 0 and late[0] != 0 and "shared copy" in late[2] and after[0] != 0 and "expected" in after[2],
+         own[2] + late[2] + after[2])
+
+    # E: red CI on the shared branch is shown, and unacknowledged red reaches "Waiting on the owner".
+    stub = TMP / "gh-stub.py"
+    stub.write_text("import json, os, sys\nd = json.load(open(os.environ['GH_STUB_DATA']))\n"
+                    "path = sys.argv[2]\nfor k, v in d.items():\n    if path.startswith(k):\n        print(json.dumps(v)); sys.exit(0)\n"
+                    "sys.exit('no stub for ' + path)\n", encoding="utf-8")
+    gh = TMP / "gh"
+    gh.write_text(f"#!/bin/sh\nexec {sys.executable} {stub} \"$@\"\n", encoding="utf-8"); gh.chmod(0o755)
+    g, c1, _ = git_world("c-E")
+    g(c1, "remote", "set-url", "origin", "https://github.com/o/r.git")
+    run_ = lambda sha, c: dict(status="completed", conclusion=c, head_sha=sha, created_at="2026-11-01T17:24:00Z")
+    issue = dict(number=7, title="Records check failing on main")
+    worlds = {
+        "red": {"repos/o/r/actions": dict(workflow_runs=[run_("ccc", "failure"), run_("bbb", "failure"), run_("aaa", "success")]),
+                "repos/o/r/issues/7/comments": [dict(user=dict(login="github-actions[bot]", type="Bot"))],
+                "repos/o/r/issues": [issue], "repos/o/r": dict(default_branch="main")},
+        "acked": {"repos/o/r/actions": dict(workflow_runs=[run_("ccc", "failure")]),
+                  "repos/o/r/issues/7/comments": [dict(user=dict(login="ada-agent", type="User"))],
+                  "repos/o/r/issues": [issue], "repos/o/r": dict(default_branch="main")},
+        "green": {"repos/o/r/actions": dict(workflow_runs=[run_("ddd", "success")]), "repos/o/r/issues": [],
+                  "repos/o/r": dict(default_branch="main")}}
+    outs = {}
+    for k, w in worlds.items():
+        (TMP / f"gh-{k}.json").write_text(json.dumps(w), encoding="utf-8")
+        outs[k] = run(KIT / "tools" / "status.py", "--root", c1, "--no-fetch",
+                      env={"RELAYKIT_GH": str(gh), "GH_STUB_DATA": str(TMP / f"gh-{k}.json")})[1]
+    wait = lambda o: o.split("== Waiting on the owner")[1].split("==")[0] if "== Waiting on the owner" in o else ""
+    case("case E (red CI): status shows the failing streak and the unacknowledged alert at the top; acked or green raises nothing",
+         "RED o/r@main: 2 failing run(s) in a row since bbb" in outs["red"] and "NOT ACKNOWLEDGED" in outs["red"]
+         and "nobody has acknowledged" in wait(outs["red"])
+         and "acknowledged by ada-agent" in outs["acked"] and "nobody" not in wait(outs["acked"])
+         and "green at ddd" in outs["green"] and "nobody" not in wait(outs["green"]), "\n---\n".join(outs.values()))
+
+
 # ---------------- telemetry ----------------
 def telemetry_tests():
     tel = load("telemetry", X / "chat-telemetry" / "01_chat_telemetry.py")
@@ -550,6 +740,7 @@ if __name__ == "__main__":
     schema_tests()
     governance_tests()
     status_tests()
+    coordination_tests()
     telemetry_tests()
     evidence_tests()
     failed = [r for r in RESULTS if not r[1]]

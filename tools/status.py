@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
 """Where things stand: one read-only summary for starting back up after a restart.
 
-    python3 tools/status.py --root path/to/records [--no-fetch]
+    python3 tools/status.py --root path/to/records [--no-fetch] [--no-ci]
 
 Reads a records folder laid out like the kit's private repo (any part may be missing):
-  handoffs/                 handoff files (relay-kit/handoff@1)
+  handoffs/                 handoff files (relay-kit/handoff@1 or @2)
   governance/decisions.jsonl, governance/challenges.jsonl
   threads.md                the coordination index: which thread or session does what
 
 and prints, in order of what needs attention:
   1. whether this copy is behind the shared copy (a stale copy is how two sessions
      created the same handoff id on 2026-10-29);
-  2. what waits on the owner: proposed decisions nobody has superseded, and handoffs
+  2. the checks on the shared branch, from GitHub through `gh` (skip with --no-ci): red or
+     green, since which commit, the alert issue, and whether anyone has acknowledged it;
+  3. what waits on the owner: proposed decisions nobody has superseded, and handoffs
      whose Authorized section is still unfilled;
-  3. open handoffs by state, with who holds each one, flagging any whose output is
+  4. open handoffs by state, with who holds each one, flagging any whose output is
      already filed but whose state was never closed, and any that has waited past
      --stale-hours (sent with no acknowledgement, or claimed with no progress logged);
-  4. open challenges;
-  5. where the coordination index is and its last change-log line;
-  6. what it couldn't check.
+  5. open challenges;
+  6. where the coordination index is and its last change-log line;
+  7. what it couldn't check.
+
+Ids are shown with their alias (AEC K7QF) and actors with the shortest session prefix that
+is unique among the actors in the folder (claude:aec#01N4); the files keep the long forms.
 
 It changes nothing; `git fetch` only updates remote-tracking refs (skip it with
 --no-fetch). Standard library only."""
@@ -27,6 +32,7 @@ import argparse, datetime as dt, importlib.util, json, pathlib, re, subprocess, 
 KIT = pathlib.Path(__file__).resolve().parent.parent
 LEDGER = KIT / "skills" / "handoff-ledger" / "scripts" / "handoff.py"
 WAITING = {"sent": "NO ACK", "acknowledged": "STALE CLAIM", "in_progress": "STALE CLAIM"}   # timeout, as in a job queue's visibility timeout
+ALERT_TITLE = "Records check failing on main"   # the issue the records workflow opens on a red push
 HOLDER = {"prepared": "from", "sent": "to", "acknowledged": "to", "in_progress": "to", "blocked": "from"}
 
 
@@ -102,9 +108,78 @@ def handoffs(root, gaps, stale_hours):
         age = age_hours(last.get("at", "")) if last else None
         if st in WAITING and age is not None and age > stale_hours:
             flag += f"  {WAITING[st]} for {age / 24:.1f} days"
-        rows.append((st, meta.get("id"), meta.get(HOLDER.get(st, "to"), "?"), meta.get("title", ""),
+        rows.append((st, led.alias(meta.get("id", "")), meta.get(HOLDER.get(st, "to"), "?"), meta.get("title", ""),
                      f"{last.get('at', '')} {last.get('actor', '')}".strip() + flag))
     return rows, unauthorized
+
+
+def short_actors(lines):
+    """Shorten 'lane#session' to the shortest session prefix (at least 4) unique among the
+    sessions seen. Two sessions with near-identical ids (01GZK2Kne8, 01GZK2KmPh) stay apart."""
+    sessions = set(re.findall(r"#([\w-]+)", " ".join(lines)))
+    def short(sid):
+        for n in range(4, len(sid) + 1):
+            if not any(o != sid and o.startswith(sid[:n]) for o in sessions):
+                return sid[:n]
+        return sid
+    return [re.sub(r"#([\w-]+)", lambda m: "#" + short(m.group(1)), l) for l in lines]
+
+
+def ci_state(root, gaps):
+    """(summary line, needs-attention line or None) for the checks on the shared branch."""
+    gh = __import__("os").environ.get("RELAYKIT_GH", "gh")
+    try:
+        url = git(root, "remote", "get-url", "origin")
+    except (RuntimeError, FileNotFoundError):
+        gaps.append("no git remote: checks on the shared branch weren't read")
+        return None, None
+    m = re.search(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?$", url)
+    if not m:
+        gaps.append("remote isn't on GitHub: checks on the shared branch weren't read")
+        return None, None
+    repo = m.group(1)
+
+    def api(path):
+        p = subprocess.run([gh, "api", path], capture_output=True, text=True, timeout=60)
+        if p.returncode:
+            raise RuntimeError(p.stderr.strip() or "gh api failed")
+        return json.loads(p.stdout)
+    try:
+        branch = api(f"repos/{repo}").get("default_branch", "main")
+        runs = api(f"repos/{repo}/actions/runs?branch={branch}&event=push&per_page=20").get("workflow_runs", [])
+        issues = [i for i in api(f"repos/{repo}/issues?state=open&per_page=50")
+                  if i.get("title") == ALERT_TITLE and "pull_request" not in i]
+    except (RuntimeError, FileNotFoundError, ValueError, subprocess.TimeoutExpired) as e:
+        gaps.append(f"checks on the shared branch weren't read ({str(e).splitlines()[0] if str(e) else e})")
+        return None, None
+    done = [r for r in runs if r.get("status") == "completed"]
+    if not done:
+        return f"{repo}@{branch}: no finished runs", None
+    last = done[0]
+    if last.get("conclusion") == "success":
+        line = f"{repo}@{branch}: green at {last.get('head_sha', '')[:7]}"
+        return line + (f"; alert issue #{issues[0]['number']} still open (close it)" if issues else ""), None
+    streak = []   # newest first: the failing runs since the last green one
+    for r in done:
+        if r.get("conclusion") == "success":
+            break
+        streak.append(r)
+    since = streak[-1]
+    line = (f"RED {repo}@{branch}: {len(streak)} failing run(s) in a row since "
+            f"{since.get('head_sha', '')[:7]} ({since.get('created_at', '')})")
+    ack = None
+    if issues:
+        n = issues[0]["number"]
+        try:
+            comments = api(f"repos/{repo}/issues/{n}/comments")
+        except (RuntimeError, ValueError):
+            comments = []
+        people = [c.get("user", {}).get("login") for c in comments if c.get("user", {}).get("type") != "Bot"]
+        ack = people[-1] if people else None
+        line += f"; issue #{n}, " + (f"acknowledged by {ack}" if ack else "NOT ACKNOWLEDGED")
+    else:
+        line += "; no alert issue"
+    return line, None if ack else f"{line.split(':', 1)[0]}: red and nobody has acknowledged it (comment on the alert issue)"
 
 
 def jsonl(path, gaps):
@@ -125,6 +200,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", type=pathlib.Path, default=pathlib.Path("."))
     ap.add_argument("--no-fetch", action="store_true")
+    ap.add_argument("--no-ci", action="store_true", help="don't read the checks on the shared branch")
     ap.add_argument("--stale-hours", type=float, default=24,
                     help="flag a sent handoff with no acknowledgement, or a claimed one with no log line, after this long (default 24)")
     a = ap.parse_args()
@@ -144,18 +220,26 @@ def main():
     if fresh and re.search(r": [1-9]\d* behind", fresh):
         print("PULL FIRST: this copy is behind; ids and states below may be stale.")
 
+    ci, alarm = (None, None) if a.no_ci else ci_state(root, gaps)
+    print("\n== Checks on the shared branch")
+    print(ci or ("not read (--no-ci)" if a.no_ci else "unknown (see Not checked)"))
+
     print("\n== Waiting on the owner")
+    if alarm:
+        print(alarm)
     for x in waiting:
         print(f"{x.get('id')}  proposed {x.get('date', '')}: {x.get('decision', '')}")
     for u in unauthorized:
         print(f"{u}  (Authorized not filled: nobody may start it)")
-    if not waiting and not unauthorized:
+    if not waiting and not unauthorized and not alarm:
         print("nothing")
 
     print("\n== Open handoffs")
     order = ["blocked", "prepared", "sent", "acknowledged", "in_progress"]
-    for st, hid, holder, title, last in sorted(rows, key=lambda r: (order.index(r[0]) if r[0] in order else 9, r[1])):
-        print(f"{hid}  {st:<12} with {holder}  {title}  [last: {last}]")
+    lines = [f"{hid}  {st:<12} with {holder}  {title}  [last: {last}]"
+             for st, hid, holder, title, last in sorted(rows, key=lambda r: (order.index(r[0]) if r[0] in order else 9, r[1]))]
+    for l in short_actors(lines):
+        print(l)
     if not rows:
         print("none")
 

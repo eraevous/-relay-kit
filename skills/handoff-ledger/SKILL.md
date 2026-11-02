@@ -22,9 +22,10 @@ format is plain enough to edit by hand where it doesn't.
 
 ```
 handoffs/
-  .ledger.json              {"owner": "<name>"}: who may cancel and act as either side
-  HO-20261028-001.md        one file per handoff
-  outputs/HO-20261028-001.md   the recipient's result, same id
+  .ledger.json              {"owner": "<name>", "lanes": {"relay-kit": "RK"}}: the owner, who
+                            may cancel and act as either side; optional lane codes for ids
+  HO-RK-20261101-K7QF.md    one file per handoff
+  outputs/HO-RK-20261101-K7QF.md   the recipient's result, same id
 ```
 
 Keep the folder narrow: handoffs and their outputs only, and keep it private: it
@@ -34,18 +35,29 @@ automatic monitoring unless they set that up separately.
 
 ## The file
 
-Contract: `relay-kit/handoff@1` (this file format, the states and the log line).
-New handoffs carry it as `contract:` in their front matter; files without it are read as @1.
+Contract: `relay-kit/handoff@2` (this file format, the states and the log line).
+New handoffs carry it as `contract:` in their front matter; files without it are read as @1,
+and @1 files stay valid.
+
+**Ids.** `HO-<LANE>-<YYYYMMDD>-<XXXX>`: the lane code, the day, and four random characters
+(Crockford base32). Two sessions can create handoffs at the same moment, offline, without
+colliding; say them by their alias, "RK K7QF". @1's `HO-YYYYMMDD-NNN` ids stay valid.
+
+**Actors.** A lane (`claude:aec`) names an activity; `from:` and `to:` name lanes. Whoever
+writes a log line names themselves with a session: `claude:aec#01N4` (Claude Code: the
+session id; ChatGPT: the conversation id; Codex: the thread or task id). Two sessions in
+one lane are then told apart. The owner needs no session. @2 files require it on every
+line; the long form stays in the file, and `status.py` shows the shortest unique prefix.
 
 ```markdown
 ---
-id: HO-20261028-001
+id: HO-RS-20261028-K7QF
 title: One line naming the task
-from: claude:research       # agent:lane — who wrote it
-to: chatgpt:review          # who should do it
+from: claude:research       # agent:lane — the sending lane
+to: chatgpt:review          # the lane that should do it
 created: 2026-10-28T14:00Z
 status: prepared
-contract: relay-kit/handoff@1
+contract: relay-kit/handoff@2
 source: https://chatgpt.com/c/...   # conversation this came from, or "none"
 last_processed: T6a                  # last message read and accounted for (see Checkpoints)
 reply_to:                            # id this answers, if any
@@ -92,7 +104,7 @@ Budget, scope edges, things not to touch.
 | State | Who sets it | Meaning |
 | --- | --- | --- |
 | prepared | sender | Written, not delivered yet |
-| sent | sender, or whoever delivers | Delivered to the recipient; the note says how (relay URL, folder, paste) |
+| sent | sender (or whoever delivers, `--for` the sender) | Delivered to the recipient; the note says how (relay URL, folder, paste) |
 | acknowledged | recipient | Read and understood; questions go in the note |
 | in_progress | recipient | Working on it |
 | completed | recipient | Output exists; the note names it |
@@ -113,9 +125,14 @@ right before pasting, so the copy the recipient reads says `sent`; or leaves it
 `prepared` and records `sent` afterwards with `--at`.
 
 **A chat-only recipient can't complete a handoff by itself.** If it can't write
-files, its `acknowledged` and `completed` lines are proposals. The handoff is
-completed when someone files the output to outputs/<id>.md and records the lines
-with `--at` (the script refuses `completed` until that file exists).
+files (a ChatGPT chat, a Codex thread with no access to this folder), its `acknowledged`
+and `completed` lines are proposals. Whoever files its output to outputs/<id>.md also
+records those lines, **for** it: `--by <you> --for <recipient>`, with `--at` and a note
+saying where they came from. The script refuses `completed` until the output exists.
+
+**Close out what you file.** Filing a recipient's output and recording its `completed`
+are one step. An output filed with the state left at `sent` reads as unfinished work
+(`status.py` flags it as "OUTPUT FILED, state not closed").
 
 ## Which text binds
 
@@ -148,11 +165,17 @@ output.
 4. **Read the handoff, not the thread.** Open the source only from
    `last_processed` forward, and only if the task needs it. When you read
    further, update `last_processed`.
-5. **One writer at a time.** The sender (or the owner) records `sent`; the
-   recipient (or the owner) records `acknowledged`, `in_progress` and `completed`.
-   Either side may record `blocked`; only the owner records `cancelled`.
+5. **One writer per step.** The sender records `sent`; the recipient records
+   `acknowledged`, `in_progress` and `completed`. Either side may record `blocked`; only
+   the owner records `cancelled`. Anyone else records a step only *for* that party
+   (`--for`), with a note giving the source (a reply, a PR, a quote). The owner may
+   record any step.
 6. **Output goes to `outputs/<id>.md`** and starts with the handoff id, the
    recipient, and the date.
+7. **Write against what you read.** Pass `--expect <state you read>` to `set`; it refuses
+   if someone moved the handoff in between. `set` also refuses when the shared copy (the
+   upstream branch) holds a newer version of the file than your last pull: pull, re-read,
+   retry.
 
 ## Checkpoints
 
@@ -168,21 +191,23 @@ full and taken into account in this handoff. Messages after it are unread.
 When delivery or work happened before anyone logged it (a paste into a fresh
 chat, a reply filed later), record each step in order with `--at`, the time it
 actually happened. The log line takes that time and the note gets
-`(recorded <now>)`, so both are kept. Whoever records it on the recipient's
-behalf logs as themselves and says so in the note (`for chatgpt:review`). If the
-exact time is unknown, use the best estimate and say "approx." in the note.
+`(recorded <now>)`, so both are kept. Whoever records a step for someone else names
+themselves with `--by` and the party with `--for`; the log line reads
+`claude:research#01AB for chatgpt:review`. Take times from a clock (a message timestamp,
+a commit time); if you must estimate, say "approx." in the note.
 
 ```
 handoff.py set ID sent         --by sam --at 2026-10-28T17:50Z --note "approx.: pasted into a fresh ChatGPT chat"
-handoff.py set ID acknowledged --by sam --at 2026-10-28T17:51Z --note "for chatgpt:review, from its reply"
-handoff.py set ID completed    --by sam --at 2026-10-28T17:51Z --note "for chatgpt:review: outputs/ID.md"
+handoff.py set ID acknowledged --by claude:research#01AB --for chatgpt:review --at 2026-10-28T17:51Z --note "from its reply, <chat url>"
+handoff.py set ID completed    --by claude:research#01AB --for chatgpt:review --at 2026-10-28T17:51Z --note "outputs/ID.md, filed from its reply"
 ```
 
 ## Doing it
 
-**Hand off:** create the file with `handoff.py new`, which skips any id already used in
-another clone, branch or commit (it fetches first). Copying the template by hand skips
-that check. Fill
+**Hand off:** create the file with `handoff.py new`. It makes a random id, skips any
+already used in another clone, branch or commit (it fetches first), and never replaces an
+existing file. Copying the template by hand skips all of that. Commit and push the new
+file promptly. Fill
 every section, set `prepared`. Show the owner the Task and Authorized sections
 before sending. Deliver by their chosen route, then set `sent` with how.
 
@@ -195,7 +220,7 @@ before sending. Deliver by their chosen route, then set `sent` with how.
   by mistake before.
 
 Then check its status.
-- `sent`: set `acknowledged` (questions go in the note), do the work inside
+- `sent`: set `acknowledged --expect sent` (questions go in the note), do the work inside
   Authorized and Limits, write the output, then set `completed` naming it, or
   `blocked` with the reason.
 - `acknowledged` or `in_progress` with you as recipient: you're resuming
@@ -219,22 +244,27 @@ lines. Report anything addressed to you or stuck in `sent` or `blocked`. Run
 ## Script
 
 ```
-python3 scripts/handoff.py --dir handoffs new --from claude:research --to chatgpt:review --title "..." [--source URL --last-processed T6a --reply-to ID]
-python3 scripts/handoff.py --dir handoffs set HO-20261028-001 sent --by claude:research --note "relayed to https://chatgpt.com/c/..."
-python3 scripts/handoff.py --dir handoffs set HO-20261028-001 completed --by chatgpt:review --note "outputs/HO-20261028-001.md"
+export RELAYKIT_ACTOR=claude:research#01AB      # or pass --by every time
+python3 scripts/handoff.py --dir handoffs new --from claude:research --to chatgpt:review --title "..." [--lane RS --source URL --last-processed T6a --reply-to ID]
+python3 scripts/handoff.py --dir handoffs set HO-RS-20261101-K7QF sent --expect prepared --note "relayed to https://chatgpt.com/c/..."
+python3 scripts/handoff.py --dir handoffs set HO-RS-20261101-K7QF completed --by chatgpt:review#6ae2 --note "outputs/HO-RS-20261101-K7QF.md"
 python3 scripts/handoff.py --dir handoffs list [--status sent]
-python3 scripts/handoff.py --dir handoffs check
+python3 scripts/handoff.py --dir handoffs check [--base origin/main]
 ```
 
 ## What the script enforces, and what it doesn't
 
-Enforced: ids of the form HO-YYYYMMDD-NNN that stay inside the folder; the
+Enforced: ids of either form that stay inside the folder; `new` never replaces a
+file and never reuses an id seen in git; an actor with a session on @2 files, and a note
+on any step recorded `--for` someone else; `--expect`; refusing a write when the shared
+copy changed since the last pull; with `check --base REF`, no handoff removed and no
+id, from, to, created or earlier log line changed since REF; the
 whole file is validated before every update, by the same rules `check` uses, and
 the update is refused if the file is already inconsistent; legal state moves;
 a note on `sent`, `blocked` and `completed`; no TODO placeholders once a handoff
 leaves `prepared`; an output file before `completed`; single-line fields; log
-lines written inside the Log section, which must be last; `--by` matching the
-file's `from` (for `sent`), its `to` (for recipient states), or the owner. Writes
+lines written inside the Log section, which must be last; `--by` (or its `--for`)
+matching the file's `from` (for `sent`), its `to` (for recipient states), or the owner. Writes
 go through a temporary file and a lock file (`.handoff.lock`), and are refused
 if the file changed after it was read. `check` reports a leftover lock file.
 
@@ -246,4 +276,7 @@ with `reply_to`. Hand edits bypass all of it; `check` finds inconsistencies
 after the fact. The log is append-only by convention: the file is rewritten on
 each update, so it isn't tamper-evident. Keep the folder in git for a history
 you can trust. The lock is advisory and local; it doesn't coordinate writers on
-different machines syncing one folder.
+different machines syncing one folder. Across clones, the shared-copy check narrows the
+window to the time between `set` and `git push`; git refusing a non-fast-forward push
+closes it. Nothing warns yet that another session is working the same files (overlap
+warning: scoped, not built).

@@ -74,6 +74,9 @@ owner (proposed decisions, handoffs nobody is authorized to start), open handoff
 holds each, open challenges, the coordination index's last change, and what it couldn't
 check. It changes nothing. A new assistant session can run it as its first step.
 
+For ids in shared lists other than handoffs (candidates, notes), `tools/new_id.py --prefix C
+--lane AEC` makes one that two sessions can't both pick.
+
 ## Docs
 
 - [Conversation schema](docs/conversation-schema.md): the shared format and message ids (`T3a2`).

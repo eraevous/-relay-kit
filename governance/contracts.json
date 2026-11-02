@@ -17,15 +17,16 @@
       ]
     },
     {
-      "id": "relay-kit/handoff@1",
-      "what": "The handoff file: front matter, sections, states, log line, and the folder's .ledger.json owner setting.",
+      "id": "relay-kit/handoff@2",
+      "what": "The handoff file: front matter, sections, states, log line, and the folder's .ledger.json owner and lane settings. @2 (HO-20261101-005): random lane-coded ids (HO-LANE-YYYYMMDD-XXXX), actors with a session (lane#session), steps recorded 'for' another party. @1 files (HO-YYYYMMDD-NNN, no sessions) stay readable and valid.",
       "spec": "skills/handoff-ledger/SKILL.md",
       "implementers": [
         "skills/handoff-ledger/scripts/handoff.py"
       ],
       "tests": [
         "ledger: prepared -> sent -> acknowledged -> completed, then check",
-        "ledger: a handoff from a newer contract version is refused"
+        "ledger: a handoff from a newer contract version is refused",
+        "ledger: @2 needs a session on every actor; the owner needs none"
       ]
     },
     {
