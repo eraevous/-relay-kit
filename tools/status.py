@@ -116,13 +116,13 @@ def handoffs(root, gaps, stale_hours):
 def short_actors(lines):
     """Shorten 'lane#session' to the shortest session prefix (at least 4) unique among the
     sessions seen. Two sessions with near-identical ids (01GZK2Kne8, 01GZK2KmPh) stay apart."""
-    sessions = set(re.findall(r"#([\w-]+)", " ".join(lines)))
+    sessions = set(re.findall(r"[\w.-]+:[\w.-]+#([\w-]+)", " ".join(lines)))
     def short(sid):
         for n in range(4, len(sid) + 1):
             if not any(o != sid and o.startswith(sid[:n]) for o in sessions):
                 return sid[:n]
         return sid
-    return [re.sub(r"#([\w-]+)", lambda m: "#" + short(m.group(1)), l) for l in lines]
+    return [re.sub(r"([\w.-]+:[\w.-]+)#([\w-]+)", lambda m: m.group(1) + "#" + short(m.group(2)), l) for l in lines]
 
 
 def ci_state(root, gaps):
@@ -152,34 +152,47 @@ def ci_state(root, gaps):
     except (RuntimeError, FileNotFoundError, ValueError, subprocess.TimeoutExpired) as e:
         gaps.append(f"checks on the shared branch weren't read ({str(e).splitlines()[0] if str(e) else e})")
         return None, None
-    done = [r for r in runs if r.get("status") == "completed"]
-    if not done:
+    neutral = {"cancelled", "skipped", "neutral", "stale"}   # superseded or not run: neither red nor green
+    flows = {}
+    for r in runs:   # newest first; each workflow is its own check
+        if r.get("status") == "completed" and r.get("conclusion") not in neutral:
+            flows.setdefault(r.get("name") or str(r.get("workflow_id")), []).append(r)
+    if not flows:
         return f"{repo}@{branch}: no finished runs", None
-    last = done[0]
-    if last.get("conclusion") == "success":
-        line = f"{repo}@{branch}: green at {last.get('head_sha', '')[:7]}"
-        return line + (f"; alert issue #{issues[0]['number']} still open (close it)" if issues else ""), None
-    streak = []   # newest first: the failing runs since the last green one
-    for r in done:
-        if r.get("conclusion") == "success":
-            break
-        streak.append(r)
-    since = streak[-1]
-    line = (f"RED {repo}@{branch}: {len(streak)} failing run(s) in a row since "
-            f"{since.get('head_sha', '')[:7]} ({since.get('created_at', '')})")
+    lines, red_since = [], None
+    for name, done in sorted(flows.items()):
+        streak = []
+        for r in done:
+            if r.get("conclusion") == "success":
+                break
+            streak.append(r)
+        if not streak:
+            lines.append(f"{name}: green at {done[0].get('head_sha', '')[:7]}")
+            continue
+        since = streak[-1]
+        red_since = min(red_since or since.get("created_at", ""), since.get("created_at", ""))
+        lines.append(f"{name}: RED, {len(streak)} failing run(s) in a row since {since.get('head_sha', '')[:7]} "
+                     f"({since.get('created_at', '')})")
+    head = f"{repo}@{branch}"
+    if red_since is None:
+        extra = f"\nalert issue #{issues[0]['number']} still open (close it)" if issues else ""
+        return head + ": all green\n" + "\n".join(lines) + extra, None
     ack = None
     if issues:
         n = issues[0]["number"]
         try:
-            comments = api(f"repos/{repo}/issues/{n}/comments")
-        except (RuntimeError, ValueError):
+            comments = api(f"repos/{repo}/issues/{n}/comments?per_page=100")
+        except (RuntimeError, ValueError, subprocess.TimeoutExpired):
             comments = []
-        people = [c.get("user", {}).get("login") for c in comments if c.get("user", {}).get("type") != "Bot"]
+            gaps.append(f"alert issue #{n}'s comments weren't read: acknowledgement unknown")
+        people = [c.get("user", {}).get("login") for c in comments
+                  if c.get("user", {}).get("type") != "Bot" and c.get("created_at", "") >= red_since]   # only this incident
         ack = people[-1] if people else None
-        line += f"; issue #{n}, " + (f"acknowledged by {ack}" if ack else "NOT ACKNOWLEDGED")
+        alert = f"issue #{n}, " + (f"acknowledged by {ack}" if ack else "NOT ACKNOWLEDGED")
     else:
-        line += "; no alert issue"
-    return line, None if ack else f"{line.split(':', 1)[0]}: red and nobody has acknowledged it (comment on the alert issue)"
+        alert = "no alert issue"
+    text = f"RED {head}: {alert}\n" + "\n".join(lines)
+    return text, None if ack else f"RED {head}: failing checks nobody has acknowledged (comment on the alert issue)"
 
 
 def jsonl(path, gaps):
