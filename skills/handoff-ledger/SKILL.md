@@ -48,6 +48,8 @@ writes a log line names themselves with a session: `claude:aec#01N4` (Claude Cod
 session id; ChatGPT: the conversation id; Codex: the thread or task id). Two sessions in
 one lane are then told apart. The owner needs no session. @2 files require it on every
 line; the long form stays in the file, and `status.py` shows the shortest unique prefix.
+@1 files take only @1 syntax (`--by <name>`, no session, no `--for`), so tools that read
+only @1 can still read them.
 
 ```markdown
 ---
@@ -167,15 +169,18 @@ output.
    further, update `last_processed`.
 5. **One writer per step.** The sender records `sent`; the recipient records
    `acknowledged`, `in_progress` and `completed`. Either side may record `blocked`; only
-   the owner records `cancelled`. Anyone else records a step only *for* that party
-   (`--for`), with a note giving the source (a reply, a PR, a quote). The owner may
-   record any step.
+   the owner records `cancelled`. Anyone else records `sent`, `acknowledged`,
+   `in_progress` or `completed` only *for* that party (`--for`), with a note giving the
+   source (a reply, a PR, a quote). Nobody records a step for the owner, and `blocked` and
+   `cancelled` are never recorded for someone else. The owner may record any step.
 6. **Output goes to `outputs/<id>.md`** and starts with the handoff id, the
    recipient, and the date.
 7. **Write against what you read.** Pass `--expect <state you read>` to `set`; it refuses
-   if someone moved the handoff in between. `set` also refuses when the shared copy (the
-   upstream branch) holds a newer version of the file than your last pull: pull, re-read,
-   retry.
+   if someone moved the handoff in between. `set` also refuses when the shared copy
+   (origin's default branch, whatever branch you're on) holds a version of the file your
+   clone never had: pull, re-read, retry.
+8. **After delivery, Task and Authorized only grow.** Add an update below what's there
+   (dated, quoting the owner); don't rewrite it. `check --base` enforces this.
 
 ## Checkpoints
 
@@ -245,7 +250,8 @@ lines. Report anything addressed to you or stuck in `sent` or `blocked`. Run
 
 ```
 export RELAYKIT_ACTOR=claude:research#01AB      # or pass --by every time
-python3 scripts/handoff.py --dir handoffs new --from claude:research --to chatgpt:review --title "..." [--lane RS --source URL --last-processed T6a --reply-to ID]
+python3 scripts/handoff.py --dir handoffs new --from claude:research --to chatgpt:review --lane RS --title "..." [--source URL --last-processed T6a --reply-to ID]
+# without --lane: the "lanes" map in .ledger.json, else the lane's name (HO-RESEARCH-...)
 python3 scripts/handoff.py --dir handoffs set HO-RS-20261101-K7QF sent --expect prepared --note "relayed to https://chatgpt.com/c/..."
 python3 scripts/handoff.py --dir handoffs set HO-RS-20261101-K7QF completed --by chatgpt:review#6ae2 --note "outputs/HO-RS-20261101-K7QF.md"
 python3 scripts/handoff.py --dir handoffs list [--status sent]
@@ -257,8 +263,9 @@ python3 scripts/handoff.py --dir handoffs check [--base origin/main]
 Enforced: ids of either form that stay inside the folder; `new` never replaces a
 file and never reuses an id seen in git; an actor with a session on @2 files, and a note
 on any step recorded `--for` someone else; `--expect`; refusing a write when the shared
-copy changed since the last pull; with `check --base REF`, no handoff removed and no
-id, from, to, created or earlier log line changed since REF; the
+copy changed since the last pull; with `check --base REF`, compared with where the branch
+left REF: no handoff removed, no id, from, to, created or earlier log line changed, and
+no Task or Authorized section rewritten after delivery; the
 whole file is validated before every update, by the same rules `check` uses, and
 the update is refused if the file is already inconsistent; legal state moves;
 a note on `sent`, `blocked` and `completed`; no TODO placeholders once a handoff
