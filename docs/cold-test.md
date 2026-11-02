@@ -8,9 +8,9 @@ This tests the handoff layer without any browser relay.
 Send a fresh chat **two files and one message**, nothing else:
 
 1. `skills/handoff-ledger/SKILL.md`, the procedure.
-2. The handoff file, e.g. `HO-YYYYMMDD-NNN.md`.
+2. The handoff file, e.g. `HO-LANE-YYYYMMDD-XXXX.md`.
 
-> Pick up handoff HO-YYYYMMDD-NNN. Everything you need is in the two attached files.
+> Pick up handoff HO-LANE-YYYYMMDD-XXXX. Everything you need is in the two attached files.
 > Follow the handoff-ledger procedure and give me the output in the format the handoff
 > asks for.
 

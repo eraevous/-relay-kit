@@ -26,7 +26,10 @@ challenges.jsonl, one object per line:
 With --git, also checks that both files only grew since the last commit, or since
 --base REF (append-only):
 earlier lines may not be edited or removed. A status change is a new line with the same
-subject, not an edit."""
+subject, not an edit. It also checks that the ledgers aren't set to git's `merge=union`
+(which would join two branches' lines silently, duplicate ids included), and that lines
+added since --base name an agent recorder with its session (`recorded_by:
+"claude:aec#01N4"`: a lane is not an actor)."""
 import argparse, json, pathlib, re, subprocess, sys
 
 DEC_STATUS = {"proposed", "adopted", "rejected", "superseded"}
@@ -103,6 +106,35 @@ def check_challenges(rows):
     return out
 
 
+def check_merge_attr(path):
+    p = subprocess.run(["git", "-C", str(path.parent), "check-attr", "merge", "--", path.name],
+                       capture_output=True, text=True)
+    if p.returncode == 0 and p.stdout.strip().endswith(": union"):
+        return [f"{path.name}: .gitattributes sets merge=union; concurrent appends must conflict, not be joined"]
+    return []
+
+
+def check_new_recorders(path, base):
+    """Lines added since base: an agent recorder ('x:y') must carry a session ('x:y#id')."""
+    try:
+        rel = subprocess.run(["git", "-C", str(path.parent), "ls-files", "--full-name", path.name],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        old = subprocess.run(["git", "-C", str(path.parent), "show", f"{base}:{rel}"],
+                             capture_output=True, text=True, check=True).stdout if rel else ""
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        old = ""
+    out = []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for n, line in enumerate(lines[len(old.splitlines()):], len(old.splitlines()) + 1):
+        try:
+            who = str(json.loads(line).get("recorded_by", ""))
+        except (ValueError, AttributeError):
+            continue
+        if ":" in who and "#" not in who.split()[0]:
+            out.append(f"{path.name}:{n}: recorded_by {who!r} names a lane, not a session (e.g. {who.split()[0]}#<session>)")
+    return out
+
+
 def check_append_only(path, base):
     try:
         rel = subprocess.run(["git", "-C", str(path.parent), "ls-files", "--full-name", path.name],
@@ -133,6 +165,7 @@ def main():
         for f in ("decisions.jsonl", "challenges.jsonl"):
             if (a.dir / f).exists():
                 problems += check_append_only(a.dir / f, a.base)
+                problems += check_merge_attr(a.dir / f) + check_new_recorders(a.dir / f, a.base)
     for x in problems:
         print("PROBLEM", x)
     print(f"{len(dec_rows)} decision(s), {len(ch_rows)} challenge(s), {len(problems)} problem(s)")

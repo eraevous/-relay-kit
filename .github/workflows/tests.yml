@@ -13,7 +13,10 @@ jobs:
       # Python 3.11+ and Node come with the runner image; the kit uses the standard library only.
       - name: Core tests
         run: python3 -I -B tests/run_tests.py
+      # Each step runs whatever the others did, so one failure can't hide another (dogfood-001).
       - name: Browser-script tests
+        if: success() || failure()
         run: node tests/browser_tests.cjs
       - name: Pre-publish scan (emails, chat links, tokens)
+        if: success() || failure()
         run: python3 -I tools/prepublish_scan.py
