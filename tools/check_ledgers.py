@@ -27,9 +27,9 @@ With --git, also checks that both files only grew since the last commit, or sinc
 --base REF (append-only):
 earlier lines may not be edited or removed. A status change is a new line with the same
 subject, not an edit. It also checks that the ledgers aren't set to git's `merge=union`
-(which would join two branches' lines silently, duplicate ids included), and that lines
-added since --base name an agent recorder with its session (`recorded_by:
-"claude:aec#01N4"`: a lane is not an actor)."""
+(which would join two branches' lines silently, duplicate ids included), and that every
+line added since --base has `recorded_by`: the owner's name, or an agent with its session
+(`"claude:aec#01N4"`: a lane is not an actor)."""
 import argparse, json, pathlib, re, subprocess, sys
 
 DEC_STATUS = {"proposed", "adopted", "rejected", "superseded"}
@@ -127,11 +127,14 @@ def check_new_recorders(path, base):
     lines = path.read_text(encoding="utf-8").splitlines()
     for n, line in enumerate(lines[len(old.splitlines()):], len(old.splitlines()) + 1):
         try:
-            who = str(json.loads(line).get("recorded_by", ""))
+            who = str(json.loads(line).get("recorded_by", "")).strip()
         except (ValueError, AttributeError):
             continue
-        if ":" in who and "#" not in who.split()[0]:
-            out.append(f"{path.name}:{n}: recorded_by {who!r} names a lane, not a session (e.g. {who.split()[0]}#<session>)")
+        first = who.split()[0] if who else ""
+        if not who:
+            out.append(f"{path.name}:{n}: new lines need 'recorded_by' (the owner's name, or lane#session)")
+        elif ":" in first and not re.fullmatch(r"[\w.-]+:[\w.-]+#[\w-]+", first):
+            out.append(f"{path.name}:{n}: recorded_by {who!r} names a lane, not a session (e.g. {first.split('#')[0]}#<session>)")
     return out
 
 

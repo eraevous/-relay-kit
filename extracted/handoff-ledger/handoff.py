@@ -65,7 +65,8 @@ def load_owner(d):
 B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 ID_PAT = r"HO-(?:\d{8}-\d{3}|[A-Z0-9]{1,12}-\d{8}-[0-9A-HJKMNP-TV-Z]{4})"
 ID_RE = re.compile(rf"^{ID_PAT}$")
-ACTOR_RE = re.compile(r"^([\w.:-]+?)(?:#([\w-]+))?(?: for ([\w.:-]+))?$")
+ACTOR_RE = re.compile(r"^([\w.:-]+?)(?:#([\w-]+))?(?: for ([\w.:-]+?)(?:#[\w-]+)?)?$")
+FOR_STATES = {"sent", "acknowledged", "in_progress", "completed"}   # steps a carrier may record for a party
 REQUIRED = ["id", "title", "from", "to", "created", "status", "source", "last_processed"]
 SECTIONS = ["Task", "Authorized", "Proposals", "Context", "Expected output", "Limits", "Log"]
 LOG_RE = re.compile(r"^- (\S+) \| (\w+) \| ([^|]+?) \|(?: (.*))?$")
@@ -167,11 +168,18 @@ def actor_error(meta, state, field, contract, note):
     if not parsed:
         return f"actor '{field}' isn't 'name', 'name#session' or 'name#session for party'"
     base, session, party = parsed
-    if contract != "relay-kit/handoff@1" and base != OWNER and not session:
+    if contract == "relay-kit/handoff@1":
+        if session or party:   # @1 readers know neither; keep @1 files readable by them
+            return f"'{field}': this is a handoff@1 file; write '--by <name>' without a session or --for (or as the owner)"
+    elif base != OWNER and not session:
         return f"actor '{field}' needs a session ('{base}#<session id>'): a lane isn't an actor"
     if party:
         if party == base:
             return f"'{field}': 'for' names someone else"
+        if party == OWNER:
+            return f"'{field}': nobody records a step for the owner; the owner's steps are written as the owner"
+        if state not in FOR_STATES:
+            return f"'{state}' can't be recorded for someone else (only {', '.join(sorted(FOR_STATES))})"
         if not (note or "").strip():
             return f"'{field}' records a step for {party}; the note must say where that came from"
     return owner_error(meta, state, party or base)
@@ -279,8 +287,11 @@ def problems_in(text, stem, outputs_dir):
     for i, e in enumerate(log, 1):
         if i == 1:
             parsed = parse_actor(e["actor"])
-            if not parsed or (contract != "relay-kit/handoff@1" and parsed[0] != meta.get("from", "").lower()):
-                out.append(f"log line 1: drafted by '{e['actor']}', not the sender ({meta.get('from')})")
+            if contract != "relay-kit/handoff@1":
+                if not parsed or parsed[2] or parsed[0] not in (meta.get("from", "").lower(), OWNER):
+                    out.append(f"log line 1: drafted by '{e['actor']}', not the sender ({meta.get('from')}) or the owner")
+                elif parsed[0] != OWNER and not parsed[1]:
+                    out.append(f"log line 1: actor '{e['actor']}' needs a session ('{parsed[0]}#<session id>')")
         else:
             err = actor_error(meta, e["state"], e["actor"], contract, e["note"])
             if err:
@@ -387,7 +398,9 @@ def cmd_new(a):
     taken, note = ids_in_git(a.dir)
     if note:
         print(f"note: {note}", file=sys.stderr)
-    forced = [x for x in os.environ.get("RELAYKIT_TEST_SUFFIXES", "").split(",") if x]   # tests only: replay a collision
+    # Tests only: replay a collision by forcing suffixes. Picking an id gains nothing: taken ids
+    # are still skipped and an existing file is never replaced.
+    forced = [x for x in os.environ.get("RELAYKIT_TEST_SUFFIXES", "").split(",") if x]
     for i in range(50):
         suffix = forced[i] if i < len(forced) else "".join(secrets.choice(B32) for _ in range(4))
         hid = f"HO-{lane}-{day}-{suffix}"
@@ -403,33 +416,53 @@ def cmd_new(a):
     raise Refused("couldn't find a free id in 50 tries")
 
 
+def shared_ref(git):
+    """The shared copy: origin's default branch (origin/HEAD), else origin/main or origin/master."""
+    r = git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip()
+    for ref in ("refs/remotes/origin/main", "refs/remotes/origin/master"):
+        if git("rev-parse", "--verify", "--quiet", ref).returncode == 0:
+            return ref
+    return None
+
+
 def shared_copy_error(p, fetch):
-    """Compare-and-swap against the shared copy: refuse if the upstream branch holds a different
-    version of this handoff than the one this clone last pulled. Returns (error, note)."""
+    """Compare-and-swap against the shared copy (origin's default branch, whatever branch or
+    detached HEAD this clone is on): refuse if the shared copy holds a version of this handoff
+    that this clone has never had. Returns (error, note)."""
     def git(*args):
         return subprocess.run(["git", "-C", str(p.parent), *args], capture_output=True, text=True, timeout=60)
     try:
         if git("rev-parse", "--git-dir").returncode != 0:
             return None, None
-        if git("rev-parse", "--abbrev-ref", "@{upstream}").returncode != 0:
-            return None, "no upstream branch: the shared copy wasn't compared"
-        fetched = (git("fetch", "--quiet").returncode == 0) if fetch else False
-        rel = git("ls-files", "--full-name", "--", p.name).stdout.strip() or \
-            git("rev-parse", "--show-prefix").stdout.strip() + p.name
-        base = git("merge-base", "HEAD", "@{upstream}").stdout.strip()
-        mine = git("rev-parse", f"{base}:{rel}") if base else None
-        theirs = git("rev-parse", f"@{{upstream}}:{rel}")
+        if git("remote").stdout.strip() == "":
+            return None, "no remote: the shared copy wasn't compared"
+        fetched = (git("fetch", "--quiet", "origin").returncode == 0) if fetch else False
+        ref = shared_ref(git)
+        if not ref:
+            return None, "no origin default branch found: the shared copy wasn't compared"
+        rel = git("rev-parse", "--show-prefix").stdout.strip() + p.name
+        theirs = git("rev-parse", f"{ref}:{rel}")
+        base = git("merge-base", "HEAD", ref).stdout.strip()
+        if theirs.returncode != 0:
+            if base and git("rev-parse", f"{base}:{rel}").returncode == 0:   # was shared, now gone
+                return (f"{p.name} was removed from the shared copy ({ref.rsplit('/', 1)[-1]}); pull and check "
+                        "before writing to it"), None
+            return None, None if fetched or not fetch else "fetch failed: compared with the last fetch"
+        theirs = theirs.stdout.strip()
+        known = set()
+        for rev in (base, "HEAD"):
+            r = git("rev-parse", f"{rev}:{rel}") if rev else None
+            if r is not None and r.returncode == 0:
+                known.add(r.stdout.strip())
+        known.add(git("hash-object", "--", p.name).stdout.strip())   # identical content, e.g. after a squash merge
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None, "git unavailable: the shared copy wasn't compared"
-    note = None if fetched or not fetch else "fetch failed: compared with the last fetch"
-    if not fetch:
-        note = "--no-fetch: compared with the last fetch"
-    if theirs.returncode != 0:
-        return None, note   # not on the shared branch yet
-    # changed upstream since this clone's last common point with it (local, unpushed commits are fine)
-    if mine is None or mine.returncode != 0 or mine.stdout.strip() != theirs.stdout.strip():
-        return (f"the shared copy of {p.name} changed since this clone last pulled; pull, re-read it and "
-                "retry (someone else may have taken or moved it)"), note
+    note = "--no-fetch: compared with the last fetch" if not fetch else (None if fetched else "fetch failed: compared with the last fetch")
+    if theirs not in known:
+        return (f"the shared copy of {p.name} ({ref.rsplit('/', 1)[-1]}) has a version this clone never had; "
+                "pull, re-read it and retry (someone else may have taken or moved it)"), note
     return None, note
 
 
@@ -522,17 +555,22 @@ def history_problems(d, base):
     def git(*args):
         return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, timeout=60)
     prefix = git("rev-parse", "--show-prefix").stdout.strip()
+    mb = git("merge-base", base, "HEAD")
+    if mb.returncode != 0:
+        return [f"--base {base}: {mb.stderr.strip() or 'no common history with HEAD'}"]
+    base = mb.stdout.strip()   # compare with where this branch left the base, not the base's tip
     listed = git("ls-tree", "--name-only", base, "--", ".")
     if listed.returncode != 0:
         return [f"--base {base}: {listed.stderr.strip() or 'not a git revision'}"]
+    here = {q.name: q for q in d.rglob("HO-*.md")}   # a handoff archived into a subfolder still counts
     out = []
     for name in listed.stdout.split():
         name = name.rsplit("/", 1)[-1]
         if not re.match(rf"^{ID_PAT}\.md$", name):
             continue
-        p = d / name
-        if not p.exists():
-            out.append(f"{name}: removed since {base}")
+        p = here.get(name)
+        if p is None:
+            out.append(f"{name}: removed since {base[:7]}")
             continue
         try:
             old_meta, old_log, _, _ = parse_text(git("show", f"{base}:{prefix}{name}").stdout, name)
@@ -541,9 +579,16 @@ def history_problems(d, base):
             continue   # unreadable either side: problems_in reports it
         for k in FIXED:
             if old_meta.get(k, "") != meta.get(k, ""):
-                out.append(f"{name}: '{k}' changed since {base} ({old_meta.get(k)!r} -> {meta.get(k)!r}); open a new handoff instead")
+                out.append(f"{name}: '{k}' changed since {base[:7]} ({old_meta.get(k)!r} -> {meta.get(k)!r}); open a new handoff instead")
         if log[:len(old_log)] != old_log:
-            out.append(f"{name}: earlier log lines changed since {base}; the log is append-only")
+            out.append(f"{name}: earlier log lines changed since {base[:7]}; the log is append-only")
+        if old_meta.get("status") not in (None, "prepared"):   # delivered: what was asked and allowed only grows
+            old_text = git("show", f"{base}:{prefix}{name}").stdout
+            for sec in ("Task", "Authorized"):
+                pat = rf"^## {sec}[ \t]*\n(.*?)(?=^## |\Z)"
+                o, n = re.search(pat, old_text, re.S | re.M), re.search(pat, p.read_text(encoding="utf-8"), re.S | re.M)
+                if o and (not n or not n.group(1).rstrip().startswith(o.group(1).rstrip())):
+                    out.append(f"{name}: '## {sec}' was rewritten after delivery; append an update instead")
     return out
 
 

@@ -429,7 +429,7 @@ def governance_tests():
     git("init", "-q"); git("add", "."); git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x")
     (gi / "decisions.jsonl").write_text(json.dumps(dict(dec[0], decision="rewritten")) + "\n", encoding="utf-8")
     rc, so, _ = run(chk, "--dir", gi, "--git")
-    (gi / "decisions.jsonl").write_text(json.dumps(dec[0]) + "\n" + json.dumps(dec[1]) + "\n", encoding="utf-8")
+    (gi / "decisions.jsonl").write_text(json.dumps(dec[0]) + "\n" + json.dumps(dict(dec[1], recorded_by="sam")) + "\n", encoding="utf-8")
     rc2, so2, _ = run(chk, "--dir", gi, "--git")
     case("ledgers: --git catches an edited earlier line and allows appending", rc != 0 and "append-only" in so and rc2 == 0, so + so2)
 
@@ -601,10 +601,14 @@ def coordination_tests():
     rc_ok, so_ok, _ = run(chk, "--dir", gl, "--git")
     (gl / "decisions.jsonl").write_text(row(1, "claude:aec") + row(2, "claude:aec"), encoding="utf-8")
     rc_lane, so_lane, _ = run(chk, "--dir", gl, "--git")
+    for who in ("", "claude:aec#"):
+        (gl / "decisions.jsonl").write_text(row(1, "claude:aec") + row(2, who), encoding="utf-8")
+        rc_x, so_x, _ = run(chk, "--dir", gl, "--git")
+        rc_lane, so_lane = (rc_lane if rc_x else 0), so_lane + so_x
     (gl / "decisions.jsonl").write_text(row(1, "claude:aec"), encoding="utf-8")
     (gl / ".gitattributes").write_text("*.jsonl merge=union\n", encoding="utf-8")
     rc_union, so_union, _ = run(chk, "--dir", gl, "--git")
-    case("protect: new ledger lines need a session recorder (old lines and the owner are fine); merge=union is refused",
+    case("protect: new ledger lines need a recorder with a real session (old lines and the owner are fine); merge=union is refused",
          rc_ok == 0 and rc_lane != 0 and "names a lane" in so_lane and rc_union != 0 and "merge=union" in so_union,
          so_ok + so_lane + so_union)
 
@@ -658,21 +662,25 @@ def coordination_tests():
     # E: red CI on the shared branch is shown, and unacknowledged red reaches "Waiting on the owner".
     stub = TMP / "gh-stub.py"
     stub.write_text("import json, os, sys\nd = json.load(open(os.environ['GH_STUB_DATA']))\n"
-                    "path = sys.argv[2]\nfor k, v in d.items():\n    if path.startswith(k):\n        print(json.dumps(v)); sys.exit(0)\n"
+                    "path = sys.argv[2]\nfor k in sorted(d, key=len, reverse=True):\n    if path.startswith(k):\n        print(json.dumps(d[k])); sys.exit(0)\n"
                     "sys.exit('no stub for ' + path)\n", encoding="utf-8")
     gh = TMP / "gh"
     gh.write_text(f"#!/bin/sh\nexec {sys.executable} {stub} \"$@\"\n", encoding="utf-8"); gh.chmod(0o755)
     g, c1, _ = git_world("c-E")
     g(c1, "remote", "set-url", "origin", "https://github.com/o/r.git")
-    run_ = lambda sha, c: dict(status="completed", conclusion=c, head_sha=sha, created_at="2026-11-01T17:24:00Z")
+    run_ = lambda sha, c, wf="records", t="2026-11-01T17:24:00Z": dict(status="completed", conclusion=c, head_sha=sha, created_at=t, name=wf)
     issue = dict(number=7, title="Records check failing on main")
+    base = {"repos/o/r/issues/7/comments": [dict(user=dict(login="github-actions[bot]", type="Bot"), created_at="2026-11-01T17:25:00Z")],
+            "repos/o/r/issues": [issue], "repos/o/r": dict(default_branch="main")}
     worlds = {
-        "red": {"repos/o/r/actions": dict(workflow_runs=[run_("ccc", "failure"), run_("bbb", "failure"), run_("aaa", "success")]),
-                "repos/o/r/issues/7/comments": [dict(user=dict(login="github-actions[bot]", type="Bot"))],
-                "repos/o/r/issues": [issue], "repos/o/r": dict(default_branch="main")},
-        "acked": {"repos/o/r/actions": dict(workflow_runs=[run_("ccc", "failure")]),
-                  "repos/o/r/issues/7/comments": [dict(user=dict(login="ada-agent", type="User"))],
-                  "repos/o/r/issues": [issue], "repos/o/r": dict(default_branch="main")},
+        "red": dict(base, **{"repos/o/r/actions": dict(workflow_runs=[run_("ccc", "failure"), run_("bbb", "failure"), run_("aaa", "success")])}),
+        "acked": dict(base, **{"repos/o/r/actions": dict(workflow_runs=[run_("ccc", "failure")]),
+                               "repos/o/r/issues/7/comments": [dict(user=dict(login="ada", type="User"), created_at="2026-11-01T18:00:00Z")]}),
+        "old-ack": dict(base, **{"repos/o/r/actions": dict(workflow_runs=[run_("ccc", "failure")]),
+                                 "repos/o/r/issues/7/comments": [dict(user=dict(login="ada", type="User"), created_at="2026-10-01T09:00:00Z")]}),
+        "other-green": dict(base, **{"repos/o/r/actions": dict(workflow_runs=[run_("ccc", "success", "pages"), run_("ccc", "failure", "records")])}),
+        "cancelled": {"repos/o/r/actions": dict(workflow_runs=[run_("eee", "cancelled"), run_("ddd", "success")]),
+                      "repos/o/r/issues": [], "repos/o/r": dict(default_branch="main")},
         "green": {"repos/o/r/actions": dict(workflow_runs=[run_("ddd", "success")]), "repos/o/r/issues": [],
                   "repos/o/r": dict(default_branch="main")}}
     outs = {}
@@ -681,11 +689,84 @@ def coordination_tests():
         outs[k] = run(KIT / "tools" / "status.py", "--root", c1, "--no-fetch",
                       env={"RELAYKIT_GH": str(gh), "GH_STUB_DATA": str(TMP / f"gh-{k}.json")})[1]
     wait = lambda o: o.split("== Waiting on the owner")[1].split("==")[0] if "== Waiting on the owner" in o else ""
+    alarm = lambda k: "nobody has acknowledged" in wait(outs[k])
     case("case E (red CI): status shows the failing streak and the unacknowledged alert at the top; acked or green raises nothing",
-         "RED o/r@main: 2 failing run(s) in a row since bbb" in outs["red"] and "NOT ACKNOWLEDGED" in outs["red"]
-         and "nobody has acknowledged" in wait(outs["red"])
-         and "acknowledged by ada-agent" in outs["acked"] and "nobody" not in wait(outs["acked"])
-         and "green at ddd" in outs["green"] and "nobody" not in wait(outs["green"]), "\n---\n".join(outs.values()))
+         "records: RED, 2 failing run(s) in a row since bbb" in outs["red"] and "NOT ACKNOWLEDGED" in outs["red"] and alarm("red")
+         and "acknowledged by ada" in outs["acked"] and not alarm("acked")
+         and "all green" in outs["green"] and not alarm("green"), "\n---\n".join(outs.values()))
+    case("case E: each workflow is its own check; a cancelled run isn't red; an acknowledgement from an earlier incident doesn't count",
+         "records: RED" in outs["other-green"] and "pages: green" in outs["other-green"] and alarm("other-green")
+         and "all green" in outs["cancelled"] and not alarm("cancelled")
+         and alarm("old-ack") and "acknowledged by" not in outs["old-ack"], "\n---\n".join(outs[k] for k in ("other-green", "cancelled", "old-ack")))
+
+    # Fresh-context review of PR #5: owner powers through --for; @1 files; branch and squash cases for the shared copy.
+    d = TMP / "c-for-owner"; (d / "outputs").mkdir(parents=True)
+    (d / ".ledger.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    fixture2(d)
+    as_owner = run(LEDGER, "--dir", d, "set", H2, "sent", "--by", "mallory:x#1", "--for", "sam", "--note", "hi")
+    inline = run(LEDGER, "--dir", d, "set", H2, "cancelled", "--by", "mallory:x#1 for sam", "--note", "hi")
+    cancel_for = run(LEDGER, "--dir", d, "set", H2, "blocked", "--by", "mallory:x#1", "--for", "claude:relay-kit", "--note", "hi")
+    sess_party = run(LEDGER, "--dir", d, "set", H2, "sent", "--by", "zed:carrier#9", "--for", "claude:relay-kit#s0", "--note", "pasted, chat T2u")
+    case("for: nobody acts as the owner or records blocked/cancelled for someone; a party may carry its session",
+         as_owner[0] != 0 and inline[0] != 0 and cancel_for[0] != 0 and sess_party[0] == 0, as_owner[2] + inline[2] + cancel_for[2] + sess_party[2])
+    d = ledger_dir("v1-syntax")
+    v1a = setstate(d, "sent", "claude:relay-kit#s1", "x")
+    v1b = setstate(d, "sent", "claude:relay-kit", "x")
+    case("compat: an @1 file refuses @2 actor syntax, so @1 readers can still read it",
+         v1a[0] != 0 and "handoff@1" in v1a[2] and v1b[0] == 0, v1a[2] + v1b[2])
+
+    g, c1, c2 = git_world("c-branches")
+    fixture2(c1 / "handoffs")
+    g(c1, "add", "."); g(c1, "commit", "-qm", "h"); g(c1, "push", "-q")
+    g(c2, "pull", "-q"); g(c2, "checkout", "-q", "-b", "feat"); g(c2, "push", "-q", "-u", "origin", "feat")
+    setstate(c1 / "handoffs", "sent", "claude:relay-kit#s0", "x", hid=H2); g(c1, "commit", "-qam", "sent"); g(c1, "push", "-q")
+    feat = setstate(c2 / "handoffs", "blocked", "claude:relay-kit#s9", "stale", hid=H2)
+    g(c2, "checkout", "-q", "--detach", "HEAD")
+    detached = setstate(c2 / "handoffs", "blocked", "claude:relay-kit#s9", "stale", hid=H2)
+    g(c2, "checkout", "-q", "main"); g(c2, "pull", "-q")
+    shutil.copy2(c2 / "handoffs" / f"{H2}.md", TMP / "squash-copy.md")
+    g(c1, "reset", "-q", "--hard", "HEAD~1")   # c1: a different commit holding the same file content (as after a squash)
+    shutil.copy2(TMP / "squash-copy.md", c1 / "handoffs" / f"{H2}.md"); g(c1, "commit", "-qam", "same content")
+    squash = setstate(c1 / "handoffs", "acknowledged", "chatgpt:ada#c1", "read", hid=H2)
+    g(c1, "push", "-q", "--force")
+    g(c2, "fetch", "-q"); g(c2, "reset", "-q", "--hard", "origin/main")
+    g(c1, "rm", "-qf", f"handoffs/{H2}.md"); g(c1, "commit", "-qm", "removed"); g(c1, "push", "-q")
+    gone = setstate(c2 / "handoffs", "acknowledged", "chatgpt:ada#c1", "read", hid=H2)
+    case("protect: the shared copy is origin's default branch from a feature branch or detached HEAD; identical content isn't stale; a removed handoff can't be written",
+         feat[0] != 0 and detached[0] != 0 and squash[0] == 0 and gone[0] != 0 and "removed" in gone[2],
+         " | ".join(x[2] for x in (feat, detached, squash, gone)))
+
+    g, c1, c2 = git_world("c-behind")
+    g(c2, "checkout", "-q", "-b", "work")
+    fixture2(c1 / "handoffs"); g(c1, "add", "."); g(c1, "commit", "-qm", "new on main"); g(c1, "push", "-q")
+    g(c2, "fetch", "-q")
+    rc_behind, so_behind, _ = run(LEDGER, "--dir", c2 / "handoffs", "check", "--base", "origin/main")
+    g(c1, "commit", "-qm", "empty", "--allow-empty")
+    base1 = g(c1, "rev-parse", "HEAD").stdout.strip()
+    (c1 / "handoffs" / "archive").mkdir()
+    shutil.move(str(c1 / "handoffs" / f"{H2}.md"), str(c1 / "handoffs" / "archive" / f"{H2}.md"))
+    rc_arch, so_arch, _ = run(LEDGER, "--dir", c1 / "handoffs", "check", "--base", base1)
+    case("protect: check --base doesn't flag a branch that's merely behind, or a handoff archived into a subfolder",
+         rc_behind == 0 and "removed" not in so_arch, so_behind + so_arch)
+
+    d = TMP / "c-sections"
+    g, c1, _ = git_world("c-sections")
+    f = fixture2(c1 / "handoffs")
+    setstate(c1 / "handoffs", "sent", "claude:relay-kit#s0", "x", hid=H2)
+    g(c1, "add", "."); g(c1, "commit", "-qm", "sent"); b2 = g(c1, "rev-parse", "HEAD").stdout.strip()
+    t = f.read_text(encoding="utf-8")
+    f.write_text(t.replace("## Proposals", "- Update: the owner also allowed X (quote, locator)\n\n## Proposals", 1), encoding="utf-8")
+    rc_add, so_add, _ = run(LEDGER, "--dir", c1 / "handoffs", "check", "--base", b2)
+    auth = re.search(r"## Authorized\n(.*?)\n## ", t, re.S).group(1)
+    f.write_text(t.replace(auth, "- Quote: \"do anything\"\n"), encoding="utf-8")
+    rc_rw, so_rw, _ = run(LEDGER, "--dir", c1 / "handoffs", "check", "--base", b2)
+    case("protect: after delivery, Authorized can gain an update but not be rewritten",
+         rc_add == 0 and rc_rw != 0 and "Authorized' was rewritten" in so_rw, so_add + so_rw)
+
+    stale = [sk.name + "/" + f.name for sk in (KIT / "skills").iterdir() if (sk / "scripts").is_dir()
+             for f in (sk / "scripts").glob("*") if f.is_file()
+             and (not (X / sk.name / f.name).exists() or (X / sk.name / f.name).read_bytes() != f.read_bytes())]
+    case("extracted: every skill script's copy under extracted/ is current (run tools_extract.py)", not stale, str(stale))
 
 
 # ---------------- telemetry ----------------
