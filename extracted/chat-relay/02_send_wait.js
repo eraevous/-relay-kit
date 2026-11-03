@@ -14,18 +14,27 @@
   const SEND_LABEL = /^send( message| prompt)?$/i;
   const isSend = (b) => vis(b) && (SEND_LABEL.test((b.getAttribute('aria-label') || '').trim())
     || /^send-button$/.test(b.getAttribute('data-testid') || ''));
-  const composerSel = ['#prompt-textarea', 'textarea[name="prompt"]', '[data-testid="chat-input"]',
-    'div.ProseMirror[contenteditable="true"]', '[contenteditable="true"][role="textbox"]'];
-  const composer = () => { for (const s of composerSel) { const e = [...document.querySelectorAll(s)].find(vis); if (e) return e; } return null; };
-  const sendButton = () => {
-    // Prefer a Send button near the composer, so "Send feedback" and similar elsewhere are never clicked.
-    let el = composer();
-    for (let i = 0; el && i < 8; i++, el = el.parentElement) {
-      if (!el.querySelectorAll) continue;
-      const b = [...el.querySelectorAll('button')].find(isSend);
-      if (b) return b;
+  const composerSel = ['#prompt-textarea', 'textarea[name="prompt"]', 'textarea#mobile-composer-prompt',   // same list as fill.js
+    '[data-testid="chat-input"]', 'div.ProseMirror[contenteditable="true"]',
+    '[contenteditable="true"][role="textbox"]', 'fieldset [contenteditable="true"]', 'textarea'];
+  const MSG = '[data-message-author-role], [data-content-search-unit-key], [data-turn], article, .font-claude-response';
+  const inForm = (e) => vis(e) && e.closest && e.closest('form, fieldset') && !e.closest(MSG);   // never a writing block (CH-011)
+  const composer = () => {   // exactly one input form may hold a composer, as in fill.js
+    let first = null;
+    for (const s of composerSel) for (const e of document.querySelectorAll(s)) {
+      if (!inForm(e)) continue;
+      if (!first) first = e;
+      else if (e.closest('form, fieldset') !== first.closest('form, fieldset'))
+        throw new Error('More than one input form has a composer: not guessing which Send to click. Check the page.');
     }
-    return [...document.querySelectorAll('button')].find(isSend) || null;
+    return first;
+  };
+  const sendButton = () => {
+    // Only a Send button in the composer's own form or fieldset, so "Send feedback" and any
+    // Send elsewhere on the page are never clicked. No composer, no click.
+    const c = composer();
+    if (!c) throw new Error('Composer not found inside an input form: not clicking any Send button. Check the page.');
+    return [...c.closest('form, fieldset').querySelectorAll('button')].find(isSend) || null;
   };
   const replySel = [
     '[data-content-search-unit-key$=":assistant"]',                                 // ChatGPT, 2026-10 markup

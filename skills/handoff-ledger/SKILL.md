@@ -63,6 +63,7 @@ contract: relay-kit/handoff@2
 source: https://chatgpt.com/c/...   # conversation this came from, or "none"
 last_processed: T6a                  # last message read and accounted for (see Checkpoints)
 reply_to:                            # id this answers, if any
+touches: src/api/*.py, docs/api.md   # optional: what this work will change (paths, globs, thread URLs)
 ---
 
 ## Task
@@ -179,7 +180,14 @@ output.
    if someone moved the handoff in between. `set` also refuses when the shared copy
    (origin's default branch, whatever branch you're on) holds a version of the file your
    clone never had: pull, re-read, retry.
-8. **After delivery, Task and Authorized only grow.** Add an update below what's there
+8. **Look before you write to shared things.** Before editing files other sessions may
+   be editing, or posting to a shared thread, run `status.py --touching <paths or URL>`.
+   It warns (never blocks) about open handoffs whose `touches:` cover them, open pull
+   requests changing them, other sessions active in your lane in the last few hours, and
+   failing checks. On a warning, tell the other side first (an FYI handoff, or a note to
+   the owner) or wait. Give your own handoffs a `touches:` line (`new --touches`) when
+   they change shared files, so the next session's check can see you.
+9. **After delivery, Task and Authorized only grow.** Add an update below what's there
    (dated, quoting the owner); don't rewrite it. `check --base` enforces this.
 
 ## Checkpoints

@@ -74,6 +74,14 @@ owner (proposed decisions, handoffs nobody is authorized to start), open handoff
 holds each, open challenges, the coordination index's last change, and what it couldn't
 check. It changes nothing. A new assistant session can run it as its first step.
 
+Before writing to something other sessions might also be changing:
+
+    python3 tools/status.py --root path/to/records --touching src/api/client.py --repo path/to/code
+
+adds warnings (never locks) about open handoffs that claim those paths, open pull requests
+changing them, other sessions active in your lane in the last few hours (`--hours`), and
+failing checks where the files live.
+
 For ids in shared lists other than handoffs (candidates, notes), `tools/new_id.py --prefix C
 --lane AEC` makes one that two sessions can't both pick.
 
