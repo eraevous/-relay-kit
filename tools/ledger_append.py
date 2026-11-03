@@ -28,6 +28,18 @@ HERE = pathlib.Path(__file__).resolve().parent
 KINDS = {"decision": ("decisions.jsonl", "DEC"), "challenge": ("challenges.jsonl", "CH")}
 
 
+def handoff_module():
+    """The handoff-ledger skill's script, which defines how the shared copy is found."""
+    import importlib.util
+    path = HERE.parent / "skills" / "handoff-ledger" / "scripts" / "handoff.py"
+    if not path.exists():
+        sys.exit(f"refused: {path} is missing; ledger_append.py runs from the kit, next to skills/")
+    spec = importlib.util.spec_from_file_location("handoff", path)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
 def git(d, *args):
     return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, timeout=60)
 
@@ -59,12 +71,7 @@ def shared_text(path):
     if git(d, "fetch", "--quiet", "origin").returncode != 0:
         return None, "fetch failed: the shared copy can't be read"
     note = None
-    ref = git(d, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD").stdout.strip()
-    if not ref:
-        for cand in ("refs/remotes/origin/main", "refs/remotes/origin/master"):
-            if git(d, "rev-parse", "--verify", "--quiet", cand).returncode == 0:
-                ref = cand
-                break
+    ref = handoff_module().shared_ref(lambda *args: git(d, *args))   # the same rule handoff.py uses
     if not ref:
         return None, "no shared branch found on origin"
     top = pathlib.Path(git(d, "rev-parse", "--show-toplevel").stdout.strip())

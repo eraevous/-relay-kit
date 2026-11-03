@@ -137,6 +137,15 @@ def now():
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
 
 
+def parse_utc(x):
+    """An ISO time with a zone, as UTC; None for anything else (no zone, not a time). Never raises."""
+    try:
+        t = dt.datetime.fromisoformat(str(x).replace("Z", "+00:00"))
+        return t.astimezone(dt.timezone.utc) if t.tzinfo else None
+    except (ValueError, OverflowError):   # e.g. 0001-01-01T00:00+01:00 is before the first UTC moment
+        return None
+
+
 def event_time(at, prev_at):
     """Normalize --at to YYYY-MM-DDTHH:MMZ; must be in the past and not before the previous log line."""
     try:
@@ -632,14 +641,8 @@ def stale_format_warnings(d, files):
         return []
     if not since:
         return []
-    def utc(x):
-        try:
-            t = dt.datetime.fromisoformat(str(x).replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        return t.astimezone(dt.timezone.utc) if t.tzinfo else None
     out = []
-    since_t = utc(since)
+    since_t = parse_utc(since)
     if since_t is None:
         return [f".ledger.json: warning: contract_since {since!r} isn't an ISO time with a zone; stale copies weren't looked for"]
     newer = re.compile(r"^relay-kit/handoff@(\d+)$")
@@ -653,7 +656,7 @@ def stale_format_warnings(d, files):
         m, mine_v = newer.match(contract), int(CONTRACT.rsplit("@", 1)[1])
         if not m or int(m.group(1)) >= mine_v:   # a newer version means *this* copy is the old one
             continue
-        created = utc(meta.get("created", ""))
+        created = parse_utc(meta.get("created", ""))
         if created is None:
             out.append(f"{p.name}: warning: 'created' {meta.get('created')!r} isn't a time with a zone; couldn't tell if it's stale")
             continue
