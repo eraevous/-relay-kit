@@ -13,7 +13,7 @@ embedded in it. The procedures also work as plain instructions for other assista
 You need Python 3.10+ and git. Everything is standard library.
 
 1. **Install the command:**
-   `python3 -m pip install "relay-kit @ git+https://github.com/eraevous/-relay-kit@v0.1.0"`
+   `python3 -m pip install "relay-kit @ git+https://github.com/eraevous/relay-kit@v0.1.0"`
 2. **Create your records**, the private repository that holds handoffs and decisions:
    `relay-kit init my-records --owner <your name>`, then follow the printed steps (git init,
    turn on the pre-push hook, push to a **private** repository).

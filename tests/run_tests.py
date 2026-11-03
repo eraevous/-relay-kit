@@ -1016,7 +1016,7 @@ def deploy_tests():
     blocked = g("push", "-q")
     sc = TMP / "scan"; sc.mkdir()
     (sc / ".private-names").write_text("ownername\n")
-    (sc / "a.md").write_text('pip install "relay-kit @ git+https://github.com/ownername/-relay-kit@v0.1.0"\n')
+    (sc / "a.md").write_text('pip install "relay-kit @ git+https://github.com/ownername/relay-kit@v0.1.0"\nold: ownername/-relay-kit\n')
     (sc / "b.md").write_text("ownername wrote this; mail " + "ownername" + "@example.com\n")
     subprocess.run(["git", "init", "-q", str(sc)], capture_output=True); subprocess.run(["git", "-C", str(sc), "add", "."], capture_output=True)
     rc_s, so_s, _ = run(KIT / "tools" / "prepublish_scan.py", "--root", sc)

@@ -23,7 +23,7 @@ classifiers = [
 relay-kit = "relaykit.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/eraevous/-relay-kit"
+Homepage = "https://github.com/eraevous/relay-kit"
 
 # The checkout keeps its layout (tools/, skills/); the installed package maps them into one
 # `relaykit` package, with the skills as data so `relay-kit zips` and the handoff script work.

@@ -26,7 +26,7 @@ SCRIPTS = {
     "new-id": HERE / "new_id.py",
     "zips": HERE / "extract.py",
 }
-KIT_REPO = "eraevous/-relay-kit"
+KIT_REPO = "eraevous/relay-kit"
 
 
 def run_script(path, args):
