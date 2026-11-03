@@ -8,11 +8,11 @@ import contextlib, csv, datetime, importlib.util, io, json, os, re, shutil, subp
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parent.parent
-X = KIT / "extracted"
 LEDGER = KIT / "skills" / "handoff-ledger" / "scripts" / "handoff.py"
 FIXTURE = KIT / "tests" / "fixtures" / "HO-20261028-001.md"   # frozen prepared copy
 HID = FIXTURE.stem
 TMP = Path(tempfile.mkdtemp(prefix="relaykit-tests-"))
+X = TMP / "extracted"   # generated from the skills for this run; nothing generated is kept in git
 RESULTS = []
 
 
@@ -815,10 +815,6 @@ def coordination_tests():
     rc_bad, out_bad, err_bad = run(st_, "--root", c1, "--no-fetch", "--no-ci", "--touching", "src/db/x.py",
                                    env=dict(envc, RELAYKIT_ACTOR="claude:aec#s2"))
     case("status: a log time without a zone doesn't crash it", rc_bad == 0 and "== Not checked" in out_bad, err_bad[-300:])
-    stale = [sk.name + "/" + f.name for sk in (KIT / "skills").iterdir() if (sk / "scripts").is_dir()
-             for f in (sk / "scripts").glob("*") if f.is_file()
-             and (not (X / sk.name / f.name).exists() or (X / sk.name / f.name).read_bytes() != f.read_bytes())]
-    case("extracted: every skill script's copy under extracted/ is current (run tools_extract.py)", not stale, str(stale))
 
 
 # ---------------- ledger append, stale copies, changed-since, review handoffs ----------------
@@ -1006,7 +1002,26 @@ def evidence_tests():
          rel_csv == rel_dash or (str(rel_csv) in note and str(rel_dash) in note), f"csv {rel_csv}, dashboard {rel_dash}")
 
 
+def packaging_tests():
+    """The skills as they ship: each upload zip holds the skill, and handoff-ledger's script runs
+    from the unzipped copy alone, with nothing from this repository on its path."""
+    ext = load("tools_extract", KIT / "tools_extract.py")
+    zips = ext.build_zips(TMP / "upload")
+    names = {z.stem for z in zips}
+    want = {p.name for p in (KIT / "skills").iterdir() if (p / "SKILL.md").exists()}
+    u = TMP / "unzipped"
+    shutil.unpack_archive(str(TMP / "upload" / "handoff-ledger.zip"), str(u))
+    script = u / "handoff-ledger" / "scripts" / "handoff.py"
+    d = TMP / "pkg-handoffs"
+    rc, hid, err = run(script, "--dir", d, "new", "--from", "claude:pkg", "--to", "codex:x", "--title", "T", env={"RELAYKIT_ACTOR": "claude:pkg#1"})
+    case("packaging: one zip per skill, and the zipped handoff script works standalone",
+         names == want and rc == 0 and run(script, "--dir", d, "check")[0] == 0
+         and (u / "handoff-ledger" / "SKILL.md").exists(), f"{sorted(names ^ want)} {err}")
+
+
 if __name__ == "__main__":
+    load("tools_extract", KIT / "tools_extract.py").extract(X)
+    packaging_tests()
     ledger_tests()
     (TMP / "fixture.raw.json").write_text(json.dumps(wrap(chatgpt_fixture())), encoding="utf-8")
     capture_tests()
