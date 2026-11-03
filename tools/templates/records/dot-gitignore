@@ -1,0 +1,4 @@
+.handoff.lock
+governance/.ledger_append.lock
+*.tmp
+__pycache__/

@@ -5,3 +5,8 @@ __pycache__/
 upload/
 .private-names
 extracted/
+build/
+dist/
+*.egg-info/
+relay-kit-upload/
+relay-kit-extracted/

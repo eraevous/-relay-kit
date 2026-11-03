@@ -959,6 +959,74 @@ def learning_tests():
          and f"outputs/{hid}.md" in t and "NOT AUTHORIZED YET" in t and run(LEDGER, "--dir", d, "check")[0] == 0, no[2] + t[:400])
 
 
+# ---------------- deployable: the relay-kit command and init (DEC-041) ----------------
+def deploy_tests():
+    link = TMP / "pkgpath"; link.mkdir()
+    os.symlink(KIT / "tools", link / "relaykit")   # the checkout's tools/ as the installed `relaykit` package
+    env = {"PYTHONPATH": str(link)}
+    rk = lambda *a, env_=None: subprocess.run([sys.executable, "-m", "relaykit", *map(str, a)], capture_output=True,
+                                              encoding="utf-8", env=dict(os.environ, **env, **(env_ or {})), timeout=60)
+    v = rk("--version")
+    out = TMP / "records-new"
+    i = rk("init", out, "--owner", "Sam", "--lanes", "research=rs")
+    files = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
+    cfg = json.loads((out / "handoffs" / ".ledger.json").read_text(encoding="utf-8")) if i.returncode == 0 else {}
+    wf = (out / ".github" / "workflows" / "records.yml").read_text(encoding="utf-8") if i.returncode == 0 else ""
+    leftover = [f for f in files if re.search(r"(?<!\$)\{\{[A-Z_]+\}\}", (out / f).read_text(encoding="utf-8"))]
+    case("deploy: init makes a records folder: owner and lanes set, dot-files named, CI pinned to this version, hook executable",
+         v.stdout.strip() == "relay-kit 0.1.0" and i.returncode == 0 and cfg.get("owner") == "sam" and cfg.get("lanes") == {"research": "RS"}
+         and "relay-kit/handoff@2" in cfg.get("contract_since", {})
+         and {".gitignore", ".githooks/pre-push", ".github/workflows/records.yml", "README.md", "threads.md",
+              "governance/decisions.jsonl", "governance/challenges.jsonl", "handoffs/.ledger.json"} <= set(files)
+         and (out / "handoffs" / "outputs").is_dir() and "@v0.1.0" in wf and "${{ github.token }}" in wf
+         and os.access(out / ".githooks" / "pre-push", os.X_OK) and not leftover, i.stdout + i.stderr + str(files) + str(leftover))
+    again = rk("init", out, "--owner", "sam")
+    bad = [rk("init", TMP / "r-bad1", "--owner", "two words"), rk("init", TMP / "r-bad2", "--owner", "sam", "--lanes", "x=too-long-code!")]
+    case("deploy: init refuses a non-empty folder and bad owner or lane values, writing nothing",
+         again.returncode != 0 and "isn't an empty folder" in again.stderr and all(b.returncode != 0 for b in bad)
+         and not (TMP / "r-bad1").exists() and not (TMP / "r-bad2").exists(), again.stderr + "".join(b.stderr for b in bad))
+
+    # each subcommand is the same script: same output and exit code as running it directly
+    d = ledger_dir("cli-same")
+    pairs = [(("handoff", "--dir", d, "list"), (LEDGER, "--dir", d, "list")),
+             (("handoff", "--dir", d, "check"), (LEDGER, "--dir", d, "check")),
+             (("ledger", "check", "--dir", out / "governance"), (KIT / "tools" / "check_ledgers.py", "--dir", out / "governance"))]
+    same = []
+    for via_cli, direct in pairs:
+        c, dr = rk(*via_cli), run(*direct)
+        same.append((c.returncode, c.stdout.strip()) == (dr[0], dr[1]))
+    case("deploy: relay-kit handoff/ledger give the same output and exit code as the scripts", all(same), str(same))
+
+    # the new records folder works end to end, and its pre-push hook blocks a bad ledger line
+    g = lambda *a: subprocess.run(["git", "-C", str(out), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                                  capture_output=True, text=True, env=dict(os.environ, **env))
+    origin = TMP / "records-new.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], capture_output=True)
+    g("init", "-q", "-b", "main"); g("config", "core.hooksPath", ".githooks"); g("remote", "add", "origin", str(origin))
+    g("add", "."); g("commit", "-qm", "init")
+    first = g("push", "-q", "-u", "origin", "main")
+    actor = {"RELAYKIT_ACTOR": "claude:research#s1"}
+    hid = rk("handoff", "--dir", out / "handoffs", "new", "--from", "claude:research", "--to", "chatgpt:review", "--title", "T", env_=actor).stdout.strip()
+    dec = rk("ledger", "append", "--dir", out / "governance", "decision", json.dumps(dict(status="proposed", decision="d", scope="s")), env_=actor).stdout.strip()
+    g("add", "."); g("commit", "-qm", "work")
+    good = g("push", "-q")
+    with open(out / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(dict(id="DEC-009", date="2026-11-03", status="adopted", decision="no basis", scope="s")) + "\n")
+    g("commit", "-qam", "bad line")
+    blocked = g("push", "-q")
+    sc = TMP / "scan"; sc.mkdir()
+    (sc / ".private-names").write_text("ownername\n")
+    (sc / "a.md").write_text('pip install "relay-kit @ git+https://github.com/ownername/-relay-kit@v0.1.0"\n')
+    (sc / "b.md").write_text("ownername wrote this; mail " + "ownername" + "@example.com\n")
+    subprocess.run(["git", "init", "-q", str(sc)], capture_output=True); subprocess.run(["git", "-C", str(sc), "add", "."], capture_output=True)
+    rc_s, so_s, _ = run(KIT / "tools" / "prepublish_scan.py", "--root", sc)
+    case("scan: the kit's own install URL passes; the same name or an email elsewhere is still caught",
+         rc_s != 0 and "a.md" not in so_s and "b.md:1: private name" in so_s and "b.md:1: email address" in so_s, so_s)
+    case("deploy: a fresh records repo takes handoffs and ledger lines, and its pre-push hook blocks a bad line",
+         first.returncode == 0 and hid.startswith("HO-RS-") and dec == "DEC-001" and good.returncode == 0
+         and blocked.returncode != 0 and "ledger check failed" in blocked.stderr, first.stderr + good.stderr + blocked.stderr)
+
+
 # ---------------- telemetry ----------------
 def telemetry_tests():
     tel = load("telemetry", X / "chat-telemetry" / "01_chat_telemetry.py")
@@ -1029,7 +1097,7 @@ def packaging_tests():
          f"{sorted(names ^ want)} {mismatch} {err}")
     kc = TMP / "kit-copy"   # never point a deleting tool at the real checkout, even in a test
     shutil.copytree(KIT / "skills", kc / "skills"); shutil.copytree(KIT / "tests", kc / "tests")
-    shutil.copy2(KIT / "tools_extract.py", kc / "tools_extract.py")
+    shutil.copy2(KIT / "tools_extract.py", kc / "tools_extract.py"); shutil.copytree(KIT / "tools", kc / "tools")
     subprocess.run(["git", "init", "-q", str(kc)], capture_output=True)
     subprocess.run(["git", "-C", str(kc), "add", "."], capture_output=True)
     tx = kc / "tools_extract.py"
@@ -1058,6 +1126,7 @@ if __name__ == "__main__":
     status_tests()
     coordination_tests()
     learning_tests()
+    deploy_tests()
     telemetry_tests()
     evidence_tests()
     failed = [r for r in RESULTS if not r[1]]

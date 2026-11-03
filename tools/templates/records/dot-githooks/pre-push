@@ -1,0 +1,22 @@
+#!/bin/sh
+# relay-kit pre-push hook: run the records checks before anything leaves this machine.
+# Turn on once per clone: git config core.hooksPath .githooks   (skip once: git push --no-verify)
+if command -v relay-kit >/dev/null 2>&1; then RK="relay-kit"
+elif python3 -c "import relaykit" >/dev/null 2>&1; then RK="python3 -m relaykit"
+else
+  echo "pre-push: relay-kit isn't installed, so the records checks can't run; not pushing." >&2
+  echo "          Install it (see README.md), or push with --no-verify to skip the checks." >&2
+  exit 1
+fi
+zero=0000000000000000000000000000000000000000
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue   # deleting a remote branch: nothing to check
+  if [ "$remote_sha" = "$zero" ] || ! git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+    base=$(git rev-parse --verify -q "$local_sha~1" || echo "$local_sha")
+  else
+    base=$remote_sha
+  fi
+  $RK handoff --dir handoffs check --base "$base" || { echo "pre-push: handoff check failed; not pushing." >&2; exit 1; }
+  $RK ledger check --dir governance --git --base "$base" || { echo "pre-push: ledger check failed; not pushing." >&2; exit 1; }
+done
+exit 0

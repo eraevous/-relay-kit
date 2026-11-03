@@ -15,6 +15,9 @@ PATTERNS = {
     "token": re.compile(r"\b(?:sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{30,})"),
 }
 ALLOWED = {"noreply@anthropic.com"}   # commit-trailer address used in docs
+# The kit's own public repository, wherever it's named (README install line, pyproject, the CLI's
+# default): its address isn't private, and the @tag in it isn't an email address.
+PUBLIC = re.compile(r"(?:https://)?(?:github\.com/)?[\w.-]+/-?relay-kit(?:@[\w./-]+)?\b")
 NAME_EXEMPT = {"LICENSE", "CLA.md"}   # the copyright holder is named there on purpose
 
 
@@ -40,6 +43,7 @@ def main():
         except (UnicodeDecodeError, IsADirectoryError, FileNotFoundError):
             continue
         for n, line in enumerate(text.splitlines(), 1):
+            line = PUBLIC.sub("", line)
             for kind, rx in pats.items():
                 if kind == "private name" and f in NAME_EXEMPT:
                     continue

@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "relay-kit"
+version = "0.1.0"
+description = "Coordination records for work passed between AI assistants: handoffs, decision and challenge ledgers, start-up status"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = []   # standard library only
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+]
+
+[project.scripts]
+relay-kit = "relaykit.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/eraevous/-relay-kit"
+
+# The checkout keeps its layout (tools/, skills/); the installed package maps them into one
+# `relaykit` package, with the skills as data so `relay-kit zips` and the handoff script work.
+[tool.setuptools]
+packages = ["relaykit", "relaykit.skills"]
+include-package-data = false
+
+[tool.setuptools.package-dir]
+relaykit = "tools"
+"relaykit.skills" = "skills"
+
+[tool.setuptools.package-data]
+relaykit = ["templates/records/*", "templates/records/**/*"]
+"relaykit.skills" = ["*/SKILL.md", "*/scripts/*.py"]

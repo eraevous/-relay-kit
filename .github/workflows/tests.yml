@@ -20,3 +20,18 @@ jobs:
       - name: Pre-publish scan (emails, chat links, tokens)
         if: success() || failure()
         run: python3 -I tools/prepublish_scan.py
+      # The package as users get it: build, install into a clean environment, set up records.
+      - name: Install the package and set up a records repo with it
+        if: success() || failure()
+        run: |
+          python3 -m venv /tmp/rk && /tmp/rk/bin/pip install --quiet .
+          export PATH=/tmp/rk/bin:$PATH
+          relay-kit --version
+          relay-kit init /tmp/records --owner sam --lanes research=RS
+          cd /tmp/records && git init -q -b main
+          RELAYKIT_ACTOR=claude:research#ci relay-kit handoff --dir handoffs new --from claude:research --to chatgpt:review --title "CI smoke"
+          RELAYKIT_ACTOR=claude:research#ci relay-kit ledger append --dir governance decision '{"status": "proposed", "decision": "d", "scope": "s"}' --offline
+          relay-kit handoff --dir handoffs check
+          relay-kit ledger check --dir governance
+          relay-kit status --root . --no-fetch --no-ci
+          relay-kit zips --out /tmp/rk-extracted

@@ -8,6 +8,27 @@ They're written as [Claude skills](https://docs.claude.com/en/docs/agents-and-to
 each is a `SKILL.md` that an assistant reads and follows, with any code it needs
 embedded in it. The procedures also work as plain instructions for other assistants.
 
+## Quickstart
+
+You need Python 3.10+ and git. Everything is standard library.
+
+1. **Install the command:**
+   `python3 -m pip install "relay-kit @ git+https://github.com/eraevous/-relay-kit@v0.1.0"`
+2. **Create your records**, the private repository that holds handoffs and decisions:
+   `relay-kit init my-records --owner <your name>`, then follow the printed steps (git init,
+   turn on the pre-push hook, push to a **private** repository).
+3. **Give your assistants the skills:** `relay-kit zips --out skills-extracted` builds one
+   zip per skill in `relay-kit-upload/` for claude.ai; for Claude Code, copy the folders
+   under `skills/`; for other assistants, paste the `SKILL.md` you need.
+4. **Start every session the same way:**
+   `export RELAYKIT_ACTOR=<assistant>:<lane>#<session id>` and `relay-kit status --root my-records`.
+5. **Hand work over:** `relay-kit handoff --dir my-records/handoffs new --from ... --to ... --title ...`,
+   fill the file in (the owner's words go under Authorized), and deliver it however you like.
+
+Records live in git for now: it gives every guarantee the kit relies on (see
+[docs/storage.md](docs/storage.md) for what other storage would need). Pin a tag, or
+better a commit, wherever you depend on the kit.
+
 ## The skills
 
 | Skill | What it does | Code |
@@ -43,8 +64,11 @@ Decisions and objections go in append-only ledgers kept with your private record
 
 ## Install
 
-- **claude.ai:** run `python3 tools_extract.py --zips`, then upload the zips from `upload/`
-  as skills (one per skill).
+- **The command:** see Quickstart. From a checkout, every tool also runs directly
+  (`python3 tools/status.py`, `python3 skills/handoff-ledger/scripts/handoff.py`, ...);
+  `relay-kit <command>` runs the same scripts with the same output.
+- **claude.ai:** run `python3 tools_extract.py --zips` (or `relay-kit zips`), then upload the
+  zips from `upload/` as skills (one per skill).
 - **Claude Code:** copy the folders under `skills/` into `~/.claude/skills/`.
 - **Other assistants:** attach or paste the `SKILL.md` you need.
 
