@@ -321,6 +321,72 @@ def overlaps(root, targets, me, lane, hours, repo_dir, gaps):
     return out
 
 
+def changed_since(root, since, me, gaps, cap=15):
+    """What other lanes learned since you last looked (RQ-07): ledger lines added, and contract
+    versions that moved in the kit. 'Since' is --since (a date or a git revision), else this
+    session's last commit in the records (found by its session id in the commit trailer)."""
+    led = load_ledger()
+    parsed = led.parse_actor(me) if me else None
+    try:
+        git(root, "rev-parse", "--git-dir")
+    except (RuntimeError, FileNotFoundError):
+        gaps.append("records aren't a git checkout: 'changed since' wasn't worked out")
+        return None
+    base, label = None, None
+    if since:
+        if re.match(r"^\d{4}-\d{2}-\d{2}", since):
+            base = git(root, "log", f"--until={since}", "-1", "--format=%H").strip() or None
+            label = f"since {since}"
+        else:
+            try:
+                base, label = git(root, "rev-parse", since), f"since {since}"
+            except RuntimeError:
+                gaps.append(f"--since {since}: not a date or revision here")
+                return None
+    elif parsed and parsed[1]:
+        try:
+            base = git(root, "log", f"--grep={parsed[1]}", "--fixed-strings", "-1", "--format=%H") or None
+        except RuntimeError:
+            base = None
+        label = "since this session's last commit"
+        if not base:
+            gaps.append(f"no commit by session {parsed[1][:12]} found: 'changed since' used the last 48 hours")
+            base = git(root, "log", "--until=48 hours ago", "-1", "--format=%H").strip() or None
+            label = "in the last 48 hours"
+    else:
+        return None
+    if not base:
+        gaps.append("no earlier commit to compare with: 'changed since' covers the whole history")
+        base = git(root, "rev-list", "--max-parents=0", "HEAD").splitlines()[0]
+    when = git(root, "log", "-1", "--format=%cI", base)
+    lines = [f"{label} ({base[:7]}, {when[:16]})"]
+    for name, key in (("decisions.jsonl", "decision"), ("challenges.jsonl", "concern")):
+        try:
+            diff = git(root, "diff", f"{base}..HEAD", "--", f"governance/{name}")
+        except RuntimeError:
+            continue
+        added = []
+        for l in diff.splitlines():
+            if l.startswith("+{"):
+                try:
+                    added.append(json.loads(l[1:]))
+                except ValueError:
+                    pass
+        for r in added[:cap]:
+            text = r.get(key) or r.get("resolution") or ""
+            lines.append(f"{r.get('id')} {r.get('status', '')}: {text[:160]}")
+        if len(added) > cap:
+            lines.append(f"... and {len(added) - cap} more in {name}")
+    try:
+        moved = git(KIT, "log", f"--since={when}", "--format=%h %s", "--", "governance/contracts.json")
+        lines += [f"contract change in the kit: {m}" for m in moved.splitlines()]
+    except (RuntimeError, FileNotFoundError):
+        gaps.append("the kit isn't a git checkout: contract changes weren't looked for")
+    if len(lines) == 1:
+        lines.append("nothing new in the ledgers or contracts")
+    return lines
+
+
 def jsonl(path, gaps):
     if not path.exists():
         gaps.append(f"no {path.parent.name}/{path.name}")
@@ -340,6 +406,8 @@ def main():
     ap.add_argument("--root", type=pathlib.Path, default=pathlib.Path("."))
     ap.add_argument("--no-fetch", action="store_true")
     ap.add_argument("--no-ci", action="store_true", help="don't read the checks on the shared branch")
+    ap.add_argument("--since", help="show ledger lines and contract changes since this date or git revision "
+                    "(default: this session's last commit, when RELAYKIT_ACTOR names a session)")
     ap.add_argument("--touching", nargs="+", metavar="PATH",
                     help="before writing: warn about other work touching these paths, globs or thread URLs")
     ap.add_argument("--lane", help="your lane (default: from RELAYKIT_ACTOR)")
@@ -368,8 +436,21 @@ def main():
     print("\n== Checks on the shared branch")
     print(ci or ("not read (--no-ci)" if a.no_ci else "unknown (see Not checked)"))
 
+    me = os.environ.get("RELAYKIT_ACTOR", "")
+    changes = changed_since(root, a.since, me, gaps)
+    if changes:
+        print(f"\n== Changed {changes[0]}")
+        for l in changes[1:]:
+            print(l)
+    led = load_ledger()
+    hd = root / "handoffs"
+    stale = led.stale_format_warnings(hd, sorted(hd.glob("HO-*.md"))) if hd.is_dir() else []
+    if stale:
+        print("\n== Out of date")
+        for w in short_actors([w.replace(": warning: ", ": ", 1) for w in stale]):
+            print(w)
+
     if a.touching:
-        me = os.environ.get("RELAYKIT_ACTOR", "")
         found = overlaps(root, a.touching, me, a.lane, a.hours, a.repo or root, gaps)
         print(f"\n== Overlaps with {', '.join(a.touching)}  (warnings, not locks)")
         for l in short_actors(found) or ["none found in what was checked"]:

@@ -821,6 +821,77 @@ def coordination_tests():
     case("extracted: every skill script's copy under extracted/ is current (run tools_extract.py)", not stale, str(stale))
 
 
+# ---------------- ledger append, stale copies, changed-since, review handoffs ----------------
+def learning_tests():
+    app = KIT / "tools" / "ledger_append.py"
+    st_ = KIT / "tools" / "status.py"
+    origin, c1, c2 = TMP / "la.git", TMP / "la-1", TMP / "la-2"
+    g = lambda cwd, *a: subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *a], capture_output=True, text=True)
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], capture_output=True)
+    subprocess.run(["git", "clone", "-q", str(origin), str(c1)], capture_output=True)
+    (c1 / "governance").mkdir()
+    first = dict(id="DEC-001", date="2026-11-01", status="adopted", decision="d1", scope="s", decider="owner", basis='"yes"', locator="chat", recorded_by="sam")
+    (c1 / "governance" / "decisions.jsonl").write_text(json.dumps(first) + "\n", encoding="utf-8")
+    g(c1, "checkout", "-q", "-b", "main"); g(c1, "add", "."); g(c1, "commit", "-qm", "init"); g(c1, "push", "-q", "-u", "origin", "main")
+    subprocess.run(["git", "clone", "-q", str(origin), str(c2)], capture_output=True)
+    prop = json.dumps(dict(status="proposed", decision="d2", scope="s"))
+    a1 = run(app, "--dir", c1 / "governance", "decision", prop, env={"RELAYKIT_ACTOR": "claude:rk#s1"})
+    g(c1, "commit", "-qam", "d2"); g(c1, "push", "-q")
+    a2 = run(app, "--dir", c2 / "governance", "decision", prop, env={"RELAYKIT_ACTOR": "claude:aec#s2"})
+    before2 = (c2 / "governance" / "decisions.jsonl").read_text(encoding="utf-8")
+    g(c2, "pull", "-q")
+    a3 = run(app, "--dir", c2 / "governance", "decision", prop, env={"RELAYKIT_ACTOR": "claude:aec#s2"})
+    last = json.loads((c2 / "governance" / "decisions.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    case("ledger_append: takes the next id from the shared copy, refuses a stale copy, fills date and recorder",
+         a1[1] == "DEC-002" and a2[0] != 0 and "pull first" in a2[2] and before2.count("\n") == 1
+         and a3[1] == "DEC-003" and last["recorded_by"] == "claude:aec#s2" and re.match(r"\d{4}-\d{2}-\d{2}$", last["date"]),
+         " | ".join(x[1] + x[2] for x in (a1, a2, a3)))
+    n_before = (c2 / "governance" / "decisions.jsonl").read_text(encoding="utf-8")
+    bad = run(app, "--dir", c2 / "governance", "decision", json.dumps(dict(status="adopted", decision="no basis", scope="s")),
+              env={"RELAYKIT_ACTOR": "claude:aec#s2"})
+    given = run(app, "--dir", c2 / "governance", "decision", json.dumps(dict(id="DEC-009", status="proposed", decision="x", scope="s")),
+                env={"RELAYKIT_ACTOR": "claude:aec#s2"})
+    case("ledger_append: a line the check rejects is taken back out with a non-zero exit; a chosen id is refused",
+         bad[0] != 0 and "nothing was appended" in bad[2] and (c2 / "governance" / "decisions.jsonl").exists()
+         and (c2 / "governance" / "decisions.jsonl").read_text(encoding="utf-8") == n_before
+         and given[0] != 0, bad[2] + given[2])
+
+    # stale copies: an @1 handoff made after @2 was adopted is named; older @1 files and @2 files aren't
+    d = TMP / "stale-fmt"; (d / "outputs").mkdir(parents=True)
+    (d / ".ledger.json").write_text('{"owner": "sam", "contract_since": {"relay-kit/handoff@2": "2026-11-02T00:03Z"}}', encoding="utf-8")
+    old_ok = FIXTURE.read_text(encoding="utf-8")                                    # @1, created 2026-10-28
+    (d / FIXTURE.name).write_text(old_ok, encoding="utf-8")
+    late = old_ok.replace(HID, "HO-20261102-003").replace("created: 2026-10-28T14:05Z", "created: 2026-11-02T17:17Z")
+    (d / "HO-20261102-003.md").write_text(late, encoding="utf-8")
+    fixture2(d)
+    rc, so, _ = run(LEDGER, "--dir", d, "check")
+    case("stale copy: check names the session that made an old-format handoff after adoption, and only that one",
+         rc == 0 and "HO-20261102-003.md: made in relay-kit/handoff@1" in so and so.count("old copy") == 1, so)
+
+    # changed since this session's last commit
+    g(c1, "pull", "-q")
+    (c1 / "notes.txt").write_text("x\n"); g(c1, "add", "."); g(c1, "commit", "-qm", "my work\n\nClaude-Session: https://claude.ai/code/session_ME123"); g(c1, "push", "-q")
+    quiet = run(st_, "--root", c1, "--no-fetch", "--no-ci", env={"RELAYKIT_ACTOR": "claude:rk#session_ME123"})[1]
+    g(c2, "fetch", "-q"); g(c2, "reset", "-q", "--hard", "origin/main")
+    run(app, "--dir", c2 / "governance", "decision", json.dumps(dict(status="proposed", decision="other lane's news", scope="s")),
+        env={"RELAYKIT_ACTOR": "claude:aec#s2"})
+    g(c2, "commit", "-qam", "news"); g(c2, "push", "-q"); g(c1, "pull", "-q")
+    news = run(st_, "--root", c1, "--no-fetch", "--no-ci", env={"RELAYKIT_ACTOR": "claude:rk#session_ME123"})[1]
+    sec = lambda o: o.split("== Changed")[1].split("\n== ")[0] if "== Changed" in o else ""
+    case("changed since: lists what other lanes added after this session's last commit, and nothing before it",
+         "nothing new" in sec(quiet) and "other lane's news" in sec(news) and "d2" not in sec(news), sec(quiet) + "\n--\n" + sec(news))
+
+    # review handoffs
+    d = TMP / "review"
+    no = run(LEDGER, "--dir", d, "new", "--from", "claude:rk", "--to", "codex:x", "--title", "R", "--review", env={"RELAYKIT_ACTOR": "claude:rk#s1"})
+    rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:rk", "--to", "review:chatgpt", "--title", "Review #8", "--review",
+                     "--artifact", "PR 8", "--spec", "the handoff", env={"RELAYKIT_ACTOR": "claude:rk#s1"})
+    t = (d / f"{hid}.md").read_text(encoding="utf-8") if rc == 0 else ""
+    case("review handoff: needs a review: recipient; fills the review sections, leaves Authorized for the owner",
+         no[0] != 0 and rc == 0 and "Review PR 8 against the handoff" in t and "left out on purpose" in t
+         and f"outputs/{hid}.md" in t and "NOT AUTHORIZED YET" in t and run(LEDGER, "--dir", d, "check")[0] == 0, no[2] + t[:400])
+
+
 # ---------------- telemetry ----------------
 def telemetry_tests():
     tel = load("telemetry", X / "chat-telemetry" / "01_chat_telemetry.py")
@@ -874,6 +945,7 @@ if __name__ == "__main__":
     governance_tests()
     status_tests()
     coordination_tests()
+    learning_tests()
     telemetry_tests()
     evidence_tests()
     failed = [r for r in RESULTS if not r[1]]

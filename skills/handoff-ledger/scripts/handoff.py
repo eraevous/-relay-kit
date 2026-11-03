@@ -114,6 +114,21 @@ TODO
 """
 
 
+REVIEW_SECTIONS = {   # handoff.py new --review: an adversarial review run without a standing thread (RQ-06)
+    "Task": "Review {artifact} against {spec}. Find real defects; don't praise. Assume there are bugs and\n"
+            "look for them: wrong behavior, ways around a check, false refusals, tests that would pass\n"
+            "with the feature broken.",
+    "Context": "You get the artifact and its spec only. The builder's reasoning, conclusions and test\n"
+               "results are left out on purpose, so your reading isn't anchored on theirs.",
+    "Expected output": "Write the result to outputs/{id}.md: one finding per item, each with where (file and\n"
+                       "line, or section), a concrete failing scenario, and a severity (blocking, should-fix,\n"
+                       "nit). The requester adds which findings the existing tests had missed.",
+    "Limits": "- Read-only: don't change the artifact, push, merge, or contact anyone.\n"
+              "- No new standing thread (DEC-013): run in an ephemeral context (a subagent, Copilot's\n"
+              "  pull-request review, a ChatGPT Temporary Chat), and the requester files your result.",
+}
+
+
 class Refused(Exception):
     pass
 
@@ -396,6 +411,19 @@ def cmd_new(a):
     text_for = lambda hid: TEMPLATE.format(id=hid, title=a.title, frm=a.frm, to=a.to, now=now(), by=by,
                                            source=a.source or "none", last=a.last_processed or "none",
                                            reply_to=a.reply_to or "", touches=a.touches or "")
+    if a.review:
+        if not a.to.lower().startswith("review:"):
+            raise Refused("--review needs --to review:<who> (review:chatgpt, review:copilot, review:subagent)")
+        for opt in ("artifact", "spec"):
+            single_line(f"--{opt}", getattr(a, opt))
+        base_text = text_for
+        def text_for(hid):
+            t = base_text(hid)
+            for sec, body in REVIEW_SECTIONS.items():
+                body = body.format(id=hid, artifact=a.artifact or "TODO (the artifact: PR, branch, file)",
+                                   spec=a.spec or "TODO (the spec it must meet)")
+                t = re.sub(rf"(^## {re.escape(sec)}[ \t]*\n).*?(?=^## )", lambda m: m.group(1) + body + "\n\n", t, count=1, flags=re.S | re.M)
+            return t
     taken, note = ids_in_git(a.dir)
     if note:
         print(f"note: {note}", file=sys.stderr)
@@ -593,9 +621,34 @@ def history_problems(d, base):
     return out
 
 
+def stale_format_warnings(d, files):
+    """A handoff made in an older format after the current one was adopted means the session that
+    made it runs an old copy of this skill or script, without the newer protections. The
+    adoption time comes from .ledger.json: {"contract_since": {"relay-kit/handoff@2": "2026-11-02T00:03Z"}}."""
+    try:
+        since = json.loads((d / ".ledger.json").read_text(encoding="utf-8")).get("contract_since", {}).get(CONTRACT)
+    except (FileNotFoundError, ValueError, AttributeError):
+        return []
+    if not since:
+        return []
+    out = []
+    for p in files:
+        try:
+            meta, log, _, _ = parse_text(p.read_text(encoding="utf-8"), p.stem)
+        except Refused:
+            continue
+        contract = meta.get("contract") or "relay-kit/handoff@1"
+        if contract != CONTRACT and meta.get("created", "") >= since:
+            who = log[0]["actor"] if log else meta.get("from", "?")
+            out.append(f"{p.name}: warning: made in {contract} at {meta.get('created')}, after {CONTRACT} was adopted "
+                       f"({since}); {who} is using an old copy of the handoff-ledger skill or script")
+    return out
+
+
 def cmd_check(a):
     total, ids = [], {}
     files = sorted(a.dir.glob("HO-*.md"))
+    total += stale_format_warnings(a.dir, files)
     if a.base:
         total += history_problems(a.dir, a.base)
     for p in files:
@@ -630,6 +683,9 @@ def main():
     n.add_argument("--reply-to")
     n.add_argument("--by", help="the sender with a session (claude:aec#01N4); default $RELAYKIT_ACTOR")
     n.add_argument("--lane", help="lane code in the id (default: .ledger.json 'lanes', else from --from)")
+    n.add_argument("--review", action="store_true", help="an adversarial review handoff (--to review:<who>); fills Task, Context, Expected output and Limits")
+    n.add_argument("--artifact", help="with --review: what to review (a PR, branch or file)")
+    n.add_argument("--spec", help="with --review: what it must meet")
     n.add_argument("--touches", help="optional: comma-separated paths, globs or thread URLs this work will change; status.py --touching warns others")
     s = sub.add_parser("set")
     s.add_argument("id")
