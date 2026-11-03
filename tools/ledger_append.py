@@ -32,6 +32,8 @@ def handoff_module():
     """The handoff-ledger skill's script, which defines how the shared copy is found."""
     import importlib.util
     path = HERE.parent / "skills" / "handoff-ledger" / "scripts" / "handoff.py"
+    if not path.exists():
+        sys.exit(f"refused: {path} is missing; ledger_append.py runs from the kit, next to skills/")
     spec = importlib.util.spec_from_file_location("handoff", path)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)

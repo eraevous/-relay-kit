@@ -141,9 +141,9 @@ def parse_utc(x):
     """An ISO time with a zone, as UTC; None for anything else (no zone, not a time). Never raises."""
     try:
         t = dt.datetime.fromisoformat(str(x).replace("Z", "+00:00"))
-    except ValueError:
+        return t.astimezone(dt.timezone.utc) if t.tzinfo else None
+    except (ValueError, OverflowError):   # e.g. 0001-01-01T00:00+01:00 is before the first UTC moment
         return None
-    return t.astimezone(dt.timezone.utc) if t.tzinfo else None
 
 
 def event_time(at, prev_at):

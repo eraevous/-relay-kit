@@ -811,7 +811,8 @@ def coordination_tests():
          "touches src/api/*.py: matches src/*/client.py" in globs and "none found" in nomatch, globs + "\n--\n" + nomatch)
     f_db = hd / f"{h_db}.md"
     f_db.write_text(f_db.read_text(encoding="utf-8").replace("| prepared |", "| prepared |", 1)
-                    + "- 2026-11-02T17:25 | sent | claude:aec#s9 | no time zone\n", encoding="utf-8")
+                    + "- 2026-11-02T17:25 | sent | claude:aec#s9 | no time zone\n"
+                    + "- 0001-01-01T00:00+01:00 | sent | claude:aec#s9 | before the first UTC moment\n", encoding="utf-8")
     rc_bad, out_bad, err_bad = run(st_, "--root", c1, "--no-fetch", "--no-ci", "--touching", "src/db/x.py",
                                    env=dict(envc, RELAYKIT_ACTOR="claude:aec#s2"))
     case("status: a log time without a zone doesn't crash it", rc_bad == 0 and "== Not checked" in out_bad, err_bad[-300:])
