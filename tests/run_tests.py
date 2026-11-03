@@ -981,10 +981,14 @@ def deploy_tests():
          and (out / "handoffs" / "outputs").is_dir() and "@v0.1.0" in wf and "${{ github.token }}" in wf
          and os.access(out / ".githooks" / "pre-push", os.X_OK) and not leftover, i.stdout + i.stderr + str(files) + str(leftover))
     again = rk("init", out, "--owner", "sam")
-    bad = [rk("init", TMP / "r-bad1", "--owner", "two words"), rk("init", TMP / "r-bad2", "--owner", "sam", "--lanes", "x=too-long-code!")]
-    case("deploy: init refuses a non-empty folder and bad owner or lane values, writing nothing",
+    os.symlink(TMP / "elsewhere" / "deep", TMP / "r-link")
+    bad = [rk("init", TMP / "r-bad1", "--owner", "two words"), rk("init", TMP / "r-bad2", "--owner", "sam", "--lanes", "x=too-long-code!"),
+           rk("init", TMP / "r-bad3", "--owner", "sam", "--lanes", "a=RS,b=RS"), rk("init", TMP / "r-bad4", "--owner", "sam", "--lanes", "foo bar=X"),
+           rk("init", TMP / "r-bad5", "--owner", "sam", "--kit-ref", "main"), rk("init", TMP / "r-link", "--owner", "sam")]
+    case("deploy: init refuses a non-empty folder, bad owner or lane values, repeated codes, a branch as kit ref and a symlink, writing nothing",
          again.returncode != 0 and "isn't an empty folder" in again.stderr and all(b.returncode != 0 for b in bad)
-         and not (TMP / "r-bad1").exists() and not (TMP / "r-bad2").exists(), again.stderr + "".join(b.stderr for b in bad))
+         and not any((TMP / f"r-bad{k}").exists() for k in range(1, 6)) and not (TMP / "elsewhere").exists(),
+         again.stderr + "".join(b.stderr for b in bad))
 
     # each subcommand is the same script: same output and exit code as running it directly
     d = ledger_dir("cli-same")
@@ -998,7 +1002,7 @@ def deploy_tests():
     case("deploy: relay-kit handoff/ledger give the same output and exit code as the scripts", all(same), str(same))
 
     # the new records folder works end to end, and its pre-push hook blocks a bad ledger line
-    g = lambda *a: subprocess.run(["git", "-C", str(out), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+    g = lambda *a: subprocess.run(["git", "-C", str(out), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "push.negotiate=false", *a],
                                   capture_output=True, text=True, env=dict(os.environ, **env))
     origin = TMP / "records-new.git"
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], capture_output=True)
@@ -1014,17 +1018,31 @@ def deploy_tests():
         f.write(json.dumps(dict(id="DEC-009", date="2026-11-03", status="adopted", decision="no basis", scope="s")) + "\n")
     g("commit", "-qam", "bad line")
     blocked = g("push", "-q")
+    g("reset", "-q", "--hard", "origin/main")
+    # a bad commit on a branch that isn't checked out, and a bad commit under a clean one, are both caught
+    g("checkout", "-q", "-b", "side")
+    lines = (out / "governance" / "decisions.jsonl").read_text(encoding="utf-8").replace('"decision": "d"', '"decision": "rewritten"')
+    (out / "governance" / "decisions.jsonl").write_text(lines, encoding="utf-8"); g("commit", "-qam", "rewrite an earlier line")
+    (out / "notes.txt").write_text("x"); g("add", "notes.txt"); g("commit", "-qm", "clean commit on top")
+    g("checkout", "-q", "main")
+    side = g("push", "-q", "origin", "side")
+    clean = g("push", "-q", "origin", "main")
     sc = TMP / "scan"; sc.mkdir()
-    (sc / ".private-names").write_text("ownername\n")
-    (sc / "a.md").write_text('pip install "relay-kit @ git+https://github.com/ownername/relay-kit@v0.1.0"\nold: ownername/-relay-kit\n')
+    (sc / ".private-names").write_text("ownername\n"); (sc / ".gitignore").write_text(".private-names\n")
+    (sc / "pyproject.toml").write_text('[project.urls]\nHomepage = "https://github.com/ownername/relay-kit"\n')
+    (sc / "a.md").write_text('pip install "relay-kit @ git+https://github.com/ownername/relay-kit' + '@' + 'v0.1.0"\nold: ownername/-relay-kit\n')
+    (sc / "c.md").write_text("see github.com/ownername/other-relay-kit and github.com/ownername/relay-kit-private\n")
     (sc / "b.md").write_text("ownername wrote this; mail " + "ownername" + "@example.com\n")
     subprocess.run(["git", "init", "-q", str(sc)], capture_output=True); subprocess.run(["git", "-C", str(sc), "add", "."], capture_output=True)
     rc_s, so_s, _ = run(KIT / "tools" / "prepublish_scan.py", "--root", sc)
-    case("scan: the kit's own install URL passes; the same name or an email elsewhere is still caught",
-         rc_s != 0 and "a.md" not in so_s and "b.md:1: private name" in so_s and "b.md:1: email address" in so_s, so_s)
+    case("scan: only the kit's own repository URL passes; the name in other repos, text or emails is still caught",
+         rc_s != 0 and "a.md" not in so_s and "pyproject" not in so_s and "b.md:1: private name" in so_s
+         and "b.md:1: email address" in so_s and so_s.count("c.md:1: private name") == 2, so_s)
     case("deploy: a fresh records repo takes handoffs and ledger lines, and its pre-push hook blocks a bad line",
          first.returncode == 0 and hid.startswith("HO-RS-") and dec == "DEC-001" and good.returncode == 0
-         and blocked.returncode != 0 and "ledger check failed" in blocked.stderr, first.stderr + good.stderr + blocked.stderr)
+         and blocked.returncode != 0 and "checks failed" in blocked.stderr, first.stderr + good.stderr + blocked.stderr)
+    case("deploy: the hook checks the commits being pushed (a branch not checked out, a bad commit under a clean one)",
+         side.returncode != 0 and "checks failed on refs/heads/side" in side.stderr and clean.returncode == 0, side.stderr + clean.stderr)
 
 
 # ---------------- telemetry ----------------

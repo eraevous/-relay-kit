@@ -396,7 +396,9 @@ def changed_since(root, since, me, gaps, fetch=True, cap=15):
     except RuntimeError:   # the empty tree isn't a commit
         when = ""
     when = when or "1970-01-01T00:00:00Z"
-    lines = [f"{label} ({base[:7]}, {when[:16]})" if not when.startswith("1970") else f"{label} (from the first commit)"]
+    if when.startswith("1970"):
+        label = "since the first commit"
+    lines = [f"{label} ({base[:7]}, {when[:16]})" if not when.startswith("1970") else label]
     for name, key in (("decisions.jsonl", "decision"), ("challenges.jsonl", "concern")):
         try:
             diff = git(root, "diff", f"{base}..{tip}", "--", f"governance/{name}")
@@ -415,10 +417,12 @@ def changed_since(root, since, me, gaps, fetch=True, cap=15):
         if len(added) > cap:
             lines.append(f"... and {len(added) - cap} more in {name}")
     try:
+        if SKILLS != KIT / "skills":   # installed: never run git in whatever repository encloses site-packages
+            raise RuntimeError("installed package")
         moved = git(KIT, "log", shared_tip(KIT, fetch), f"--since={kit_since or when}", "--format=%h %s", "--", "governance/contracts.json")
         lines += [f"contract change in the kit: {m}" for m in moved.splitlines()]
     except (RuntimeError, FileNotFoundError):
-        gaps.append("the kit isn't a git checkout: contract changes weren't looked for")
+        gaps.append("the kit isn't a git checkout (installed package): contract changes weren't looked for")
     if len(lines) == 1:
         lines.append("nothing new in the ledgers or contracts")
     return lines

@@ -8,8 +8,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read
-  issues: write   # only to open and close the alert issue below
+  contents: read   # the checks get no write access; only the alert job below can touch issues
 
 jobs:
   records:
@@ -18,12 +17,16 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - name: Install relay-kit {{KIT_REF}}
-        run: python3 -m pip install --quiet "relay-kit @ git+https://github.com/{{KIT_REPO}}@{{KIT_REF}}"
+      - name: Install relay-kit {{KIT_REF}} in its own environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/rk"
+          "$RUNNER_TEMP/rk/bin/pip" install --quiet "relay-kit @ git+https://github.com/{{KIT_REPO}}@{{KIT_REF}}"
+          echo "$RUNNER_TEMP/rk/bin" >> "$GITHUB_PATH"
       - name: Base revision for history checks
         id: base
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then BASE="origin/${{ github.base_ref }}"; else BASE="${{ github.event.before }}"; fi
+          # A pull request is compared with where it left the base branch, not the base's tip.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then BASE=$(git merge-base "origin/${{ github.base_ref }}" HEAD); else BASE="${{ github.event.before }}"; fi
           if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then BASE=HEAD~1; fi
           if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then BASE=HEAD; fi
           echo "ref=$BASE" >> "$GITHUB_OUTPUT"
@@ -34,24 +37,29 @@ jobs:
       - name: Ledgers are valid and append-only
         if: success() || failure()
         run: relay-kit ledger check --dir governance --git --base "${{ steps.base.outputs.ref }}"
-      # The alert goes to the repository owner (assigned, so GitHub notifies them). Whoever starts
-      # fixing it acknowledges by commenting; `relay-kit status` shows red-and-unacknowledged at the
-      # top for every session. The next green run on main closes it.
-      - name: Open or update the alert issue when checks fail on main
-        if: failure() && github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
+
+  # The alert goes to the repository owner on GitHub (assigned, so GitHub notifies them). Whoever
+  # starts fixing it acknowledges by commenting; `relay-kit status` shows red-and-unacknowledged at
+  # the top for every session. The next green run on main closes it. This job runs no records code.
+  alert:
+    needs: records
+    if: always() && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TITLE: Records check failing on main
+    steps:
+      - name: Open or update the alert issue when the checks failed
+        if: needs.records.result == 'failure'
         run: |
-          title="Records check failing on main"
-          n=$(gh issue list --repo "${{ github.repository }}" --state open --search "in:title \"$title\"" --json number --jq '.[0].number')
+          n=$(gh issue list --repo "${{ github.repository }}" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number')
           body="Run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} failed at ${{ github.sha }}. To acknowledge, comment here with who is fixing it."
-          if [ -n "$n" ]; then gh issue comment "$n" --repo "${{ github.repository }}" --body "$body"; else gh issue create --repo "${{ github.repository }}" --title "$title" --assignee "${{ github.repository_owner }}" --body "$body"; fi
-      - name: Close the alert issue when main is green again
-        if: success() && github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
+          if [ -n "$n" ]; then gh issue comment "$n" --repo "${{ github.repository }}" --body "$body"; else gh issue create --repo "${{ github.repository }}" --title "$TITLE" --assignee "${{ github.repository_owner }}" --body "$body"; fi
+      - name: Close the alert issue when the checks pass again
+        if: needs.records.result == 'success'
         run: |
-          title="Records check failing on main"
-          for n in $(gh issue list --repo "${{ github.repository }}" --state open --search "in:title \"$title\"" --json number --jq '.[].number'); do
+          for n in $(gh issue list --repo "${{ github.repository }}" --state open --search "in:title \"$TITLE\"" --json number --jq '.[].number'); do
             gh issue close "$n" --repo "${{ github.repository }}" --comment "Green again at ${{ github.sha }}."
           done

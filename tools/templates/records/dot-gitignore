@@ -2,3 +2,5 @@
 governance/.ledger_append.lock
 *.tmp
 __pycache__/
+relay-kit-upload/
+relay-kit-extracted/

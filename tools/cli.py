@@ -6,7 +6,7 @@
     relay-kit ledger check [--dir governance] [...]   tools/check_ledgers.py
     relay-kit ledger append [--dir governance] decision|challenge '<json>'   tools/ledger_append.py
     relay-kit new-id --prefix C --lane AEC [...]      tools/new_id.py
-    relay-kit zips [--out DIR]                        skill zips for uploading (and extracted copies)
+    relay-kit zips [--out DIR]                        one zip per skill (default ./relay-kit-upload)
     relay-kit --version
 
 Each subcommand runs the same script the checkout runs (python3 tools/status.py and so on),
@@ -14,7 +14,11 @@ with the same arguments, output and exit code. Nothing else changes.
 """
 import datetime as dt, json, pathlib, re, runpy, shutil, sys
 
-from . import __version__
+try:
+    from . import __version__
+except ImportError:   # run as a file (python3 tools/cli.py) rather than as the package
+    import re as _re
+    __version__ = _re.search(r'__version__ = "([^"]+)"', (__import__("pathlib").Path(__file__).with_name("__init__.py")).read_text()).group(1)
 
 HERE = pathlib.Path(__file__).resolve().parent
 SKILLS = HERE.parent / "skills" if (HERE.parent / "skills" / "handoff-ledger").is_dir() else HERE / "skills"
@@ -31,8 +35,12 @@ KIT_REPO = "eraevous/relay-kit"
 
 def run_script(path, args):
     """Run a tool exactly as `python3 <path> <args>` would: same argv, output and exit code."""
+    saved = sys.argv
     sys.argv = [str(path)] + list(args)
-    runpy.run_path(str(path), run_name="__main__")
+    try:
+        runpy.run_path(str(path), run_name="__main__")
+    finally:
+        sys.argv = saved
 
 
 def init(argv):
@@ -41,7 +49,7 @@ def init(argv):
     ap.add_argument("folder", type=pathlib.Path)
     ap.add_argument("--owner", required=True, help="the person whose words authorize work (one word)")
     ap.add_argument("--lanes", default="", help="lane codes for handoff ids, e.g. relay-kit=RK,research=RS")
-    ap.add_argument("--kit-ref", default=f"v{__version__}", help="relay-kit tag or commit the CI installs (default: this version's tag)")
+    ap.add_argument("--kit-ref", default=f"v{__version__}", help="relay-kit release tag (vX.Y.Z) or commit SHA the CI installs (default: this version's tag); branches are refused, since they move")
     ap.add_argument("--kit-repo", default=KIT_REPO, help="GitHub owner/name the CI installs relay-kit from")
     a = ap.parse_args(argv)
     owner = a.owner.strip().lower()
@@ -49,12 +57,18 @@ def init(argv):
         sys.exit("refused: --owner must be one word (letters, digits, . : - _)")
     lanes = {}
     for pair in filter(None, (x.strip() for x in a.lanes.split(","))):
-        name, _, code = pair.partition("=")
-        if not name or not re.fullmatch(r"[A-Z0-9]{1,12}", code.strip().upper()):
-            sys.exit(f"refused: --lanes entry {pair!r} isn't name=CODE (CODE: 1-12 letters or digits)")
-        lanes[name.strip().lower()] = code.strip().upper()
+        name, _, code = (x.strip() for x in pair.partition("="))
+        if not re.fullmatch(r"[\w.-]+", name) or not re.fullmatch(r"[A-Z0-9]{1,12}", code.upper()):
+            sys.exit(f"refused: --lanes entry {pair!r} isn't name=CODE (name: letters, digits, . - _; CODE: 1-12 letters or digits)")
+        if name.lower() in lanes or code.upper() in lanes.values():
+            sys.exit(f"refused: --lanes repeats {name!r} or code {code.upper()!r}; each lane needs its own code")
+        lanes[name.lower()] = code.upper()
+    if not re.fullmatch(r"v\d+\.\d+\.\d+|[0-9a-f]{7,40}", a.kit_ref):
+        sys.exit(f"refused: --kit-ref {a.kit_ref!r} must be a release tag (v1.2.3) or a commit SHA: a branch moves under you")
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", a.kit_repo) or not re.fullmatch(r"[\w./-]+", a.kit_ref):
         sys.exit("refused: --kit-repo must be owner/name and --kit-ref a tag, branch or commit")
+    if a.folder.is_symlink():
+        sys.exit(f"refused: {a.folder} is a symlink; give the real folder, so nothing is written somewhere else")
     out = a.folder.resolve()
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         sys.exit(f"refused: {out} exists and isn't an empty folder; init only fills a new or empty one")
@@ -76,11 +90,16 @@ def init(argv):
             dst.chmod(dst.stat().st_mode | 0o755)
         written.append(rel.as_posix())
     (out / "handoffs" / "outputs").mkdir(parents=True, exist_ok=True)
+    (out / "handoffs" / "outputs" / ".gitkeep").write_text("", encoding="utf-8")   # so a clone has the folder
+    written.append("handoffs/outputs/.gitkeep")
+    if lanes:
+        with open(out / "threads.md", "a", encoding="utf-8") as f:
+            f.write("- lane codes (handoffs/.ledger.json): " + ", ".join(f"{n}={c}" for n, c in lanes.items()) + "\n")
     cfg = {"owner": owner, "lanes": lanes,
            "contract_since": {"relay-kit/handoff@2": now.strftime("%Y-%m-%dT%H:%MZ")}}
     (out / "handoffs" / ".ledger.json").write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
     written.append("handoffs/.ledger.json")
-    print(f"Created {out} (relay-kit {__version__}):")
+    print(f"Created {out} (relay-kit {__version__}), owner '{owner}':")
     for w in written:
         print(f"  {w}")
     print(f"""
@@ -91,6 +110,23 @@ Next (init doesn't run git or create anything outside {out}):
   # create a PRIVATE repository on GitHub, then: git remote add origin <url> && git push -u origin main
   export RELAYKIT_ACTOR=<assistant>:<lane>#<session id>
   relay-kit status --root .""")
+
+
+def zips(argv):
+    """Build one upload zip per skill into a folder (default ./relay-kit-upload). For Claude Code,
+    unzip them into ~/.claude/skills."""
+    import argparse, importlib.util
+    ap = argparse.ArgumentParser(prog="relay-kit zips", description=zips.__doc__)
+    ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path.cwd() / "relay-kit-upload")
+    a = ap.parse_args(argv)
+    spec = importlib.util.spec_from_file_location("relaykit_extract", SCRIPTS["zips"])
+    ext = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ext)
+    try:
+        made = ext.build_zips(a.out, root=SKILLS.parent)
+    except ValueError as e:
+        sys.exit(f"refused: {e}")
+    print(f"{len(made)} skill zips in {a.out.resolve()}")
 
 
 def main(argv=None):
@@ -111,7 +147,7 @@ def main(argv=None):
     if cmd not in SCRIPTS:
         sys.exit(f"relay-kit: unknown command {cmd!r}; try relay-kit --help")
     if cmd == "zips":
-        rest = ["--zips"] + rest
+        return zips(rest)
     run_script(SCRIPTS[cmd], rest)
 
 

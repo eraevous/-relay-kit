@@ -15,12 +15,14 @@ quote the owner, so keep this repository **private**.
     export RELAYKIT_ACTOR=<assistant>:<lane>#<session id>   # e.g. claude:research#01AB...
     relay-kit status --root .
 
-It says whether this copy is behind, what waits on the owner, which handoffs are open and
+Add a `Relay-Session: <session id>` line to your commit messages so it can tell what changed
+since you last committed. It says whether this copy is behind, what waits on the owner, which handoffs are open and
 with whom, and what other lanes decided since this session last committed.
 
 ## Writing
 
     relay-kit handoff --dir handoffs new --from claude:research --to chatgpt:review --title "..."
+    #   fill every TODO in the new file, then:  relay-kit handoff --dir handoffs set <id> sent --note "how"
     relay-kit ledger append --dir governance decision '{"status": "proposed", "decision": "...", "scope": "..."}'
     relay-kit status --root . --touching <files or thread link>    # before changing shared things
 
@@ -31,4 +33,8 @@ The same checks run in three places:
 - before each push, through `.githooks/pre-push`. Turn it on once per clone with
   `git config core.hooksPath .githooks`. It's procedure, not enforcement: `--no-verify` skips it;
 - in CI (`.github/workflows/records.yml`), pinned to relay-kit {{KIT_REF}}. A red run on the
-  main branch opens an issue assigned to the owner, which closes on the next green run.
+  main branch opens an issue assigned to the repository's owner on GitHub, which closes on the
+  next green run.
+
+The relay-kit README has a full handoff example, and what to do when two sessions take the
+same decision number.

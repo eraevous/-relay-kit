@@ -31,7 +31,7 @@ def safe_output(out, root=ROOT):
         raise ValueError(f"refusing to write to {out}: it contains the repository")
     if out.exists() and not out.is_dir():
         raise ValueError(f"refusing to write to {out}: it's a file")
-    own = out in (root / "extracted", root / "upload", DEFAULT_OUT.resolve(), DEFAULT_UP.resolve())
+    own = CHECKOUT and out in (root / "extracted", root / "upload")   # a checkout's own git-ignored folders
     if out.exists() and any(out.iterdir()) and not (out / MARK).exists() and not own:
         raise ValueError(f"refusing to replace {out}: it isn't empty and wasn't made by this tool")
     if any(out.rglob("SKILL.md")) if out.exists() else False:
@@ -98,7 +98,7 @@ def main(argv):
     for f in files:
         print(f.relative_to(out.parent) if out.is_relative_to(ROOT) else f)
     if zips is not None:
-        print(f"rebuilt {len(zips)} upload zips in {DEFAULT_UP}")
+        print(f"rebuilt {len(zips)} upload zips")
 
 
 if __name__ == "__main__":
