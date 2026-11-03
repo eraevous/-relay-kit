@@ -113,8 +113,9 @@ python3 -I tools/prepublish_scan.py  # before publishing: emails, chat links, to
 Standard library only; no network or accounts. CI runs all three on every push. The browser tests check the scripts'
 logic, not the current markup of chatgpt.com or claude.ai.
 
-`extracted/` holds the code from each `SKILL.md` as standalone files and is generated:
-run `python3 tools_extract.py` after editing a skill. The `SKILL.md` is the source of truth.
+The `SKILL.md` files are the source of truth. To get their code as standalone files, run
+`python3 tools_extract.py` (writes `extracted/`, which git ignores); the tests do this
+themselves. `python3 tools_extract.py --zips` builds the upload zips in `upload/`.
 
 ## Status and limits
 

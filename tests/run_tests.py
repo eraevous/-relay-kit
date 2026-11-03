@@ -8,11 +8,11 @@ import contextlib, csv, datetime, importlib.util, io, json, os, re, shutil, subp
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parent.parent
-X = KIT / "extracted"
 LEDGER = KIT / "skills" / "handoff-ledger" / "scripts" / "handoff.py"
 FIXTURE = KIT / "tests" / "fixtures" / "HO-20261028-001.md"   # frozen prepared copy
 HID = FIXTURE.stem
 TMP = Path(tempfile.mkdtemp(prefix="relaykit-tests-"))
+X = TMP / "extracted"   # generated from the skills for this run; nothing generated is kept in git
 RESULTS = []
 
 
@@ -815,10 +815,6 @@ def coordination_tests():
     rc_bad, out_bad, err_bad = run(st_, "--root", c1, "--no-fetch", "--no-ci", "--touching", "src/db/x.py",
                                    env=dict(envc, RELAYKIT_ACTOR="claude:aec#s2"))
     case("status: a log time without a zone doesn't crash it", rc_bad == 0 and "== Not checked" in out_bad, err_bad[-300:])
-    stale = [sk.name + "/" + f.name for sk in (KIT / "skills").iterdir() if (sk / "scripts").is_dir()
-             for f in (sk / "scripts").glob("*") if f.is_file()
-             and (not (X / sk.name / f.name).exists() or (X / sk.name / f.name).read_bytes() != f.read_bytes())]
-    case("extracted: every skill script's copy under extracted/ is current (run tools_extract.py)", not stale, str(stale))
 
 
 # ---------------- ledger append, stale copies, changed-since, review handoffs ----------------
@@ -1006,7 +1002,52 @@ def evidence_tests():
          rel_csv == rel_dash or (str(rel_csv) in note and str(rel_dash) in note), f"csv {rel_csv}, dashboard {rel_dash}")
 
 
+def packaging_tests():
+    """The skills as they ship: each upload zip holds the skill, and handoff-ledger's script runs
+    from the unzipped copy alone, with nothing from this repository on its path."""
+    ext = load("tools_extract", KIT / "tools_extract.py")
+    zips = ext.build_zips(TMP / "upload")
+    names = {z.stem for z in zips}
+    want = {p.name for p in (KIT / "skills").iterdir() if (p / "SKILL.md").exists()}
+    u = TMP / "unzipped"
+    shutil.unpack_archive(str(TMP / "upload" / "handoff-ledger.zip"), str(u))
+    script = u / "handoff-ledger" / "scripts" / "handoff.py"
+    d = TMP / "pkg-handoffs"
+    rc, hid, err = run(script, "--dir", d, "new", "--from", "claude:pkg", "--to", "codex:x", "--title", "T", env={"RELAYKIT_ACTOR": "claude:pkg#1"})
+    import zipfile
+    mismatch = []
+    for z in zips:   # each zip holds exactly its skill's files, byte for byte
+        src = KIT / "skills" / z.stem
+        files = {f.relative_to(KIT / "skills").as_posix(): f.read_bytes() for f in src.rglob("*") if f.is_file() and "__pycache__" not in f.parts}
+        with zipfile.ZipFile(z) as zf:
+            members = {n: zf.read(n) for n in zf.namelist()}
+        if members != files:
+            mismatch.append(z.name)
+    case("packaging: one zip per skill holding exactly its files, and the zipped handoff script works standalone",
+         names == want and not mismatch and rc == 0 and run(script, "--dir", d, "check")[0] == 0,
+         f"{sorted(names ^ want)} {mismatch} {err}")
+    kc = TMP / "kit-copy"   # never point a deleting tool at the real checkout, even in a test
+    shutil.copytree(KIT / "skills", kc / "skills"); shutil.copytree(KIT / "tests", kc / "tests")
+    shutil.copy2(KIT / "tools_extract.py", kc / "tools_extract.py")
+    subprocess.run(["git", "init", "-q", str(kc)], capture_output=True)
+    subprocess.run(["git", "-C", str(kc), "add", "."], capture_output=True)
+    tx = kc / "tools_extract.py"
+    (TMP / "userdocs").mkdir(); (TMP / "userdocs" / "thesis.txt").write_text("mine")
+    (kc / "notes").mkdir(); (kc / "notes" / "draft.md").write_text("untracked draft")
+    (TMP / "userdocs2").mkdir(); (TMP / "userdocs2" / "a.txt").write_text("mine"); os.symlink(TMP / "userdocs2", kc / "linkout")
+    refused = [run(tx, "--out", target) for target in (kc / "skills", kc, kc / "tests", TMP / "userdocs", kc / "notes", kc / "linkout")]
+    noarg = run(tx, "--out")
+    case("packaging: tools_extract replaces only folders it made: it refuses sources, the repo, user files inside or outside it, symlinks to them, and a missing --out value",
+         all(r[0] != 0 and "refus" in r[2] for r in refused) and (kc / "skills" / "handoff-ledger" / "SKILL.md").exists()
+         and (kc / "tests" / "run_tests.py").exists()
+         and (TMP / "userdocs" / "thesis.txt").exists() and (kc / "notes" / "draft.md").exists() and (TMP / "userdocs2" / "a.txt").exists()
+         and run(tx, "--out", TMP / "fresh-out")[0] == 0 and run(tx, "--out", TMP / "fresh-out")[0] == 0
+         and noarg[0] != 0 and "Traceback" not in noarg[2], " | ".join(r[2] for r in refused) + noarg[2])
+
+
 if __name__ == "__main__":
+    load("tools_extract", KIT / "tools_extract.py").extract(X)
+    packaging_tests()
     ledger_tests()
     (TMP / "fixture.raw.json").write_text(json.dumps(wrap(chatgpt_fixture())), encoding="utf-8")
     capture_tests()

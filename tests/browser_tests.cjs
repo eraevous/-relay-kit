@@ -7,6 +7,11 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const KIT = path.join(__dirname, '..');
+// The scripts live as code blocks in the SKILL.md files; extract them fresh for this run (nothing generated is kept in git).
+const os = require('node:os');
+const EXTRACTED = fs.mkdtempSync(path.join(os.tmpdir(), 'relaykit-browser-'));
+require('node:child_process').execFileSync('python3', ['-I', path.join(KIT, 'tools_extract.py'), '--out', EXTRACTED], { stdio: ['ignore', 'ignore', 'inherit'] });
+process.on('exit', () => fs.rmSync(EXTRACTED, { recursive: true, force: true }));
 let passed = 0, failed = 0;
 const check = (name, ok, detail) => {
   ok ? passed++ : failed++;
@@ -49,7 +54,7 @@ async function sendWait(s) {
     Date: { now: () => elapsed },
     setTimeout: (cb) => { elapsed += 1500; polls += 1; cb(); },
   };
-  const src = fs.readFileSync(path.join(KIT, 'extracted', 'chat-relay', '02_send_wait.js'), 'utf8')
+  const src = fs.readFileSync(path.join(EXTRACTED, 'chat-relay', '02_send_wait.js'), 'utf8')
     .replace('MODE_PLACEHOLDER', JSON.stringify('send')).replace('BASELINE_PLACEHOLDER', '0');
   try { return { ...(await vm.runInNewContext(src, context, { timeout: 2000 })), clicked }; }
   catch (e) { return { error: String(e.message || e), clicked }; }
@@ -68,7 +73,7 @@ async function scrape(messages) {
     window: {}, Date, Intl, Blob, URL: { createObjectURL: () => 'blob:x' },
     getComputedStyle: () => ({ overflowY: 'visible' }), setTimeout: (cb) => cb(),
   };
-  const src = fs.readFileSync(path.join(KIT, 'extracted', 'chat-capture', '02_scrape_fallback.js'), 'utf8');
+  const src = fs.readFileSync(path.join(EXTRACTED, 'chat-capture', '02_scrape_fallback.js'), 'utf8');
   await vm.runInNewContext(src, context, { timeout: 2000 });
   return context.window.__chatcap.data.messages;
 }
@@ -104,7 +109,7 @@ async function fill(els = null) {
     Event: class {}, DataTransfer: class { setData(_, v) { this.v = v; } },
     ClipboardEvent: class { constructor(_, o) { this.text = o && o.clipboardData && o.clipboardData.v; } }, setTimeout: (cb) => cb(),
   };
-  const src = fs.readFileSync(path.join(KIT, 'extracted', 'chat-relay', '01_fill.js'), 'utf8')
+  const src = fs.readFileSync(path.join(EXTRACTED, 'chat-relay', '01_fill.js'), 'utf8')
     .replace('TEXT_PLACEHOLDER', JSON.stringify('A bounded test.\nSecond line.'));
   try { return { ...(await vm.runInNewContext(src, context, { timeout: 2000 })), track }; }
   catch (e) { return { error: String(e.message || e), track }; }
@@ -181,7 +186,7 @@ async function fill(els = null) {
       location: { href: 'https://example.invalid/c/x' }, Date: { now: () => elapsed },
       setTimeout: (cb) => { elapsed += 1500; polls += 1; cb(); },
     };
-    const src = fs.readFileSync(path.join(KIT, 'extracted', 'chat-relay', '02_send_wait.js'), 'utf8')
+    const src = fs.readFileSync(path.join(EXTRACTED, 'chat-relay', '02_send_wait.js'), 'utf8')
       .replace('MODE_PLACEHOLDER', JSON.stringify('wait')).replace('BASELINE_PLACEHOLDER', '0');
     const out = await vm.runInNewContext(src, context, { timeout: 2000 });
     check(`relay (2026-10 markup): turn-state "${state}" -> ${want}`, out.status === want && (want !== 'done' || out.reply === 'RELAY-OK 1'), out);
@@ -201,7 +206,7 @@ async function fill(els = null) {
       window: {}, Date, Intl, Blob, URL: { createObjectURL: () => 'blob:x' },
       getComputedStyle: () => ({ overflowY: 'visible' }), setTimeout: (cb) => cb(),
     };
-    await vm.runInNewContext(fs.readFileSync(path.join(KIT, 'extracted', 'chat-capture', '02_scrape_fallback.js'), 'utf8'), context, { timeout: 2000 });
+    await vm.runInNewContext(fs.readFileSync(path.join(EXTRACTED, 'chat-capture', '02_scrape_fallback.js'), 'utf8'), context, { timeout: 2000 });
     const got = context.window.__chatcap.data.messages;
     check('scrape (2026-10 markup): roles, ids and text from unit keys',
       got.map((x) => x.role).join() === 'user,assistant,user,assistant' && got[1].id === 'a1' && got[1].text === 'First.' && got[0].text === 'Yes.', got);

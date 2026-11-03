@@ -4,3 +4,4 @@ __pycache__/
 .handoff.lock
 upload/
 .private-names
+extracted/
