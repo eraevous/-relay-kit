@@ -883,6 +883,12 @@ def learning_tests():
          div[0] != 0 and "different lines under the same ids" in div[2] and sub[0] == 0 and sub[1] == "DEC-001"
          and emp[0] != 0 and (c1 / "governance" / "challenges.jsonl").exists(), " | ".join(x[1] + x[2] for x in (div, sub, emp)))
 
+    sp = TMP / "la-spaced" / "governance"; sp.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(sp.parent)], capture_output=True)
+    (sp / "decisions.jsonl").write_text('{"id" : "DEC-001", "date": "2026-11-01", "status": "proposed", "decision": "d", "scope": "s", "evidence": {"id": "DEC-099"}}\n', encoding="utf-8")
+    spaced = run(app, "--dir", sp, "decision", prop, "--offline", env={"RELAYKIT_ACTOR": "claude:rk#s1"})
+    case("ledger_append: reads ids as JSON (spacing, nested ids)", spaced[1] == "DEC-002", spaced[1] + spaced[2])
+
     # stale copies: an @1 handoff made after @2 was adopted is named; older @1 files and @2 files aren't
     d = TMP / "stale-fmt"; (d / "outputs").mkdir(parents=True)
     (d / ".ledger.json").write_text('{"owner": "sam", "contract_since": {"relay-kit/handoff@2": "2026-11-02T00:03Z"}}', encoding="utf-8")
@@ -916,12 +922,17 @@ def learning_tests():
     sec = lambda o: o.split("== Changed")[1].split("\n== ")[0] if "== Changed" in o else ""
     g(c1, "pull", "-q")
     pulled = run(st_, "--root", c1, "--no-fetch", "--no-ci", env={"RELAYKIT_ACTOR": "claude:rk#session_ME123"})[1]
+    one = TMP / "la-one"; (one / "governance").mkdir(parents=True)
+    (one / "governance" / "decisions.jsonl").write_text(json.dumps(first) + "\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(one)], capture_output=True)
+    g(one, "add", "."); g(one, "commit", "-qm", "only commit")
+    only = run(st_, "--root", one, "--no-fetch", "--no-ci", "--since", "2020-01-01")[1]
     empty = TMP / "la-empty"; subprocess.run(["git", "init", "-q", str(empty)], capture_output=True)
     rc_e, out_e, err_e = run(st_, "--root", empty, "--no-fetch", "--no-ci", env={"RELAYKIT_ACTOR": "claude:rk#s1"})
     case("changed since: lists what other lanes pushed after this session's last commit (fetched, not yet pulled), "
          "not earlier lines, and isn't fooled by a commit that only mentions the session id; an empty repo doesn't crash",
          "nothing new" in sec(quiet) and "other lane's news" in sec(news) and "d2" not in sec(news)
-         and "other lane's news" in sec(pulled) and rc_e == 0 and "== Not checked" in out_e, sec(quiet) + "\n--\n" + sec(news) + err_e[-300:])
+         and "other lane's news" in sec(pulled) and "DEC-001" in sec(only) and rc_e == 0 and "== Not checked" in out_e, sec(quiet) + "\n--\n" + sec(news) + err_e[-300:])
 
     # review handoffs
     d = TMP / "review"
@@ -929,6 +940,14 @@ def learning_tests():
     rc, hid, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:rk", "--to", "review:chatgpt", "--title", "Review #8", "--review",
                      "--artifact", "PR 8", "--spec", "the handoff", env={"RELAYKIT_ACTOR": "claude:rk#s1"})
     t = (d / f"{hid}.md").read_text(encoding="utf-8") if rc == 0 else ""
+    rc2, hid2, _ = run(LEDGER, "--dir", d, "new", "--from", "claude:rk", "--to", "review:copilot", "--title", "R2", "--review",
+                       env={"RELAYKIT_ACTOR": "claude:rk#s1"})
+    t2 = (d / f"{hid2}.md").read_text(encoding="utf-8") if rc2 == 0 else ""
+    t2f = re.sub(r"## Authorized\n.*?\n## ", "## Authorized\n- Quote: \"go\" (owner, chat, 2026-11-02)\n- Approving: x\n- Permits: x\n- Doesn't cover: x\n\n## ", t2, flags=re.S)
+    (d / f"{hid2}.md").write_text(t2f, encoding="utf-8")
+    sent2 = run(LEDGER, "--dir", d, "set", hid2, "sent", "--by", "claude:rk#s1", "--note", "x")
+    case("review handoff: without --artifact and --spec it can't be sent, even once Authorized is filled",
+         rc2 == 0 and sent2[0] != 0 and "TODO" in sent2[2], sent2[2])
     case("review handoff: needs a review: recipient; fills the review sections, leaves Authorized for the owner",
          no[0] != 0 and rc == 0 and "Review PR 8 against the handoff" in t and "left out on purpose" in t
          and f"outputs/{hid}.md" in t and "NOT AUTHORIZED YET" in t and run(LEDGER, "--dir", d, "check")[0] == 0, no[2] + t[:400])

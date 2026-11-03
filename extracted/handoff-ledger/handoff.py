@@ -420,8 +420,9 @@ def cmd_new(a):
         def text_for(hid):
             t = base_text(hid)
             for sec, body in REVIEW_SECTIONS.items():
-                body = body.format(id=hid, artifact=a.artifact or "TODO (the artifact: PR, branch, file)",
-                                   spec=a.spec or "TODO (the spec it must meet)")
+                body = body.format(id=hid, artifact=a.artifact or "<the artifact>", spec=a.spec or "<the spec>")
+                if sec == "Task" and not (a.artifact and a.spec):   # a TODO on its own line, so the checks see it
+                    body = "TODO: name the artifact (PR, branch or file) and the spec it must meet.\n" + body
                 t = re.sub(rf"(^## {re.escape(sec)}[ \t]*\n).*?(?=^## )", lambda m: m.group(1) + body + "\n\n", t, count=1, flags=re.S | re.M)
             return t
     taken, note = ids_in_git(a.dir)

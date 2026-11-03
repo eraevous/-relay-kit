@@ -33,7 +33,16 @@ def git(d, *args):
 
 
 def max_id(text, prefix):
-    nums = [int(m) for m in re.findall(rf'"id":\s*"{prefix}-(\d+)"', text)]
+    """Highest top-level id in a JSON-lines text (parsed, so spacing and nested ids don't matter)."""
+    nums = []
+    for line in text.splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        m = re.fullmatch(rf"{prefix}-(\d+)", str(obj.get("id", ""))) if isinstance(obj, dict) else None
+        if m:
+            nums.append(int(m.group(1)))
     return max(nums, default=0)
 
 
@@ -132,7 +141,9 @@ def append(a, path, prefix, row, theirs):
         now_text = path.read_text(encoding="utf-8")
         if now_text == mine + line:   # only ours was added: take exactly that back out
             if existed:
-                path.write_text(mine, encoding="utf-8")
+                tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+                tmp.write_text(mine, encoding="utf-8")
+                os.replace(tmp, path)   # atomic: readers see the old file or the new one, never half
             else:
                 path.unlink()
             sys.stderr.write(chk.stdout + chk.stderr)

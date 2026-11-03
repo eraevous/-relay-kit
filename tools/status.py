@@ -380,10 +380,13 @@ def changed_since(root, since, me, gaps, fetch=True, cap=15):
             label = "in the last 48 hours"
     else:
         return None
-    if not base:
+    if not base:   # compare with an empty tree, so lines added in the very first commit count too
         gaps.append("no earlier commit to compare with: 'changed since' covers the whole history")
-        base = git(root, "rev-list", "--max-parents=0", tip).splitlines()[0]
-    when = git(root, "log", "-1", "--format=%cI", base)
+        base = git(root, "hash-object", "-t", "tree", "/dev/null")
+    try:
+        when = git(root, "log", "-1", "--format=%cI", base)
+    except RuntimeError:   # the empty tree isn't a commit
+        when = "1970-01-01T00:00:00Z"
     lines = [f"{label} ({base[:7]}, {when[:16]})"]
     for name, key in (("decisions.jsonl", "decision"), ("challenges.jsonl", "concern")):
         try:
