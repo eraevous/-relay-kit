@@ -13,9 +13,14 @@ command takes the id instead of you:
   3. appends the line, then runs check_ledgers.py on the result (with --git);
   4. on any problem, takes the line back out and exits non-zero. Its exit code is the check's:
      don't pipe it into `tail`, which hides a failure.
-It prints the new id. What it can't close: another session taking the same id between this
-append and your push. Push (or open the pull request) right away; the records check on main
-catches what slips through.
+It prints the new id. If the shared copy can't be read (no remote, fetch failed), it refuses
+rather than guess; --offline overrides that when you know you're the only writer. A branch
+whose ledger is behind the shared one is refused too: an id must be new on the shared
+branch, so merge it first. Local appends take a lock file, so two processes in one copy
+can't overwrite each other, and the rollback only removes this command's own line.
+What it can't close: another session taking the same id between this append and your
+push. Push (or open the pull request) right away; the records check on main catches what
+slips through.
 """
 import argparse, datetime as dt, json, os, pathlib, re, subprocess, sys
 
@@ -32,11 +37,19 @@ def max_id(text, prefix):
     return max(nums, default=0)
 
 
-def shared_text(d, name):
-    """The ledger as the shared copy has it, after a fetch. (text, note)."""
+def shared_text(path):
+    """The ledger as the shared copy has it, after a fetch. (text, note). Works when the ledger's
+    folder doesn't exist here yet: git runs from the nearest folder that does."""
+    d = path.parent
+    while not d.exists() and d != d.parent:
+        d = d.parent
     if git(d, "rev-parse", "--git-dir").returncode != 0:
-        return "", "not a git repository: only this copy was read"
-    note = None if git(d, "fetch", "--quiet", "origin").returncode == 0 else "fetch failed: used the last fetch"
+        return None, "not a git repository: the shared copy can't be read"
+    if git(d, "remote").stdout.strip() == "":
+        return None, "no remote: the shared copy can't be read"
+    if git(d, "fetch", "--quiet", "origin").returncode != 0:
+        return None, "fetch failed: the shared copy can't be read"
+    note = None
     ref = git(d, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD").stdout.strip()
     if not ref:
         for cand in ("refs/remotes/origin/main", "refs/remotes/origin/master"):
@@ -44,10 +57,11 @@ def shared_text(d, name):
                 ref = cand
                 break
     if not ref:
-        return "", "no shared branch found: only this copy was read"
-    prefix = git(d, "rev-parse", "--show-prefix").stdout.strip()
-    shown = git(d, "show", f"{ref}:{prefix}{name}")
-    return (shown.stdout if shown.returncode == 0 else ""), note
+        return None, "no shared branch found on origin"
+    top = pathlib.Path(git(d, "rev-parse", "--show-toplevel").stdout.strip())
+    rel = path.resolve().relative_to(top.resolve()).as_posix()   # resolve() works for paths not created yet
+    shown = git(d, "show", f"{ref}:{rel}")
+    return (shown.stdout if shown.returncode == 0 else ""), note   # not on the shared branch yet: empty
 
 
 def main():
@@ -55,6 +69,7 @@ def main():
     ap.add_argument("--dir", type=pathlib.Path, default=pathlib.Path("governance"))
     ap.add_argument("kind", choices=sorted(KINDS))
     ap.add_argument("json", help="the line's fields as a JSON object; id, date and recorded_by are filled if missing")
+    ap.add_argument("--offline", action="store_true", help="allow appending without reading the shared copy")
     a = ap.parse_args()
     name, prefix = KINDS[a.kind]
     path = a.dir / name
@@ -66,36 +81,66 @@ def main():
         sys.exit("refused: give one JSON object")
     if "id" in row:
         sys.exit("refused: leave 'id' out; this command assigns it")
-    mine = path.read_text(encoding="utf-8") if path.exists() else ""
-    theirs, note = shared_text(a.dir, name)
-    if note:
-        print(f"note: {note}", file=sys.stderr)
+    theirs, note = shared_text(path)
+    if theirs is None:
+        if not a.offline:
+            sys.exit(f"refused: {note}; an id taken without it may collide (use --offline if you're the only writer)")
+        print(f"note: {note}; --offline", file=sys.stderr)
+        theirs = ""
+    lock = a.dir / ".ledger_append.lock"
+    a.dir.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        sys.exit(f"refused: another append holds {lock}; retry, or delete it if none is running")
+    try:
+        sys.exit(append(a, path, prefix, row, theirs))
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(lock)
+        except FileNotFoundError:
+            pass
+
+
+def append(a, path, prefix, row, theirs):
+    existed = path.exists()
+    mine = path.read_text(encoding="utf-8") if existed else ""
+    lines_mine = [l for l in mine.splitlines() if l.strip()]
+    lines_theirs = [l for l in theirs.splitlines() if l.strip()]
+    if lines_mine[:len(lines_theirs)] != lines_theirs:
+        if lines_theirs[:len(lines_mine)] == lines_mine:
+            return (f"refused: the shared copy has {len(lines_theirs) - len(lines_mine)} line(s) this copy doesn't "
+                    f"(up to {prefix}-{max_id(theirs, prefix):03d}); merge or pull the shared branch first, so the new id is new there too")
+        return ("refused: this copy and the shared copy have different lines under the same ids "
+                "(someone appended the same id elsewhere); reconcile them before appending")
     new_id = f"{prefix}-{max(max_id(mine, prefix), max_id(theirs, prefix)) + 1:03d}"
-    if max_id(theirs, prefix) > max_id(mine, prefix):
-        sys.exit(f"refused: the shared copy has {prefix}-{max_id(theirs, prefix):03d}, which this copy doesn't; "
-                 "pull first, then append (otherwise the numbering will have a gap here)")
     row = {"id": new_id, **row}
     row.setdefault("date", dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d"))
     actor = os.environ.get("RELAYKIT_ACTOR", "").strip()
     if "recorded_by" not in row:
         if not actor:
-            sys.exit("refused: set RELAYKIT_ACTOR (lane#session, or the owner's name) or give recorded_by")
+            return "refused: set RELAYKIT_ACTOR (lane#session, or the owner's name) or give recorded_by"
         row["recorded_by"] = actor
-    line = json.dumps(row, ensure_ascii=False) + "\n"
-    body = mine if (not mine or mine.endswith("\n")) else mine + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body + line, encoding="utf-8")
+    line = ("" if not mine or mine.endswith("\n") else "\n") + json.dumps(row, ensure_ascii=False) + "\n"
+    with open(path, "a", encoding="utf-8") as f:   # append, never rewrite: nothing else is touched
+        f.write(line)
     base = "HEAD" if git(a.dir, "rev-parse", "--verify", "--quiet", "HEAD").returncode == 0 else None
     cmd = [sys.executable, "-I", str(HERE / "check_ledgers.py"), "--dir", str(a.dir)] + (["--git", "--base", base] if base else [])
     chk = subprocess.run(cmd, capture_output=True, text=True)
     if chk.returncode != 0:
-        if mine:
-            path.write_text(mine, encoding="utf-8")   # take it back out
-        else:
-            path.unlink()
+        now_text = path.read_text(encoding="utf-8")
+        if now_text == mine + line:   # only ours was added: take exactly that back out
+            if existed:
+                path.write_text(mine, encoding="utf-8")
+            else:
+                path.unlink()
+            sys.stderr.write(chk.stdout + chk.stderr)
+            return f"refused: the ledger check failed with {new_id} added; nothing was appended"
         sys.stderr.write(chk.stdout + chk.stderr)
-        sys.exit(f"refused: the ledger check failed with {new_id} added; nothing was appended")
+        return f"FAILED: the ledger check failed with {new_id} added, and the file changed meanwhile; {new_id} was left in place: fix it by hand"
     print(new_id)
+    return 0
 
 
 if __name__ == "__main__":

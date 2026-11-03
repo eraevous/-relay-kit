@@ -631,14 +631,32 @@ def stale_format_warnings(d, files):
         return []
     if not since:
         return []
+    def utc(x):
+        try:
+            t = dt.datetime.fromisoformat(str(x).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return t.astimezone(dt.timezone.utc) if t.tzinfo else None
     out = []
+    since_t = utc(since)
+    if since_t is None:
+        return [f".ledger.json: warning: contract_since {since!r} isn't an ISO time with a zone; stale copies weren't looked for"]
+    newer = re.compile(r"^relay-kit/handoff@(\d+)$")
     for p in files:
         try:
             meta, log, _, _ = parse_text(p.read_text(encoding="utf-8"), p.stem)
         except Refused:
+            out.append(f"{p.name}: warning: unreadable; if it's new, the session that made it may have an old copy")
             continue
         contract = meta.get("contract") or "relay-kit/handoff@1"
-        if contract != CONTRACT and meta.get("created", "") >= since:
+        m, mine_v = newer.match(contract), int(CONTRACT.rsplit("@", 1)[1])
+        if not m or int(m.group(1)) >= mine_v:   # a newer version means *this* copy is the old one
+            continue
+        created = utc(meta.get("created", ""))
+        if created is None:
+            out.append(f"{p.name}: warning: 'created' {meta.get('created')!r} isn't a time with a zone; couldn't tell if it's stale")
+            continue
+        if created >= since_t:
             who = log[0]["actor"] if log else meta.get("from", "?")
             out.append(f"{p.name}: warning: made in {contract} at {meta.get('created')}, after {CONTRACT} was adopted "
                        f"({since}); {who} is using an old copy of the handoff-ledger skill or script")

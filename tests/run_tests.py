@@ -843,7 +843,7 @@ def learning_tests():
     a3 = run(app, "--dir", c2 / "governance", "decision", prop, env={"RELAYKIT_ACTOR": "claude:aec#s2"})
     last = json.loads((c2 / "governance" / "decisions.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     case("ledger_append: takes the next id from the shared copy, refuses a stale copy, fills date and recorder",
-         a1[1] == "DEC-002" and a2[0] != 0 and "pull first" in a2[2] and before2.count("\n") == 1
+         a1[1] == "DEC-002" and a2[0] != 0 and "pull the shared branch first" in a2[2] and before2.count("\n") == 1
          and a3[1] == "DEC-003" and last["recorded_by"] == "claude:aec#s2" and re.match(r"\d{4}-\d{2}-\d{2}$", last["date"]),
          " | ".join(x[1] + x[2] for x in (a1, a2, a3)))
     n_before = (c2 / "governance" / "decisions.jsonl").read_text(encoding="utf-8")
@@ -856,6 +856,33 @@ def learning_tests():
          and (c2 / "governance" / "decisions.jsonl").read_text(encoding="utf-8") == n_before
          and given[0] != 0, bad[2] + given[2])
 
+    lone = TMP / "la-lone" / "governance"; lone.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(lone.parent)], capture_output=True)
+    off1 = run(app, "--dir", lone, "decision", prop, env={"RELAYKIT_ACTOR": "claude:rk#s1"})
+    off2 = run(app, "--dir", lone, "decision", prop, "--offline", env={"RELAYKIT_ACTOR": "claude:rk#s1"})
+    (c2 / "governance" / ".ledger_append.lock").write_text("x")
+    locked = run(app, "--dir", c2 / "governance", "decision", prop, env={"RELAYKIT_ACTOR": "claude:aec#s2"})
+    (c2 / "governance" / ".ledger_append.lock").unlink()
+    case("ledger_append: no shared copy means refuse (unless --offline); a held lock refuses a second writer",
+         off1[0] != 0 and "can't be read" in off1[2] and off2[0] == 0 and off2[1] == "DEC-001"
+         and locked[0] != 0 and "lock" in locked[2], " | ".join(x[1] + x[2] for x in (off1, off2, locked)))
+
+    # second review of #8: diverged copies, a missing folder, an empty ledger
+    g(c1, "fetch", "-q"); g(c1, "reset", "-q", "--hard", "origin/main"); g(c2, "fetch", "-q"); g(c2, "reset", "-q", "--hard", "origin/main")
+    run(app, "--dir", c1 / "governance", "decision", json.dumps(dict(status="proposed", decision="A's", scope="s")), env={"RELAYKIT_ACTOR": "claude:a#1"})
+    run(app, "--dir", c2 / "governance", "decision", json.dumps(dict(status="proposed", decision="B's", scope="s")), env={"RELAYKIT_ACTOR": "claude:b#2"})
+    g(c2, "commit", "-qam", "B"); g(c2, "push", "-q")
+    div = run(app, "--dir", c1 / "governance", "decision", prop, env={"RELAYKIT_ACTOR": "claude:a#1"})
+    g(c1, "checkout", "-q", "--", "."); g(c1, "pull", "-q")
+    sub = run(app, "--dir", c1 / "new" / "gov", "decision", prop, env={"RELAYKIT_ACTOR": "claude:a#1"})
+    (c1 / "new" / "gov" / "decisions.jsonl").unlink(missing_ok=True)
+    (c1 / "governance" / "challenges.jsonl").write_text(""); g(c1, "add", "."); g(c1, "commit", "-qm", "empty ch"); g(c1, "push", "-q")
+    emp = run(app, "--dir", c1 / "governance", "challenge", json.dumps(dict(status="resolved", concern="c", raised_by="x")), env={"RELAYKIT_ACTOR": "claude:a#1"})
+    case("ledger_append: equal top ids with different lines are refused; a ledger folder not created yet still reads the shared copy; "
+         "a failed append to an empty ledger leaves the file in place",
+         div[0] != 0 and "different lines under the same ids" in div[2] and sub[0] == 0 and sub[1] == "DEC-001"
+         and emp[0] != 0 and (c1 / "governance" / "challenges.jsonl").exists(), " | ".join(x[1] + x[2] for x in (div, sub, emp)))
+
     # stale copies: an @1 handoff made after @2 was adopted is named; older @1 files and @2 files aren't
     d = TMP / "stale-fmt"; (d / "outputs").mkdir(parents=True)
     (d / ".ledger.json").write_text('{"owner": "sam", "contract_since": {"relay-kit/handoff@2": "2026-11-02T00:03Z"}}', encoding="utf-8")
@@ -867,6 +894,14 @@ def learning_tests():
     rc, so, _ = run(LEDGER, "--dir", d, "check")
     case("stale copy: check names the session that made an old-format handoff after adoption, and only that one",
          rc == 0 and "HO-20261102-003.md: made in relay-kit/handoff@1" in so and so.count("old copy") == 1, so)
+    for since in ("2026-11-02T18:03+01:00", "2026-11-02T00:03:30Z", 20261102):   # 17:03Z: later as text, earlier as time
+        (d / ".ledger.json").write_text(json.dumps({"owner": "sam", "contract_since": {"relay-kit/handoff@2": since}}), encoding="utf-8")
+        rc2, so2, se2 = run(LEDGER, "--dir", d, "check")
+        ok = rc2 == 0 and (("old copy" in so2) if not isinstance(since, int) else ("isn't an ISO time" in so2))
+        if not ok:
+            break
+    case("stale copy: contract_since with an offset or seconds compares as a time; a bad value is a warning, not a crash",
+         ok, f"{since}: {so2}{se2}")
 
     # changed since this session's last commit
     g(c1, "pull", "-q")
@@ -875,11 +910,18 @@ def learning_tests():
     g(c2, "fetch", "-q"); g(c2, "reset", "-q", "--hard", "origin/main")
     run(app, "--dir", c2 / "governance", "decision", json.dumps(dict(status="proposed", decision="other lane's news", scope="s")),
         env={"RELAYKIT_ACTOR": "claude:aec#s2"})
-    g(c2, "commit", "-qam", "news"); g(c2, "push", "-q"); g(c1, "pull", "-q")
-    news = run(st_, "--root", c1, "--no-fetch", "--no-ci", env={"RELAYKIT_ACTOR": "claude:rk#session_ME123"})[1]
+    g(c2, "commit", "-qam", "news\n\nSee session_ME123's earlier work.\n\nClaude-Session: https://claude.ai/code/session_ME1234")   # a mention, and a longer id
+    g(c2, "push", "-q")
+    news = run(st_, "--root", c1, "--no-ci", env={"RELAYKIT_ACTOR": "claude:rk#session_ME123"})[1]   # fetched, not pulled
     sec = lambda o: o.split("== Changed")[1].split("\n== ")[0] if "== Changed" in o else ""
-    case("changed since: lists what other lanes added after this session's last commit, and nothing before it",
-         "nothing new" in sec(quiet) and "other lane's news" in sec(news) and "d2" not in sec(news), sec(quiet) + "\n--\n" + sec(news))
+    g(c1, "pull", "-q")
+    pulled = run(st_, "--root", c1, "--no-fetch", "--no-ci", env={"RELAYKIT_ACTOR": "claude:rk#session_ME123"})[1]
+    empty = TMP / "la-empty"; subprocess.run(["git", "init", "-q", str(empty)], capture_output=True)
+    rc_e, out_e, err_e = run(st_, "--root", empty, "--no-fetch", "--no-ci", env={"RELAYKIT_ACTOR": "claude:rk#s1"})
+    case("changed since: lists what other lanes pushed after this session's last commit (fetched, not yet pulled), "
+         "not earlier lines, and isn't fooled by a commit that only mentions the session id; an empty repo doesn't crash",
+         "nothing new" in sec(quiet) and "other lane's news" in sec(news) and "d2" not in sec(news)
+         and "other lane's news" in sec(pulled) and rc_e == 0 and "== Not checked" in out_e, sec(quiet) + "\n--\n" + sec(news) + err_e[-300:])
 
     # review handoffs
     d = TMP / "review"
