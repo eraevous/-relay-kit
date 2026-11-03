@@ -5,14 +5,31 @@ uploading to claude.ai). Only the output folders are written; skill sources are 
 
     python3 tools_extract.py [--out DIR] [--zips]
 """
-import re, pathlib, shutil, sys, zipfile
+import argparse, re, pathlib, shutil, subprocess, sys, zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent
 EXT = {"javascript": "js", "js": "js", "python": "py", "py": "py", "bash": "sh", "sh": "sh"}
 
 
+def safe_output(out, root=ROOT):
+    """An output folder this tool may delete and rewrite: never the repository, an ancestor of it,
+    or a folder holding anything git tracks or any SKILL.md. Raises ValueError otherwise."""
+    out = pathlib.Path(out).resolve()
+    root = root.resolve()
+    if out == root or out in root.parents or out == pathlib.Path(out.anchor):
+        raise ValueError(f"refusing to write to {out}: it contains the repository")
+    if out.exists():
+        if any(out.rglob("SKILL.md")):
+            raise ValueError(f"refusing to write to {out}: it holds SKILL.md sources")
+        if root in out.parents:
+            tracked = subprocess.run(["git", "-C", str(root), "ls-files", "--", str(out)], capture_output=True, text=True)
+            if tracked.returncode == 0 and tracked.stdout.strip():
+                raise ValueError(f"refusing to write to {out}: git tracks files there")
+    return out
+
+
 def extract(out_root, root=ROOT):
-    out_root = pathlib.Path(out_root)
+    out_root = safe_output(out_root, root)
     shutil.rmtree(out_root, ignore_errors=True)
     for sk in sorted((root / "skills").iterdir()):
         lines = (sk / "SKILL.md").read_text(encoding="utf-8").splitlines(keepends=True)
@@ -40,7 +57,7 @@ def extract(out_root, root=ROOT):
 
 
 def build_zips(up, root=ROOT):
-    up = pathlib.Path(up)
+    up = safe_output(up, root)
     shutil.rmtree(up, ignore_errors=True); up.mkdir(parents=True)
     for sk in sorted((root / "skills").iterdir()):
         with zipfile.ZipFile(up / f"{sk.name}.zip", "w", zipfile.ZIP_DEFLATED) as z:
@@ -51,11 +68,20 @@ def build_zips(up, root=ROOT):
 
 
 def main(argv):
-    out = pathlib.Path(argv[argv.index("--out") + 1]) if "--out" in argv else ROOT / "extracted"
-    for f in extract(out):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--out", type=pathlib.Path, default=ROOT / "extracted")
+    ap.add_argument("--zips", action="store_true")
+    a = ap.parse_args(argv)
+    try:
+        files = extract(a.out)
+        zips = build_zips(ROOT / "upload") if a.zips else None
+    except ValueError as e:
+        sys.exit(f"refused: {e}")
+    out = a.out.resolve()
+    for f in files:
         print(f.relative_to(out.parent) if out.is_relative_to(ROOT) else f)
-    if "--zips" in argv:
-        print(f"rebuilt {len(build_zips(ROOT / 'upload'))} upload zips")
+    if zips is not None:
+        print(f"rebuilt {len(zips)} upload zips")
 
 
 if __name__ == "__main__":

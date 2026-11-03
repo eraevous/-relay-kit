@@ -1014,9 +1014,30 @@ def packaging_tests():
     script = u / "handoff-ledger" / "scripts" / "handoff.py"
     d = TMP / "pkg-handoffs"
     rc, hid, err = run(script, "--dir", d, "new", "--from", "claude:pkg", "--to", "codex:x", "--title", "T", env={"RELAYKIT_ACTOR": "claude:pkg#1"})
-    case("packaging: one zip per skill, and the zipped handoff script works standalone",
-         names == want and rc == 0 and run(script, "--dir", d, "check")[0] == 0
-         and (u / "handoff-ledger" / "SKILL.md").exists(), f"{sorted(names ^ want)} {err}")
+    import zipfile
+    mismatch = []
+    for z in zips:   # each zip holds exactly its skill's files, byte for byte
+        src = KIT / "skills" / z.stem
+        files = {f.relative_to(KIT / "skills").as_posix(): f.read_bytes() for f in src.rglob("*") if f.is_file() and "__pycache__" not in f.parts}
+        with zipfile.ZipFile(z) as zf:
+            members = {n: zf.read(n) for n in zf.namelist()}
+        if members != files:
+            mismatch.append(z.name)
+    case("packaging: one zip per skill holding exactly its files, and the zipped handoff script works standalone",
+         names == want and not mismatch and rc == 0 and run(script, "--dir", d, "check")[0] == 0,
+         f"{sorted(names ^ want)} {mismatch} {err}")
+    kc = TMP / "kit-copy"   # never point a deleting tool at the real checkout, even in a test
+    shutil.copytree(KIT / "skills", kc / "skills"); shutil.copytree(KIT / "tests", kc / "tests")
+    shutil.copy2(KIT / "tools_extract.py", kc / "tools_extract.py")
+    subprocess.run(["git", "init", "-q", str(kc)], capture_output=True)
+    subprocess.run(["git", "-C", str(kc), "add", "."], capture_output=True)
+    tx = kc / "tools_extract.py"
+    refused = [run(tx, "--out", kc / target) for target in ("skills", ".", "tests")]
+    noarg = run(tx, "--out")
+    case("packaging: tools_extract refuses an output folder holding sources (skills/, the repo, tracked files), and a missing --out value",
+         all(r[0] != 0 and "refus" in r[2] for r in refused) and (kc / "skills" / "handoff-ledger" / "SKILL.md").exists()
+         and (kc / "tests" / "run_tests.py").exists()
+         and noarg[0] != 0 and "Traceback" not in noarg[2], " | ".join(r[2] for r in refused) + noarg[2])
 
 
 if __name__ == "__main__":
