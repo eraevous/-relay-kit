@@ -82,6 +82,15 @@ adds warnings (never locks) about open handoffs that claim those paths, open pul
 changing them, other sessions active in your lane in the last few hours (`--hours`), and
 failing checks where the files live.
 
+With `RELAYKIT_ACTOR` set, the summary also opens with "Changed since this session's last
+commit": decisions and challenges other lanes added, and contract versions that moved
+(`--since <date or revision>` to choose the point). Handoffs made in an older format after
+a newer one was adopted are listed under "Out of date", naming the session with the stale copy.
+
+To add a decision or challenge, use `tools/ledger_append.py --dir governance decision '<json>'`:
+it takes the next id from the shared copy, fills the date and recorder, and takes the line
+back out if the ledger check fails.
+
 For ids in shared lists other than handoffs (candidates, notes), `tools/new_id.py --prefix C
 --lane AEC` makes one that two sessions can't both pick.
 

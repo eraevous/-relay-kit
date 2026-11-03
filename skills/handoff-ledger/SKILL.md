@@ -250,6 +250,27 @@ Then check its status.
 When you can't write files, put the lines you would have logged at the end of
 your reply so whoever files the output can record them.
 
+**Ask for a review (RQ-06):** `handoff.py new --review --to review:<who> --artifact <PR or
+file> --spec <what it must meet>` fills in an adversarial review. The reviewer gets the
+artifact and the spec, never the builder's reasoning or test results. Reviews don't open
+standing threads; use any of:
+- **the owner's ChatGPT assistant:** paste the handoff into a ChatGPT Temporary Chat in
+  *Personalized* mode, which keeps its memory and instructions and leaves no thread behind;
+- **Copilot:** request its review on the pull request;
+- **a fresh Claude subagent** that hasn't seen the build.
+Review is **required** for a change to a contract, to a check or guard, or to anything that
+decides who may do what: at least two reviewers, one of them from a different model family
+than the builder (the ChatGPT assistant for a Claude-built change). It's optional for other
+changes. The requester files each result (`--for review:<who>`) and adds which findings the
+tests had missed.
+
+**Your copy may be out of date (RQ-07).** This skill is uploaded separately to each place
+it runs, so copies fall behind. If `handoff.py` refuses a handoff for a newer contract, or
+`check` warns that a handoff was "made in an older format after the current one was
+adopted", your copy is stale: ask the owner for the current skill before writing more.
+At the start of a session, `status.py` lists what other lanes decided and learned since
+your last commit ("Changed since").
+
 **Check the folder (when the owner asks):** `handoff.py list`, or read the status
 lines. Report anything addressed to you or stuck in `sent` or `blocked`. Run
 `handoff.py check` to catch inconsistent files.
