@@ -36,10 +36,18 @@ ALERT_TITLE = "Records check failing on main"   # the issue the records workflow
 HOLDER = {"prepared": "from", "sent": "to", "acknowledged": "to", "in_progress": "to", "blocked": "from"}
 
 
+_LEDGER = None
+
+
 def load_ledger():
+    """handoff.py, the skill's standalone script, loaded once as a module (its main() is guarded)."""
+    global _LEDGER
+    if _LEDGER is not None:
+        return _LEDGER
     spec = importlib.util.spec_from_file_location("handoff", LEDGER)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
+    _LEDGER = m
     return m
 
 
@@ -76,13 +84,8 @@ def freshness(root, fetch, gaps):
 
 def age_hours(at):
     """Hours since a log time, or None if it isn't a time with a zone (never crash on a bad line)."""
-    try:
-        t = dt.datetime.fromisoformat(str(at).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if t.tzinfo is None:
-        return None
-    return (dt.datetime.now(dt.timezone.utc) - t).total_seconds() / 3600
+    t = load_ledger().parse_utc(at)
+    return None if t is None else (dt.datetime.now(dt.timezone.utc) - t).total_seconds() / 3600
 
 
 def handoffs(root, gaps, stale_hours):
@@ -322,7 +325,9 @@ def overlaps(root, targets, me, lane, hours, repo_dir, gaps):
 
 
 def shared_tip(d, fetch):
-    """origin's default branch after an optional fetch, else HEAD: what's shared, not only what's pulled."""
+    """origin's default branch after an optional fetch, else HEAD: what's shared, not only what's pulled.
+    Unlike handoff.shared_ref, it resolves to a commit and falls back past a dangling origin/HEAD,
+    because a summary should show something rather than refuse; so it stays separate."""
     if fetch:
         try:
             git(d, "fetch", "--quiet", "origin")
