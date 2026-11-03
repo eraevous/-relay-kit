@@ -351,7 +351,7 @@ def changed_since(root, since, me, gaps, fetch=True, cap=15):
         gaps.append("records aren't a git checkout with commits: 'changed since' wasn't worked out")
         return None
     tip = shared_tip(root, fetch)
-    base, label = None, None
+    base, label, kit_since = None, None, None   # kit_since: a time boundary for the kit, when one was asked for
     if since:
         if re.match(r"^\d{4}-\d{2}-\d{2}$", since):
             try:
@@ -359,7 +359,8 @@ def changed_since(root, since, me, gaps, fetch=True, cap=15):
             except ValueError:
                 gaps.append(f"--since {since}: not a real date")
                 return None
-            base = git(root, "log", tip, f"--until={since[:10]}T00:00:00Z", "-1", "--format=%H").strip() or None
+            kit_since = f"{since[:10]}T00:00:00Z"
+            base = git(root, "log", tip, f"--until={kit_since}", "-1", "--format=%H").strip() or None
             label = f"since {since}"
         else:
             try:
@@ -370,14 +371,14 @@ def changed_since(root, since, me, gaps, fetch=True, cap=15):
     elif parsed and parsed[1]:
         try:
             sid = re.escape(parsed[1])   # a trailer line ending in the id, not any mention of it
-            base = git(root, "log", "HEAD", "-E", f"--grep=^[A-Za-z-]*Session: \\S*[/_:]?{sid}$", "-1", "--format=%H") or None
+            base = git(root, "log", "HEAD", "-E", f"--grep=^[A-Za-z-]*Session: (\\S*[/_:])?{sid}$", "-1", "--format=%H") or None
         except RuntimeError:
             base = None
         label = "since this session's last commit"
         if not base:
             gaps.append(f"no commit by session {parsed[1][:12]} found: 'changed since' used the last 48 hours")
             base = git(root, "log", tip, "--until=48 hours ago", "-1", "--format=%H").strip() or None
-            label = "in the last 48 hours"
+            label, kit_since = "in the last 48 hours", "48 hours ago"
     else:
         return None
     if not base:   # compare with an empty tree, so lines added in the very first commit count too
@@ -395,7 +396,7 @@ def changed_since(root, since, me, gaps, fetch=True, cap=15):
             continue
         added = []
         for l in diff.splitlines():
-            if l.startswith("+{"):
+            if l.startswith("+") and not l.startswith("+++") and l[1:].strip().startswith("{"):
                 try:
                     added.append(json.loads(l[1:]))
                 except ValueError:
@@ -406,7 +407,7 @@ def changed_since(root, since, me, gaps, fetch=True, cap=15):
         if len(added) > cap:
             lines.append(f"... and {len(added) - cap} more in {name}")
     try:
-        moved = git(KIT, "log", shared_tip(KIT, fetch), f"--since={when}", "--format=%h %s", "--", "governance/contracts.json")
+        moved = git(KIT, "log", shared_tip(KIT, fetch), f"--since={kit_since or when}", "--format=%h %s", "--", "governance/contracts.json")
         lines += [f"contract change in the kit: {m}" for m in moved.splitlines()]
     except (RuntimeError, FileNotFoundError):
         gaps.append("the kit isn't a git checkout: contract changes weren't looked for")

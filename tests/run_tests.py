@@ -888,6 +888,13 @@ def learning_tests():
     (sp / "decisions.jsonl").write_text('{"id" : "DEC-001", "date": "2026-11-01", "status": "proposed", "decision": "d", "scope": "s", "evidence": {"id": "DEC-099"}}\n', encoding="utf-8")
     spaced = run(app, "--dir", sp, "decision", prop, "--offline", env={"RELAYKIT_ACTOR": "claude:rk#s1"})
     case("ledger_append: reads ids as JSON (spacing, nested ids)", spaced[1] == "DEC-002", spaced[1] + spaced[2])
+    lanerec = run(app, "--dir", sp, "decision", json.dumps(dict(status="proposed", decision="x", scope="s", recorded_by="claude:rk")),
+                  "--offline", env={"RELAYKIT_ACTOR": "claude:rk#s1"})
+    g(c2, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/gone")   # dangling, as after branch cleanup
+    dang = run(app, "--dir", c2 / "governance", "decision", prop, env={"RELAYKIT_ACTOR": "claude:aec#s2"})
+    g(c2, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    case("ledger_append: a lane as recorder is refused even with no commits to compare; a dangling origin/HEAD refuses, not 'empty'",
+         lanerec[0] != 0 and "lane#session" in lanerec[2] and dang[0] != 0 and "can't be read" in dang[2], lanerec[2] + " | " + dang[2])
 
     # stale copies: an @1 handoff made after @2 was adopted is named; older @1 files and @2 files aren't
     d = TMP / "stale-fmt"; (d / "outputs").mkdir(parents=True)
@@ -916,7 +923,9 @@ def learning_tests():
     g(c2, "fetch", "-q"); g(c2, "reset", "-q", "--hard", "origin/main")
     run(app, "--dir", c2 / "governance", "decision", json.dumps(dict(status="proposed", decision="other lane's news", scope="s")),
         env={"RELAYKIT_ACTOR": "claude:aec#s2"})
-    g(c2, "commit", "-qam", "news\n\nSee session_ME123's earlier work.\n\nClaude-Session: https://claude.ai/code/session_ME1234")   # a mention, and a longer id
+    with open(c2 / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:   # valid JSON, indented
+        f.write("  " + json.dumps(dict(id="DEC-099", date="2026-11-02", status="proposed", decision="indented line", scope="s")) + "\n")
+    g(c2, "commit", "-qam", "news\n\nSee session_ME123's earlier work.\n\nClaude-Session: https://claude.ai/code/session_xsession_ME123")   # a mention, and an id that merely ends in ours
     g(c2, "push", "-q")
     news = run(st_, "--root", c1, "--no-ci", env={"RELAYKIT_ACTOR": "claude:rk#session_ME123"})[1]   # fetched, not pulled
     sec = lambda o: o.split("== Changed")[1].split("\n== ")[0] if "== Changed" in o else ""
@@ -932,7 +941,7 @@ def learning_tests():
     case("changed since: lists what other lanes pushed after this session's last commit (fetched, not yet pulled), "
          "not earlier lines, and isn't fooled by a commit that only mentions the session id; an empty repo doesn't crash",
          "nothing new" in sec(quiet) and "other lane's news" in sec(news) and "d2" not in sec(news)
-         and "other lane's news" in sec(pulled) and "DEC-001" in sec(only) and rc_e == 0 and "== Not checked" in out_e, sec(quiet) + "\n--\n" + sec(news) + err_e[-300:])
+         and "other lane's news" in sec(pulled) and "indented line" in sec(pulled) and "DEC-001" in sec(only) and rc_e == 0 and "== Not checked" in out_e, sec(quiet) + "\n--\n" + sec(news) + err_e[-300:])
 
     # review handoffs
     d = TMP / "review"

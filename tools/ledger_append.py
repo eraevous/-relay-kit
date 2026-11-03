@@ -69,8 +69,17 @@ def shared_text(path):
         return None, "no shared branch found on origin"
     top = pathlib.Path(git(d, "rev-parse", "--show-toplevel").stdout.strip())
     rel = path.resolve().relative_to(top.resolve()).as_posix()   # resolve() works for paths not created yet
+    if git(d, "cat-file", "-e", f"{ref}^{{commit}}").returncode != 0:
+        return None, f"{ref} can't be read (a dangling origin/HEAD?): the shared copy can't be read"
+    listed = git(d, "ls-tree", "--full-tree", "--name-only", ref, "--", rel)
+    if listed.returncode != 0:
+        return None, f"{ref} can't be listed: the shared copy can't be read"
+    if not listed.stdout.strip():
+        return "", note   # not on the shared branch yet: genuinely empty
     shown = git(d, "show", f"{ref}:{rel}")
-    return (shown.stdout if shown.returncode == 0 else ""), note   # not on the shared branch yet: empty
+    if shown.returncode != 0:
+        return None, f"{ref}:{rel} can't be read: the shared copy can't be read"
+    return shown.stdout, note
 
 
 def main():
@@ -131,6 +140,12 @@ def append(a, path, prefix, row, theirs):
         if not actor:
             return "refused: set RELAYKIT_ACTOR (lane#session, or the owner's name) or give recorded_by"
         row["recorded_by"] = actor
+    # The recorder rule is checked here too, so it holds even where the ledger check can't compare
+    # with a previous commit (a repository with no commits yet).
+    who = str(row.get("recorded_by", "")).strip()
+    first = who.split()[0] if who else ""
+    if not who or (":" in first and not re.fullmatch(r"[\w.-]+:[\w.-]+#[\w-]+", first)):
+        return f"refused: recorded_by {who!r} must be the owner's name or lane#session"
     line = ("" if not mine or mine.endswith("\n") else "\n") + json.dumps(row, ensure_ascii=False) + "\n"
     with open(path, "a", encoding="utf-8") as f:   # append, never rewrite: nothing else is touched
         f.write(line)
