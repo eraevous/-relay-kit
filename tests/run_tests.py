@@ -1032,11 +1032,16 @@ def packaging_tests():
     subprocess.run(["git", "init", "-q", str(kc)], capture_output=True)
     subprocess.run(["git", "-C", str(kc), "add", "."], capture_output=True)
     tx = kc / "tools_extract.py"
-    refused = [run(tx, "--out", kc / target) for target in ("skills", ".", "tests")]
+    (TMP / "userdocs").mkdir(); (TMP / "userdocs" / "thesis.txt").write_text("mine")
+    (kc / "notes").mkdir(); (kc / "notes" / "draft.md").write_text("untracked draft")
+    (TMP / "userdocs2").mkdir(); (TMP / "userdocs2" / "a.txt").write_text("mine"); os.symlink(TMP / "userdocs2", kc / "linkout")
+    refused = [run(tx, "--out", target) for target in (kc / "skills", kc, kc / "tests", TMP / "userdocs", kc / "notes", kc / "linkout")]
     noarg = run(tx, "--out")
-    case("packaging: tools_extract refuses an output folder holding sources (skills/, the repo, tracked files), and a missing --out value",
+    case("packaging: tools_extract replaces only folders it made: it refuses sources, the repo, user files inside or outside it, symlinks to them, and a missing --out value",
          all(r[0] != 0 and "refus" in r[2] for r in refused) and (kc / "skills" / "handoff-ledger" / "SKILL.md").exists()
          and (kc / "tests" / "run_tests.py").exists()
+         and (TMP / "userdocs" / "thesis.txt").exists() and (kc / "notes" / "draft.md").exists() and (TMP / "userdocs2" / "a.txt").exists()
+         and run(tx, "--out", TMP / "fresh-out")[0] == 0 and run(tx, "--out", TMP / "fresh-out")[0] == 0
          and noarg[0] != 0 and "Traceback" not in noarg[2], " | ".join(r[2] for r in refused) + noarg[2])
 
 

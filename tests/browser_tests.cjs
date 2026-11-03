@@ -10,7 +10,8 @@ const KIT = path.join(__dirname, '..');
 // The scripts live as code blocks in the SKILL.md files; extract them fresh for this run (nothing generated is kept in git).
 const os = require('node:os');
 const EXTRACTED = fs.mkdtempSync(path.join(os.tmpdir(), 'relaykit-browser-'));
-require('node:child_process').execFileSync('python3', ['-I', path.join(KIT, 'tools_extract.py'), '--out', EXTRACTED], { stdio: 'ignore' });
+require('node:child_process').execFileSync('python3', ['-I', path.join(KIT, 'tools_extract.py'), '--out', EXTRACTED], { stdio: ['ignore', 'ignore', 'inherit'] });
+process.on('exit', () => fs.rmSync(EXTRACTED, { recursive: true, force: true }));
 let passed = 0, failed = 0;
 const check = (name, ok, detail) => {
   ok ? passed++ : failed++;
