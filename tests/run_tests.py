@@ -1296,6 +1296,63 @@ def finding_tests():
          and not (KIT / "skills" / "handoff-ledger" / "relay-kit.json").exists() and all(b[0] != 0 for b in bads),
          str(z) + str(names.keys()) + str(bads))
 
+def output_name_tests():
+    """check --base compares every copy of a handoff, wherever it's archived, and never takes
+    outputs/<id>.md (same file name) for the handoff. Records main went red on
+    HO-RK-20261103-5J0W's output, 2026-11-04; the scenarios are the two #15 reviews' probes."""
+    text = FIXTURE.read_text(encoding="utf-8")
+    edited = text.replace("\nto: ", "\nto: chatgpt:other-than-", 1)
+    assert edited != text
+    output = f"---\nid: {HID}\nrecipient: chatgpt:review\ndate: 2026-10-28\n---\n\n# Output\n\nDone.\n"
+    def scenario(name, at_base, after):
+        """at_base and after: {relative path: text}. Returns (exit code, output) of check --base."""
+        g, c1, _ = git_world(f"out-{name}")
+        d = c1 / "handoffs"
+        for rel, body in at_base.items():
+            (d / rel).parent.mkdir(parents=True, exist_ok=True); (d / rel).write_text(body, encoding="utf-8")
+        g(c1, "add", "-A"); g(c1, "commit", "-qm", "base")
+        base = g(c1, "rev-parse", "HEAD").stdout.strip()
+        for rel in at_base:
+            (d / rel).unlink()
+        for rel, body in after.items():   # "-> path" makes a symlink to that path
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            if body.startswith("-> "):
+                os.symlink(d / body[3:], d / rel)
+            else:
+                (d / rel).write_text(body, encoding="utf-8", errors="surrogateescape")
+        g(c1, "add", "-A"); g(c1, "commit", "-qm", "after")
+        r = run(LEDGER, "--dir", d, "check", "--base", base)
+        return r[0], r[1] + r[2]
+    top, arc, out = FIXTURE.name, f"archive/{FIXTURE.name}", f"outputs/{FIXTURE.name}"
+    ok = {
+        "output added": scenario("a", {top: text}, {top: text, out: output}),
+        "archived unchanged, output present": scenario("c", {top: text}, {arc: text, out: output}),
+        "archived into archive/outputs/": scenario("f", {top: text}, {f"archive/outputs/{FIXTURE.name}": text}),
+        "archived under a name with a space": scenario("q", {f"closed history/{FIXTURE.name}": text}, {f"closed history/{FIXTURE.name}": text}),
+    }
+    caught = {
+        "deleted, output kept": scenario("b", {top: text}, {out: output}),
+        "deleted, output is a copy of it": scenario("b2", {top: text}, {out: text}),
+        "edited, output present": scenario("k", {top: text, out: output}, {top: edited, out: output}),
+        "top untouched, archived copy edited": scenario("g", {top: text}, {top: text, arc: edited}),
+        "two archived copies, one edited (a/)": scenario("j", {top: text}, {f"a/{FIXTURE.name}": edited, f"z/{FIXTURE.name}": text}),
+        "two archived copies, one edited (z/)": scenario("i", {top: text}, {f"a/{FIXTURE.name}": text, f"z/{FIXTURE.name}": edited}),
+        "archived copy made unreadable": scenario("m", {top: text}, {arc: "no front matter\n"}),
+        "archived at the base, then edited": scenario("n", {arc: text}, {arc: edited}),
+        "archived at the base, then deleted": scenario("o", {arc: text}, {}),
+        "archived under a name with a space, then edited": scenario("p", {f"closed history/{FIXTURE.name}": text},
+                                                                    {f"closed history/{FIXTURE.name}": edited}),
+        "archived under a non-ASCII name, then edited": scenario("q2", {f"arch\u00e9/{FIXTURE.name}": text}, {f"arch\u00e9/{FIXTURE.name}": edited}),
+        "archived under a non-ASCII name, then deleted": scenario("r", {f"arch\u00e9/{FIXTURE.name}": text}, {}),
+        "unreadable at the base, then rewritten": scenario("aa", {top: "no front matter\n"}, {top: "something else\n"}),
+        "not UTF-8 any more": scenario("u", {arc: text}, {arc: "\udcff"}),
+        "handoff replaced by a symlink to its output": scenario("w", {top: text}, {out: text, top: f"-> {out}"}),
+    }
+    case("ledger: check --base ignores outputs/<id>.md and accepts archiving: " + ", ".join(ok),
+         all(r[0] == 0 for r in ok.values()), str({k: v for k, v in ok.items() if v[0] != 0}))
+    case("ledger: check --base catches every rewrite or removal, whichever copy holds it: " + ", ".join(caught),
+         all(r[0] != 0 for r in caught.values()), str({k: v for k, v in caught.items() if v[0] == 0}))
+
 if __name__ == "__main__":
     load("tools_extract", KIT / "tools_extract.py").extract(X)
     packaging_tests()
@@ -1310,6 +1367,7 @@ if __name__ == "__main__":
     learning_tests()
     deploy_tests()
     finding_tests()
+    output_name_tests()
     telemetry_tests()
     evidence_tests()
     failed = [r for r in RESULTS if not r[1]]
