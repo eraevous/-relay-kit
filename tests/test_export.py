@@ -364,16 +364,16 @@ class ReviewFixTests(ExportTests):
         cfg = {"owner": "sam", "lanes": {"research": "RS", "review": "RV", "ops": "OP", "ops-rel": "OP"}}
         (self.root / "handoffs" / ".ledger.json").write_text(json.dumps(cfg), encoding="utf-8")
         h = HANDOFF_OPEN.replace("HO-RS-20261102-CD34", "HO-OP-20261102-GH78").replace("from: claude:review", "from: claude:ops") \
-            .replace("to: chatgpt:review", "to: chatgpt:kate").replace("claude:review#SESSR9", "claude:ops#OPS1")
+            .replace("to: chatgpt:review", "to: chatgpt:nova").replace("claude:review#SESSR9", "claude:ops#OPS1")
         (self.root / "handoffs" / "HO-OP-20261102-GH78.md").write_text(h, encoding="utf-8")
         m, recs, _ = self.run_export(kinds=["handoffs"])
         ho = next(r for r in recs if r["rid"] == "handoff:HO-OP-20261102-GH78")
         self.assertEqual(ho["lanes"], ["ops"])
         self.assertEqual(ho["lane"], "ops")
         g = m["coverage_gaps"]
-        self.assertNotIn("kate", g["lanes_without_capture"])
-        kate = next(a for a in g["actors_without_capture"] if a["actor"] == "chatgpt:kate")
-        self.assertIsNone(kate["lane"])
+        self.assertNotIn("nova", g["lanes_without_capture"])
+        nova = next(a for a in g["actors_without_capture"] if a["actor"] == "chatgpt:nova")
+        self.assertIsNone(nova["lane"])
 
     def test_in_force(self):
         """export: in_force separates adopted decisions still in force from rejected and superseded ones"""

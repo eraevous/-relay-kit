@@ -167,7 +167,7 @@ def url_segments(url):
 
 class Lanes:
     """Lane names declared by handoffs/.ledger.json or threads.md, and their codes. An actor's
-    name part ('kate' in chatgpt:kate) is a lane only when it is declared (or is a declared lane's
+    name part ('nova' in chatgpt:nova) is a lane only when it is declared (or is a declared lane's
     unique code); otherwise the actor is reported without a lane."""
     def __init__(self, codes):
         self.codes = {k.lower(): str(v).upper() for k, v in (codes or {}).items()}
