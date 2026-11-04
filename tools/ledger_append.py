@@ -92,11 +92,21 @@ def shared_text(path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dir", type=pathlib.Path, default=pathlib.Path("governance"))
+    ap.add_argument("--dir", type=pathlib.Path, default=None,
+                    help="the governance folder (default: next to the handoffs folder handoff.py finds)")
     ap.add_argument("kind", choices=sorted(KINDS))
     ap.add_argument("json", help="the line's fields as a JSON object; id, date and recorded_by are filled if missing")
     ap.add_argument("--offline", action="store_true", help="allow appending without reading the shared copy")
     a = ap.parse_args()
+    if a.dir is None:
+        m = handoff_module()
+        try:
+            d, where = m.find_dir(None)
+        except m.Refused as e:
+            sys.exit(f"refused: {e}")
+        a.dir = d.parent / "governance"
+        if where:
+            print(f"note: {where}", file=sys.stderr)
     name, prefix = KINDS[a.kind]
     path = a.dir / name
     try:

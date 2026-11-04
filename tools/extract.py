@@ -5,7 +5,7 @@ uploading to claude.ai). Only the output folders are written; skill sources are 
 
     python3 tools_extract.py [--out DIR] [--zips]
 """
-import argparse, re, pathlib, shutil, sys, zipfile
+import argparse, json, re, pathlib, shutil, sys, zipfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 CHECKOUT = (HERE.parent / "skills" / "handoff-ledger").is_dir()
@@ -73,14 +73,18 @@ def extract(out_root, root=ROOT):
     return sorted(f for f in out_root.rglob("*") if f.is_file() and f.name != MARK)
 
 
-def build_zips(up, root=ROOT):
+def build_zips(up, root=ROOT, settings=None):
+    """One zip per skill. `settings` ({"owner": ..., "records": ...}) goes into the handoff-ledger
+    zip as relay-kit.json, so every copy uploaded from it knows the owner and where the records are."""
     up = safe_output(up, root)
     shutil.rmtree(up, ignore_errors=True); mark(up)
     for sk in sorted((root / "skills").iterdir()):
         with zipfile.ZipFile(up / f"{sk.name}.zip", "w", zipfile.ZIP_DEFLATED) as z:
             for f in sorted(sk.rglob("*")):
-                if f.is_file() and "__pycache__" not in f.parts:
+                if f.is_file() and "__pycache__" not in f.parts and f.name != "relay-kit.json":
                     z.write(f, f.relative_to(root / "skills"))
+            if settings and sk.name == "handoff-ledger":
+                z.writestr(f"{sk.name}/relay-kit.json", json.dumps(settings, indent=1) + "\n")
     return sorted(up.glob("*.zip"))
 
 

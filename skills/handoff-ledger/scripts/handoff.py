@@ -9,7 +9,10 @@ and on any step recorded --for someone else; an output file before completed;
 single-line fields; log lines written inside the Log section; an actor with a session
 (claude:aec#01N4) on @2 files; and --by (or --for) matching the declared sender (sent)
 or recipient (acknowledged, in_progress, completed), or the owner. The owner's name
-comes from <dir>/.ledger.json ({"owner": "sam"}); without it the name is "owner".
+comes from <dir>/.ledger.json ({"owner": "sam"}); without it, from this copy of the skill's
+relay-kit.json (written by `relay-kit zips --owner`); without either it is "owner", with a
+warning. Without --dir, the folder is $RELAYKIT_RECORDS/handoffs, else ./handoffs, else the
+one records clone found next to here or in the home folder (see find_dir).
 Writes go to a temporary file that replaces the original, under a lock file, and are
 refused if the file changed after it was read, if --expect names another state, or if
 the upstream branch changed the file since this clone last pulled. `check --base REF`
@@ -41,21 +44,96 @@ OWNER = "owner"   # replaced at start-up by <dir>/.ledger.json, if present
 LANES = {}       # optional lane codes from <dir>/.ledger.json: {"lanes": {"relay-kit": "RK"}}
 
 
+SKILL_CONFIG = pathlib.Path(__file__).resolve().parent.parent / "relay-kit.json"
+OWNER_RE = r"[\w.:-]+"
+
+
+def skill_config():
+    """Settings written into this copy of the skill by `relay-kit zips --owner --records`:
+    {"owner": "sam", "records": "sam/records"}. {} when there are none."""
+    if not SKILL_CONFIG.exists():
+        return {}
+    try:
+        data = json.loads(SKILL_CONFIG.read_text(encoding="utf-8"))
+    except ValueError:
+        raise Refused(f"{SKILL_CONFIG} isn't valid JSON")
+    if not isinstance(data, dict):
+        raise Refused(f"{SKILL_CONFIG} must be a JSON object")
+    owner = str(data.get("owner", "")).strip().lower()
+    if owner and not re.fullmatch(OWNER_RE, owner):
+        raise Refused(f"{SKILL_CONFIG}: owner must be one word (letters, digits, . : - _)")
+    return {"owner": owner, "records": str(data.get("records", "")).strip()}
+
+
+def repo_key(url):
+    """'owner/name' from a GitHub-style URL or owner/name, lowercased, without .git."""
+    parts = re.split(r"[/:]", url.strip().lower().removesuffix(".git").rstrip("/"))
+    return "/".join(parts[-2:]) if len(parts) >= 2 else ""
+
+
+def find_dir(given):
+    """The handoffs folder to use, and a note saying how it was found (None when it was given or
+    is ./handoffs). Order: --dir; $RELAYKIT_RECORDS/handoffs; ./handoffs; else a records clone one
+    level below the current folder or the home folder (a folder whose handoffs/ holds a
+    .ledger.json). When this skill's relay-kit.json names the records repository, only a clone of
+    that repository counts. Exactly one match is used; none or several are refused, with what to do."""
+    if given is not None:
+        return given, None
+    env = os.environ.get("RELAYKIT_RECORDS", "").strip()
+    if env:
+        return pathlib.Path(env) / "handoffs", f"records from RELAYKIT_RECORDS: {env}"
+    here = pathlib.Path("handoffs")
+    if here.is_dir():
+        return here, None
+    records = skill_config().get("records", "")
+    found = []
+    for base in dict.fromkeys([pathlib.Path.cwd(), pathlib.Path.home()]):
+        for cfg in sorted(base.glob("*/handoffs/.ledger.json")):
+            clone = cfg.parent.parent
+            if records:
+                url = subprocess.run(["git", "-C", str(clone), "remote", "get-url", "origin"],
+                                     capture_output=True, text=True).stdout
+                if repo_key(url) != repo_key(records):
+                    continue
+            found.append(cfg.parent.resolve())
+    found = list(dict.fromkeys(found))
+    if len(found) == 1:
+        return found[0], f"records found at {found[0].parent}"
+    if found:
+        raise Refused("several records folders found (" + ", ".join(str(f.parent) for f in found) + "); pass --dir <one>/handoffs")
+    if records:
+        raise Refused(f"no handoffs folder here. This copy of the skill keeps its records in {records}: "
+                      f"clone it next to here (git clone https://github.com/{repo_key(records)}), or in Claude Code "
+                      "on the web add that repository to the session; then rerun, or pass --dir <clone>/handoffs")
+    raise Refused("no handoffs folder here. Get the owner's records (a clone of their private records repository, "
+                  "or the folder connected from their computer) and pass --dir <records>/handoffs, "
+                  "or set RELAYKIT_RECORDS=<records>")
+
+
 def load_config(d):
+    """(owner, lanes, note). The folder's .ledger.json decides; this skill's relay-kit.json
+    stands in when the folder has none, and must agree when it has one."""
     cfg = pathlib.Path(d) / ".ledger.json"
+    baked = skill_config().get("owner", "")
     if not cfg.exists():
-        return "owner", {}
+        if baked:
+            return baked, {}, f"{cfg} is missing; the owner is '{baked}', from {SKILL_CONFIG.name}"
+        return "owner", {}, (f"warning: {cfg} is missing, so the owner is called 'owner' and nobody's "
+                             '--by counts as the owner; add {"owner": "<their name>"} to it')
     try:
         data = json.loads(cfg.read_text(encoding="utf-8"))
         name = str(data.get("owner", "")).strip().lower()
         lanes = {str(k).lower(): str(v).upper() for k, v in (data.get("lanes") or {}).items()}
     except (ValueError, AttributeError):
         raise Refused(f"{cfg} isn't valid JSON like {{\"owner\": \"sam\"}}")
-    if not name or not re.fullmatch(r"[\w.:-]+", name):
+    if not name or not re.fullmatch(OWNER_RE, name):
         raise Refused(f"{cfg}: owner must be one word (letters, digits, . : - _)")
     if any(not re.fullmatch(r"[A-Z0-9]{1,12}", v) for v in lanes.values()):
         raise Refused(f"{cfg}: lane codes must be 1-12 letters or digits")
-    return name, lanes
+    if baked and baked != name:
+        raise Refused(f"{cfg} names the owner '{name}', but this copy of the skill was made for '{baked}' "
+                      f"({SKILL_CONFIG}); check these are the right records")
+    return name, lanes, None
 
 
 def load_owner(d):
@@ -694,7 +772,8 @@ def cmd_check(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dir", type=pathlib.Path, default=pathlib.Path("handoffs"))
+    ap.add_argument("--dir", type=pathlib.Path, default=None,
+                    help="the handoffs folder (default: $RELAYKIT_RECORDS/handoffs, else ./handoffs, else the records clone found nearby)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     n = sub.add_parser("new")
     n.add_argument("--from", dest="frm", required=True)
@@ -726,7 +805,11 @@ def main():
     a = ap.parse_args()
     global OWNER, LANES
     try:
-        OWNER, LANES = load_config(a.dir)
+        a.dir, where = find_dir(a.dir)
+        OWNER, LANES, note = load_config(a.dir)
+        for n_ in (where, note):
+            if n_:
+                print(f"note: {n_}", file=sys.stderr)
         {"new": cmd_new, "set": cmd_set, "list": cmd_list, "check": cmd_check}[a.cmd](a)
     except Refused as e:
         sys.exit(f"refused: {e}")

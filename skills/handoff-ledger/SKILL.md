@@ -7,7 +7,9 @@ description: "Write, pick up, or update a durable handoff between assistants (Cl
 
 **The owner** is the person the assistants work for: their words are the only
 authority. The ledger knows them by the name in the folder's `.ledger.json`
-(`{"owner": "sam"}`); without that file the name is `owner`.
+(`{"owner": "sam"}`). If the folder has none, the name comes from this skill's own
+`relay-kit.json`, when the owner built the skill with one; without either the name is
+`owner`, and the script warns.
 
 A handoff is one Markdown file that lets another assistant resume a task without
 the owner reconstructing it and without re-reading a whole thread. It works with or
@@ -27,6 +29,15 @@ handoffs/
   HO-RK-20261101-K7QF.md    one file per handoff
   outputs/HO-RK-20261101-K7QF.md   the recipient's result, same id
 ```
+
+**Finding the folder.** Run the script from the records (the parent of `handoffs/`), or
+pass `--dir`. Otherwise it uses `$RELAYKIT_RECORDS/handoffs`, or the one records clone it
+finds one level below the current folder or the home folder. If this skill has a
+`relay-kit.json` naming the records repository (`{"owner": "sam", "records": "sam/records"}`,
+written by `relay-kit zips --owner --records`), only a clone of that repository counts, and
+when there isn't one the script says where to get it. **At the start of a session with no
+records:** get that repository (clone it; in Claude Code on the web, add it to the session),
+or ask the owner to connect the folder. Don't create a new `handoffs/` in its place.
 
 Keep the folder narrow: handoffs and their outputs only, and keep it private: it
 holds the owner's words. The owner decides where it lives (a private repo, a Drive
@@ -314,5 +325,4 @@ each update, so it isn't tamper-evident. Keep the folder in git for a history
 you can trust. The lock is advisory and local; it doesn't coordinate writers on
 different machines syncing one folder. Across clones, the shared-copy check narrows the
 window to the time between `set` and `git push`; git refusing a non-fast-forward push
-closes it. Nothing warns yet that another session is working the same files (overlap
-warning: scoped, not built).
+closes it. Overlap warnings (`status.py --touching`) only warn; they block nothing.
