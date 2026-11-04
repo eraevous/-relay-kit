@@ -734,7 +734,12 @@ def history_problems(d, base):
     listed = git("ls-tree", "--name-only", base, "--", ".")
     if listed.returncode != 0:
         return [f"--base {base}: {listed.stderr.strip() or 'not a git revision'}"]
-    here = {q.name: q for q in d.rglob("HO-*.md")}   # a handoff archived into a subfolder still counts
+    # A handoff archived into a subfolder still counts; outputs/ holds results under the same
+    # names (outputs/<id>.md), which are not handoffs, and a top-level file always wins.
+    here = {}
+    for q in sorted(d.rglob("HO-*.md"), key=lambda q: len(q.relative_to(d).parts)):
+        if "outputs" not in q.relative_to(d).parts[:-1]:
+            here.setdefault(q.name, q)
     out = []
     for name in listed.stdout.split():
         name = name.rsplit("/", 1)[-1]

@@ -1296,6 +1296,22 @@ def finding_tests():
          and not (KIT / "skills" / "handoff-ledger" / "relay-kit.json").exists() and all(b[0] != 0 for b in bads),
          str(z) + str(names.keys()) + str(bads))
 
+def output_name_tests():
+    """check --base reads the handoff, not its output: outputs/<id>.md has the same file name
+    (records main went red on HO-RK-20261103-5J0W, 2026-11-04)."""
+    g, c1, _ = git_world("outname")
+    d = c1 / "handoffs"
+    shutil.copy(FIXTURE, d / FIXTURE.name)
+    g(c1, "add", "."); g(c1, "commit", "-qm", "handoff")
+    base = g(c1, "rev-parse", "HEAD").stdout.strip()
+    (d / "outputs" / FIXTURE.name).write_text(f"---\nid: {HID}\nrecipient: chatgpt:review\ndate: 2026-10-28\n---\n\n# Output\n\nDone.\n",
+                                             encoding="utf-8")   # front matter, as outputs often have
+    g(c1, "add", "."); g(c1, "commit", "-qm", "output")
+    r = run(LEDGER, "--dir", d, "check", "--base", base)
+    case("ledger: check --base isn't confused by outputs/<id>.md having the handoff's name",
+         r[0] == 0 and "changed since" not in r[1] + r[2], r[1] + r[2])
+
+
 if __name__ == "__main__":
     load("tools_extract", KIT / "tools_extract.py").extract(X)
     packaging_tests()
@@ -1310,6 +1326,7 @@ if __name__ == "__main__":
     learning_tests()
     deploy_tests()
     finding_tests()
+    output_name_tests()
     telemetry_tests()
     evidence_tests()
     failed = [r for r in RESULTS if not r[1]]
