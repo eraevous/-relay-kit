@@ -122,6 +122,15 @@ def build_root(base):
     return r
 
 
+def git_repo(path, config=""):
+    """A real (empty) git repository, so git itself resolves its remotes; `config` is appended to .git/config."""
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+    with open(path / ".git" / "config", "a", encoding="utf-8") as f:
+        f.write(config)
+    return path
+
+
 def tree_hash(root):
     h = hashlib.sha256()
     for p in sorted(pathlib.Path(root).rglob("*")):
@@ -253,9 +262,7 @@ class ExportTests(unittest.TestCase):
 
     def test_public_destination_refused(self):
         """export: a destination inside a public or unconfirmed GitHub repository is refused"""
-        repo = self.tmp / "somerepo"
-        (repo / ".git").mkdir(parents=True)
-        (repo / ".git" / "config").write_text('[core]\n\tbare = false\n[remote "origin"]\n\turl = https://github.com/example/public-thing.git\n', encoding="utf-8")
+        repo = git_repo(self.tmp / "somerepo", '[remote "origin"]\n\turl = https://github.com/example/public-thing.git\n')
         for vis, refused in (("public", True), ("unknown", True), ("private", False)):
             ex.repo_visibility = lambda r, v=vis: v
             dest = repo / f"exp-{vis}"
@@ -305,10 +312,7 @@ class ReviewFixTests(ExportTests):
     test_metadata_only = test_cli = None
 
     def repo(self, name, config):
-        r = self.tmp / name
-        (r / ".git").mkdir(parents=True)
-        (r / ".git" / "config").write_text(config, encoding="utf-8")
-        return r
+        return git_repo(self.tmp / name, config)
 
     def test_unconfirmed_remotes_refused(self):
         """export: a remote whose visibility can't be confirmed (GitLab, ssh alias, unresolved insteadOf, unreadable .git) is refused; no remote is allowed"""
@@ -334,7 +338,7 @@ class ReviewFixTests(ExportTests):
         (broken / ".git").write_text("gitdir: /nonexistent/place\n", encoding="utf-8")
         with self.assertRaises(ex.Refused):
             ex.export(self.root, broken / "exp")
-        m = ex.export(self.root, self.repo("no-remote", "[core]\n\tbare = false\n") / "exp")
+        m = ex.export(self.root, self.repo("no-remote", "") / "exp")
         self.assertEqual(m["destination"]["inside_git"][0]["visibility"], "no remote")
 
     def test_sessions_keep_case_and_match_whole_segments(self):
@@ -388,7 +392,7 @@ class ReviewFixTests(ExportTests):
             m, _, out = self.run_export(f"p-{content}", content=content)
             text = (out / "manifest.json").read_text(encoding="utf-8")
             self.assertNotIn(str(self.tmp), text)
-            self.assertEqual(m["root"]["name"], "records")
+            self.assertEqual(m["root"]["name"], "records" if content != "none" else "h:" + hashlib.sha256(b"records").hexdigest()[:16])
             self.assertEqual(len(m["root"]["root_hash"]), 64)
 
     def test_metadata_nits(self):
@@ -407,6 +411,61 @@ class ReviewFixTests(ExportTests):
         self.assertNotIn("handoff:HO-RS-20261106-JK90", [r["rid"] for r in recs])
         self.assertEqual(m["coverage_gaps"]["unknown_fields"]["conversation.meta"], ["mystery"])
         self.assertEqual(m["coverage_gaps"]["unknown_fields"]["conversation.message"], ["extra"])
+
+    def test_unauthenticated_404_is_not_private(self):
+        """export: an unauthenticated GitHub 404 is unknown, not private, and the destination is refused"""
+        import urllib.error
+        ex.repo_visibility = self._vis
+        saved = (ex.urllib.request.urlopen, ex.authenticated_visibility)
+        def not_found(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+        try:
+            ex.urllib.request.urlopen, ex.authenticated_visibility = not_found, (lambda repo: None)
+            self.assertEqual(ex.repo_visibility("example/maybe-private"), "unknown")
+            repo = self.repo("r404", '[remote "origin"]\n\turl = https://github.com/example/maybe-private.git\n')
+            with self.assertRaises(ex.Refused):
+                ex.export(self.root, repo / "exp")
+            ex.authenticated_visibility = lambda repo: "private"   # only an authenticated answer confirms privacy
+            self.assertEqual(ex.repo_visibility("example/maybe-private"), "private")
+        finally:
+            ex.urllib.request.urlopen, ex.authenticated_visibility = saved
+
+    def test_included_remote_detected(self):
+        """export: a remote declared in an included git config is found, and without git an include is refused"""
+        inc = self.tmp / "extra.gitconfig"
+        inc.write_text('[remote "origin"]\n\turl = https://github.com/example/public-thing.git\n', encoding="utf-8")
+        repo = self.repo("inc", f"[include]\n\tpath = {inc}\n")
+        seen = []
+        ex.repo_visibility = lambda r: seen.append(r) or "public"
+        with self.assertRaises(ex.Refused):
+            ex.export(self.root, repo / "exp")
+        self.assertEqual(seen, ["example/public-thing"])
+        saved = ex.GIT
+        try:
+            ex.GIT = str(self.tmp / "no-such-git")
+            ex.repo_visibility = lambda r: "private"
+            with self.assertRaises(ex.Refused):
+                ex.export(self.root, repo / "exp2")
+        finally:
+            ex.GIT = saved
+
+    def test_sanitize_manifest(self):
+        """export: --sanitize-manifest (implied by --content none) replaces links, paths and session ids with stable hashes"""
+        for kw in (dict(sanitize=True), dict(content="none")):
+            m, recs, out = self.run_export("s-" + "-".join(kw), **kw)
+            text = (out / "manifest.json").read_text(encoding="utf-8") + (out / "records.jsonl").read_text(encoding="utf-8")
+            for leak in ("https://", "captures/a.json", "handoffs/HO-RS", "SESSA1", "SESSR9", "00000000-0000"):
+                self.assertNotIn(leak, text, (kw, leak))
+            self.assertTrue(m["sanitize"]["enabled"])
+            self.assertTrue(m["sanitize"]["replaced"]["links"])
+            a = next(r for r in recs if r["kind"] == "conversation" and r["actor"].startswith("claude:research#"))
+            self.assertEqual(a["actor"], "claude:research#" + "h:" + hashlib.sha256(b"SESSA1").hexdigest()[:16])
+        m1, _, o1 = self.run_export("s1", sanitize=True)
+        m2, _, o2 = self.run_export("s1", sanitize=True)
+        self.assertEqual((o1 / "records.jsonl").read_bytes(), (o2 / "records.jsonl").read_bytes())
+        m, _, _ = self.run_export("plain")
+        self.assertFalse(m["sanitize"]["enabled"])
+        self.assertIn("don't anonymise", m["sanitize"]["policy"])
 
 
 if __name__ == "__main__":

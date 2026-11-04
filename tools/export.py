@@ -23,7 +23,7 @@ and writes two files into DIR:
 It never writes inside ROOT, never changes a source file, and refuses a destination inside a
 git repository whose remote is a public GitHub repository (or whose visibility it can't
 confirm) unless --allow-public-dest is passed. Spec: docs/export.md. Standard library only."""
-import argparse, datetime as dt, hashlib, importlib.util, json, os, pathlib, re, sys, tempfile, urllib.error, urllib.request
+import argparse, datetime as dt, hashlib, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile, urllib.error, urllib.request
 
 SCHEMA = "relay-kit/export@1"
 CONVERSATION = "relay-kit/conversation@1"
@@ -209,6 +209,9 @@ def actor_matches(filters, actors):
 
 
 # ---------------- destination safety ----------------
+GIT = "git"
+
+
 def git_dirs(start):
     """Every enclosing folder with a .git, nearest first: [(folder, git config path or None)]."""
     out, p = [], start
@@ -254,23 +257,65 @@ def remote_urls(cfg):
     return out
 
 
+def effective_remotes(folder, cfg):
+    """The repository's remote URLs as git itself resolves them (include/includeIf, insteadOf, global
+    config), or None when they can't be determined. Without git, the local config is read only if it
+    has no include sections; otherwise None."""
+    try:
+        p = subprocess.run([GIT, f"--git-dir={folder / '.git'}", "remote", "-v"], capture_output=True, text=True,
+                           timeout=15, env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    except FileNotFoundError:
+        if cfg is None or re.search(r"^\s*\[\s*include", cfg.read_text(encoding="utf-8", errors="replace"), re.M | re.I):
+            return None
+        return remote_urls(cfg)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    return sorted({l.split()[1] for l in p.stdout.splitlines() if len(l.split()) >= 2})
+
+
 def github_repo(url):
     m = re.match(r"^(?:https?://(?:[^@/]+@)?github\.com/|ssh://git@github\.com(?::\d+)?/|git@github\.com:)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", url)
     return f"{m.group(1)}/{m.group(2)}" if m else None
 
 
+def authenticated_visibility(repo):
+    """'private' or 'public' as GitHub reports it to an authenticated caller (GH_TOKEN or GITHUB_TOKEN,
+    else the gh command), or None when no credentials can say."""
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        req = urllib.request.Request(f"https://api.github.com/repos/{repo}", headers={
+            "Accept": "application/vnd.github+json", "User-Agent": "relay-kit-export", "Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                v = json.load(r).get("private")
+                return "private" if v is True else ("public" if v is False else None)
+        except Exception:
+            pass
+    if shutil.which("gh"):
+        try:
+            p = subprocess.run(["gh", "api", f"repos/{repo}", "--jq", ".private"], capture_output=True, text=True, timeout=20)
+            if p.returncode == 0 and p.stdout.strip() in ("true", "false"):
+                return "private" if p.stdout.strip() == "true" else "public"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return None
+
+
 def repo_visibility(repo):
-    """'public', 'private' (GitHub doesn't show it without credentials) or 'unknown'. Asks GitHub's
-    API without credentials, so a 200 means anyone can read the repository."""
+    """'public', 'private' or 'unknown'. An unauthenticated 200 means anyone can read the repository.
+    Privacy counts only when an authenticated call says so: a 404 without credentials may also mean
+    renamed, deleted or unreachable, so on its own it is 'unknown'."""
     req = urllib.request.Request(f"https://api.github.com/repos/{repo}",
                                  headers={"Accept": "application/vnd.github+json", "User-Agent": "relay-kit-export"})
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
-            return "private" if json.load(r).get("private") else "public"
-    except urllib.error.HTTPError as e:
-        return "private" if e.code == 404 else "unknown"
+            json.load(r)
+            return "public"
     except Exception:
-        return "unknown"
+        pass
+    return authenticated_visibility(repo) or "unknown"
 
 
 def check_destination(out, root, allow_public):
@@ -288,7 +333,10 @@ def check_destination(out, root, allow_public):
         if cfg is None:   # a .git we can't read: its remotes are unknown
             found.append({"repo_folder": str(folder), "remote": "(git config unreadable)", "visibility": "unknown"})
             continue
-        urls = remote_urls(cfg)
+        urls = effective_remotes(folder, cfg)
+        if urls is None:   # git couldn't resolve them (broken repo, unresolved include): unknown
+            found.append({"repo_folder": str(folder), "remote": "(remotes couldn't be resolved)", "visibility": "unknown"})
+            continue
         for u in urls:
             # only a github.com remote can be checked; anything else (GitLab, an ssh host alias,
             # an unresolved insteadOf alias) can't be confirmed private, so it counts as unknown
@@ -694,9 +742,59 @@ def suppress(rec, content):
     return r
 
 
+# ---------------- manifest sanitizing ----------------
+SANITIZE_POLICY = ("Links, local paths (source paths, output and capture file names, the root and destination "
+                   "names, repository folders and remotes), session ids and conversation ids are replaced by "
+                   "'h:' + the first 16 hex digits of their sha256, everywhere in the records and manifest, so "
+                   "records still cross-reference each other but name nothing. Content hashes (source_hash, "
+                   "root_hash, text hashes in metadata mode) stay: whoever holds a source can match it.")
+URL_ANY = re.compile(r"https?://[^\s\"'<>)\]|`]+")
+
+
+class Sanitizer:
+    def __init__(self, whole, substrings, sessions):
+        self.whole = {w for w in whole if w}
+        self.sessions = {x for x in sessions if x}
+        subs = sorted({x for x in substrings if x and len(x) >= 8}, key=lambda x: (-len(x), x))
+        alt = "|".join(map(re.escape, subs)) or r"(?!)"
+        self.pat = re.compile(rf"({URL_ANY.pattern})|#([\w-]+)|({alt})")
+        self.counts = {"links": 0, "sessions": 0, "paths_and_ids": 0}
+
+    @staticmethod
+    def h(x):
+        return "h:" + sha(x)[:16]
+
+    def text(self, v):
+        if v in self.whole or v in self.sessions:
+            self.counts["sessions" if v in self.sessions else "paths_and_ids"] += 1
+            return self.h(v)
+
+        def sub(m):
+            if m.group(1):
+                self.counts["links"] += 1
+                return self.h(m.group(1))
+            if m.group(2) is not None:
+                if m.group(2) in self.sessions:
+                    self.counts["sessions"] += 1
+                    return "#" + self.h(m.group(2))
+                return m.group(0)
+            self.counts["paths_and_ids"] += 1
+            return self.h(m.group(3))
+        return self.pat.sub(sub, v)
+
+    def __call__(self, x):
+        if isinstance(x, str):
+            return self.text(x)
+        if isinstance(x, list):
+            return [self(v) for v in x]
+        if isinstance(x, dict):
+            return {self(k): self(v) for k, v in x.items()}
+        return x
+
+
 # ---------------- export ----------------
 def export(root, out, lane=None, actors=(), since=None, until=None, kinds=None, granularity="message",
-           fmt="jsonl", content="full", allow_public_dest=False):
+           fmt="jsonl", content="full", allow_public_dest=False, sanitize=False):
     root = pathlib.Path(root)
     out = pathlib.Path(out)
     if not root.is_dir():
@@ -906,6 +1004,19 @@ def export(root, out, lane=None, actors=(), since=None, until=None, kinds=None, 
                                                               else (len(v) if isinstance(v, dict) else v)))
                        for k, v in gaps.items()}
 
+    sanitize = bool(sanitize or content == "none")
+    san = None
+    if sanitize:
+        paths = set(rd.files) | set(rd.symlinks) | set(rd.raw_captures) | {r["source_path"] for r in kept} | \
+            {x for g in missing_outputs for x in g["expected"]} | {u["path"] for u in rd.unreadable}
+        sessions = {x for i in rd.referenced.values() for x in i["sessions"]} | \
+            {s for r in kept for a in r.get("actors") or [] for _, s in split_actor(a) if s}
+        ids = {c["conversation_id"] for c in convs if c["conversation_id"]} | set(threads)
+        whole = paths | ids | {rd.root.name, destination["name"]} | \
+            {f[k] for f in destination["inside_git"] for k in ("repo_folder", "remote") if f.get(k)}
+        san = Sanitizer(whole, paths | ids, sessions)
+        final = san(final)
+
     # write
     o.mkdir(parents=True, exist_ok=True)
     name = "records.jsonl" if fmt == "jsonl" else "records.json"
@@ -923,7 +1034,7 @@ def export(root, out, lane=None, actors=(), since=None, until=None, kinds=None, 
         "root": {"name": rd.root.name,
                  "root_hash": sha("".join(f"{k}\t{v['sha256']}\n" for k, v in sorted(rd.files.items())))},
         "query": {"lane": lane, "actors": sorted(actors), "since": since, "until": until, "kinds": sorted(kinds),
-                  "granularity": granularity, "format": fmt, "content": content},
+                  "granularity": granularity, "format": fmt, "content": content, "sanitize_manifest": sanitize},
         "redaction": {"content": content, "policy": CONTENT_POLICY[content],
                       "suppressed_fields": {} if content == "full" else TEXT_FIELDS},
         "destination": destination,
@@ -943,6 +1054,13 @@ def export(root, out, lane=None, actors=(), since=None, until=None, kinds=None, 
         "limits": LIMITS,
         "nondeterministic": {"generated_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
     }
+    if san:
+        manifest = san(manifest)
+    manifest["sanitize"] = {"enabled": sanitize, "implied_by_content_none": content == "none",
+                            "policy": SANITIZE_POLICY if sanitize else
+                            "Off: links, paths, session and conversation ids appear as recorded. --content "
+                            "metadata/none redact content; they don't anonymise. Use --sanitize-manifest.",
+                            "replaced": dict(san.counts) if san else {}}
     for fname, text in ((name, body), ("manifest.json", json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=1) + "\n")):
         fd, tmp = tempfile.mkstemp(dir=o, prefix=".export-")
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
@@ -965,6 +1083,8 @@ def main(argv=None):
     ap.add_argument("--granularity", choices=["inventory", "message"], default="message")
     ap.add_argument("--format", choices=["jsonl", "json"], default="jsonl")
     ap.add_argument("--content", choices=["full", "metadata", "none"], default="full")
+    ap.add_argument("--sanitize-manifest", action="store_true",
+                    help="replace links, paths, session ids and conversation ids with stable hashes (implied by --content none)")
     ap.add_argument("--allow-public-dest", action="store_true",
                     help="write even inside a git repository that is public or whose visibility can't be confirmed")
     a = ap.parse_args(argv)
@@ -975,7 +1095,8 @@ def main(argv=None):
     try:
         m = export(a.root, a.out, lane=a.lane, actors=actors, since=a.since, until=a.until,
                    kinds=[k.strip() for k in a.kinds.split(",") if k.strip()], granularity=a.granularity,
-                   fmt=a.format, content=a.content, allow_public_dest=a.allow_public_dest)
+                   fmt=a.format, content=a.content, allow_public_dest=a.allow_public_dest,
+                   sanitize=a.sanitize_manifest)
     except Refused as e:
         sys.exit(f"refused: {e}")
     s = m["coverage_gaps"]["summary"]

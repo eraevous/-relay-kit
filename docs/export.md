@@ -10,7 +10,7 @@ relay-kit export --root path/to/private-records --out path/to/private-export \
   [--lane AEC] [--actor claude:aec[#SESSION] ...] [--since ISO] [--until ISO] \
   [--kinds conversations,handoffs,outputs,decisions,challenges] \
   [--granularity inventory|message] [--format jsonl|json] [--content full|metadata|none] \
-  [--allow-public-dest]
+  [--sanitize-manifest] [--allow-public-dest]
 ```
 
 From a checkout: `python3 tools/export.py ...` or `python3 -m tools export ...`.
@@ -113,9 +113,12 @@ Exports can carry the owner's words, so:
 
 - **Destination.** The export refuses an `--out` inside `--root`, and one inside any git
   repository whose remote is a public GitHub repository, or whose visibility it couldn't confirm
-  (it asks GitHub's API without credentials: a repository anyone can read answers; a private one
-  looks absent). Only `github.com` remotes can be checked, after the repository's own
-  `url.<base>.insteadOf` rewrites; any other remote (GitLab, an ssh host alias such as
+  Remotes are read through git itself (`git remote -v`), so `include`/`includeIf`, `insteadOf` and
+  global config apply; if git can't resolve them, or (without git) the config has include sections,
+  the remotes are unknown. Visibility: an unauthenticated GitHub API answer means public; **private
+  counts only when an authenticated call says so** (`GH_TOKEN`/`GITHUB_TOKEN`, else the `gh`
+  command). An unauthenticated 404 can also mean renamed, deleted or unreachable, so on its own it is
+  unknown. Only `github.com` remotes can be checked; any other remote (GitLab, an ssh host alias such as
   `git@github-work:`, an unresolved alias) and a `.git` whose config can't be read count as
   unconfirmed and are refused, as is a GitHub remote when offline. A repository with no remote is allowed.
   `--allow-public-dest` overrides this, and the manifest records that it was used. A folder
@@ -125,6 +128,14 @@ Exports can carry the owner's words, so:
   field (message text, sources and turn labels, titles, handoff bodies and log notes, ledger prose)
   and keeps each one's sha256 and length, so text can be matched to its source later. `none` also leaves
   out those hashes and lengths. The policy and the suppressed fields are written to the manifest.
+- **Redacted is not anonymised.** `metadata` and `none` remove content, but by themselves the
+  records and manifest still hold links (for example `coverage_gaps.threads_without_capture[].ref`),
+  source paths and file names, session ids, conversation ids and content hashes that can be
+  correlated with the sources. `--sanitize-manifest` (implied by `--content none`) replaces links,
+  paths, the root and destination names, repository folders and remotes, session ids and
+  conversation ids with `h:` + 16 hex digits of their sha256, everywhere in both files, so
+  cross-references still line up. Content hashes stay. The manifest's `sanitize` block records
+  whether it was on, the policy, and how many values of each class were replaced.
 - The command prints only counts. Tests use synthetic records only.
 
 ## Not in this version
