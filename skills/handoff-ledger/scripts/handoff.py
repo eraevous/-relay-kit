@@ -731,41 +731,49 @@ def history_problems(d, base):
     if mb.returncode != 0:
         return [f"--base {base}: {mb.stderr.strip() or 'no common history with HEAD'}"]
     base = mb.stdout.strip()   # compare with where this branch left the base, not the base's tip
-    listed = git("ls-tree", "--name-only", base, "--", ".")
+    listed = git("ls-tree", "-r", "--name-only", base, "--", ".")
     if listed.returncode != 0:
         return [f"--base {base}: {listed.stderr.strip() or 'not a git revision'}"]
-    # A handoff archived into a subfolder still counts; outputs/ holds results under the same
-    # names (outputs/<id>.md), which are not handoffs, and a top-level file always wins.
+    # Handoffs are HO-*.md anywhere under the folder (archived into a subfolder still counts),
+    # except in its own outputs/ folder, which holds results under the same names. Every copy is
+    # compared: one handoff may live in only one place, so a second copy is itself a problem.
+    is_handoff = lambda rel: re.match(rf"^{ID_PAT}\.md$", rel.name) and rel.parts[0] != "outputs"
     here = {}
-    for q in sorted(d.rglob("HO-*.md"), key=lambda q: len(q.relative_to(d).parts)):
-        if "outputs" not in q.relative_to(d).parts[:-1]:
-            here.setdefault(q.name, q)
-    out = []
-    for name in listed.stdout.split():
-        name = name.rsplit("/", 1)[-1]
-        if not re.match(rf"^{ID_PAT}\.md$", name):
+    for q in sorted(d.rglob("HO-*.md")):
+        if is_handoff(q.relative_to(d)):
+            here.setdefault(q.name, []).append(q)
+    out = [f"{name}: {len(ps)} copies (" + ", ".join(q.relative_to(d).as_posix() for q in ps) + "); a handoff lives in one place"
+           for name, ps in sorted(here.items()) if len(ps) > 1]
+    for rel in sorted({pathlib.PurePosixPath(x) for x in listed.stdout.split()}, key=str):
+        if not is_handoff(rel):
             continue
-        p = here.get(name)
-        if p is None:
-            out.append(f"{name}: removed since {base[:7]}")
-            continue
-        try:
-            old_meta, old_log, _, _ = parse_text(git("show", f"{base}:{prefix}{name}").stdout, name)
-            meta, log, _, _ = parse_text(p.read_text(encoding="utf-8"), name)
-        except Refused:
-            continue   # unreadable either side: problems_in reports it
-        for k in FIXED:
-            if old_meta.get(k, "") != meta.get(k, ""):
-                out.append(f"{name}: '{k}' changed since {base[:7]} ({old_meta.get(k)!r} -> {meta.get(k)!r}); open a new handoff instead")
-        if log[:len(old_log)] != old_log:
-            out.append(f"{name}: earlier log lines changed since {base[:7]}; the log is append-only")
-        if old_meta.get("status") not in (None, "prepared"):   # delivered: what was asked and allowed only grows
-            old_text = git("show", f"{base}:{prefix}{name}").stdout
-            for sec in ("Task", "Authorized"):
-                pat = rf"^## {sec}[ \t]*\n(.*?)(?=^## |\Z)"
-                o, n = re.search(pat, old_text, re.S | re.M), re.search(pat, p.read_text(encoding="utf-8"), re.S | re.M)
-                if o and (not n or not n.group(1).rstrip().startswith(o.group(1).rstrip())):
-                    out.append(f"{name}: '## {sec}' was rewritten after delivery; append an update instead")
+        name = rel.name
+        old_text = git("show", f"{base}:{prefix}{rel.as_posix()}").stdout
+        for p in here.get(name, []) or [None]:
+            if p is None:
+                out.append(f"{name}: removed since {base[:7]}")
+                continue
+            text = p.read_text(encoding="utf-8")
+            try:
+                old_meta, old_log, _, _ = parse_text(old_text, name)
+            except Refused:
+                continue   # unreadable at the base: nothing to hold it to
+            try:
+                meta, log, _, _ = parse_text(text, name)
+            except Refused as e:
+                out.append(f"{p.relative_to(d).as_posix()}: can't be read any more ({e}), though it could at {base[:7]}")
+                continue
+            for k in FIXED:
+                if old_meta.get(k, "") != meta.get(k, ""):
+                    out.append(f"{name}: '{k}' changed since {base[:7]} ({old_meta.get(k)!r} -> {meta.get(k)!r}); open a new handoff instead")
+            if log[:len(old_log)] != old_log:
+                out.append(f"{name}: earlier log lines changed since {base[:7]}; the log is append-only")
+            if old_meta.get("status") not in (None, "prepared"):   # delivered: what was asked and allowed only grows
+                for sec in ("Task", "Authorized"):
+                    pat = rf"^## {sec}[ \t]*\n(.*?)(?=^## |\Z)"
+                    o, n = re.search(pat, old_text, re.S | re.M), re.search(pat, text, re.S | re.M)
+                    if o and (not n or not n.group(1).rstrip().startswith(o.group(1).rstrip())):
+                        out.append(f"{name}: '## {sec}' was rewritten after delivery; append an update instead")
     return out
 
 
