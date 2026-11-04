@@ -35,6 +35,7 @@ Registry: [governance/contracts.json](governance/contracts.json).
 | `relay-kit/handoff@2` | the handoff file, its states and log, the owner and lane settings (reads @1) | [handoff-ledger](skills/handoff-ledger/SKILL.md) |
 | `relay-kit/paste-markers@1` | `FROM:` … `END FROM` and `>"""` | [docs/paste-markers.md](docs/paste-markers.md) |
 | `relay-kit/relay-result@1` | relay statuses: done / unconfirmed / pending | [chat-relay](skills/chat-relay/SKILL.md) |
+| `relay-kit/export@1` | read-only export: records file and coverage manifest | [docs/export.md](docs/export.md) |
 
 **How a contract changes:** only by a new version. The spec, every implementer and the
 tests change in the same commit, and the owner records the change in the decision ledger.
@@ -66,6 +67,14 @@ Kept proportionate; the owner shouldn't become a second-shift bookkeeper.
   Decisions record what the owner decided, in their words, with where they said it.
   Challenges record objections and known risks.
 - Run notes go in the handoff's output. There is no separate run database.
+
+**Exporting** ([tools/export.py](tools/export.py), `relay-kit/export@1`) reads these records and any
+conversation@1 captures among them, and writes a records file plus a manifest to a private folder
+outside them. It is a reader like `status`: it changes nothing and derives nothing the records
+don't hold. Each exported item says whether it is a verbatim source, a relay, a derived summary, a
+proposal or an adopted decision, using the ledger's status rather than inferring one, and the
+manifest lists what the records refer to but don't contain (uncaptured threads and sessions,
+missing outputs, hidden steps) so that missing is never read as empty.
 
 Claims in records keep one of four labels where it matters: **stated preference**,
 **belief to test**, **proposal**, **result** (with the artifact that shows it). A result
