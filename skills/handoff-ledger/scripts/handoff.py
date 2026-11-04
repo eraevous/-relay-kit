@@ -58,9 +58,9 @@ def repo_id(url):
          or (lambda m: m and (m.group(1), m.group(2)))(re.fullmatch(r"[\w.-]+@([\w.-]+):([\w.-]+/[\w.-]+?)(?:\.git)?/?", u)))
     if not m:
         return None
-    host, path = m[0].lower().split(":")[0], m[1].lower()
+    host, path = m[0].lower().rstrip("."), m[1].lower()
     path = path[:-4] if path.endswith(".git") else path
-    return (host, path) if all(x not in (".", "..") for x in path.split("/")) else None
+    return (host, path) if all(x not in ("", ".", "..") for x in path.split("/")) else None
 
 
 def skill_config():
@@ -87,12 +87,23 @@ def clone_of(folder, records):
     """True when folder is the top of a git clone whose origin is the records repository. (Content
     inside some other repository, or a plain folder, doesn't count: git would report the
     enclosing repository's origin for it.)"""
-    g = lambda *a: subprocess.run(["git", "-C", str(folder), *a], capture_output=True, text=True, timeout=30)
+    env = {k: v for k, v in os.environ.items()   # git in a hook or alias would otherwise follow GIT_DIR
+           if not (k.startswith("GIT_") and k not in ("GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS"))}
+    def g(*a):
+        try:
+            return subprocess.run(["git", "-C", str(folder), *a], capture_output=True, text=True, timeout=30, env=env)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise Refused(f"git couldn't check {folder} ({e}); pass --dir to choose the records yourself")
     top = g("rev-parse", "--show-toplevel")
     if top.returncode or pathlib.Path(top.stdout.strip()).resolve() != pathlib.Path(folder).resolve():
         return False
     url = g("remote", "get-url", "origin")
     return url.returncode == 0 and repo_id(url.stdout) is not None and repo_id(url.stdout) == repo_id(records)
+
+
+def contained(d, root):
+    """handoffs/ and everything in it resolve inside root: no symlink leads out of the clone."""
+    return d.resolve().is_relative_to(root) and all(p.resolve().is_relative_to(root) for p in d.rglob("*"))
 
 
 def find_dir(given):
@@ -111,7 +122,7 @@ def find_dir(given):
         that repository, with handoffs/ really inside it (not a symlink out)."""
         if records:
             root = d.parent.resolve()
-            if not clone_of(root, records) or not d.resolve().is_relative_to(root):
+            if not clone_of(root, records) or not contained(d, root):
                 raise Refused(f"{d.resolve()} isn't in a clone of {records}, the records this copy of the skill "
                               "was made for; run from that clone, or pass --dir to choose a folder yourself")
         return d, note
@@ -132,8 +143,7 @@ def find_dir(given):
     for base in dict.fromkeys([pathlib.Path.cwd().resolve(), pathlib.Path.home().resolve()]):
         for d in sorted(base.glob("*/handoffs")):
             clone = d.parent
-            if (d.is_dir() and not clone.is_symlink() and d.resolve().is_relative_to(clone.resolve())
-                    and clone_of(clone, records)):
+            if d.is_dir() and not clone.is_symlink() and contained(d, clone.resolve()) and clone_of(clone, records):
                 found.append(d.resolve())
     found = list(dict.fromkeys(found))
     if len(found) == 1:

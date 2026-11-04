@@ -39,7 +39,9 @@ folder it picks without `--dir` must be inside such a clone. When there's none i
 to get it. **At the start of a session with no records:** get that repository (clone it; in
 Claude Code on the web, add it to the session), or ask the owner to connect the folder.
 Don't create a new `handoffs/` in its place. The settings belong to this copy of the skill:
-the `relay-kit` command uses its own copy and doesn't see them.
+the `relay-kit` command uses its own copy and doesn't see them. The origin check tells the
+records apart from other folders; it doesn't authenticate them (anyone who can write to your
+folders can set an origin), so it guards against mistakes, not someone with your account.
 
 Keep the folder narrow: handoffs and their outputs only, and keep it private: it
 holds the owner's words. The owner decides where it lives (a private repo, a Drive

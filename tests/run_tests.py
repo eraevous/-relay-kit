@@ -959,7 +959,7 @@ def learning_tests():
          and f"outputs/{hid}.md" in t and "NOT AUTHORIZED YET" in t and run(LEDGER, "--dir", d, "check")[0] == 0, no[2] + t[:400])
 
 
-# ---------------- deployable: the relay-kit command and init (DEC-042) ----------------
+# ---------------- deployable: the relay-kit command and init (DEC-044) ----------------
 def deploy_tests():
     link = TMP / "pkgpath"; link.mkdir()
     os.symlink(KIT / "tools", link / "relaykit")   # the checkout's tools/ as the installed `relaykit` package
@@ -1217,6 +1217,20 @@ def finding_tests():
     symlinked = at(sym, baked, "list"); symlocal = at(sym / "r", baked, "list")
     case("find: a clone whose handoffs/ is a symlink out of it is not used (review: ChatGPT)",
          symlinked[0] != 0 and symlocal[0] != 0, str(symlinked) + str(symlocal))
+
+    filesym = TMP / "find-filesym"; filesym.mkdir(); fr = records(filesym / "r", gh)
+    (TMP / "find-evil.json").write_text('{"owner": "sam"}', encoding="utf-8")
+    (fr / "handoffs" / ".ledger.json").unlink(); os.symlink(TMP / "find-evil.json", fr / "handoffs" / ".ledger.json")
+    filelink = at(filesym, baked, "list")
+    plainfolder = TMP / "find-gitdir"; records(plainfolder / "p", git=False)
+    gitdir = at(plainfolder / "p", baked, "list", env={"GIT_DIR": str(one / "records" / ".git")})
+    case("find: a file inside handoffs/ that links out of the clone, or GIT_DIR pointing at a real clone, doesn't pass (review round 2)",
+         filelink[0] != 0 and gitdir[0] != 0 and "isn't in a clone" in gitdir[2], str(filelink) + str(gitdir))
+    badroot = TMP / "find-badroot"; (badroot / "handoffs").mkdir(parents=True)
+    (badroot / "handoffs" / ".ledger.json").write_text("nope", encoding="utf-8")
+    asgiven = at(TMP, KIT / "tools" / "status.py", "--root", badroot, "--no-fetch", "--no-ci")
+    case("find: status --root is used as given, with no new owner check (review round 2)",
+         asgiven[0] == 0 and "refused" not in asgiven[2], str(asgiven))
 
     two = TMP / "find-two"; two.mkdir(); records(two / "x", gh); records(two / "y", "git" + "@github.com:Sam/Records")
     several = at(two, baked, "list")

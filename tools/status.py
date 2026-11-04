@@ -460,19 +460,18 @@ def main():
     a = ap.parse_args()
     root, gaps = a.root, []
     led = load_ledger()
+    # Without --root: the records handoff.py would find (a folder with governance/ and no handoffs/,
+    # such as a kit checkout, is read as before), with the same owner check. --root is used as given.
     try:
         if root is None and not (pathlib.Path("governance").is_dir() and not pathlib.Path("handoffs").is_dir()):
             d, where = led.find_dir(None)
             root = d.parent
-            if where:
-                print(f"note: {where}", file=sys.stderr)
-        root = root or pathlib.Path(".")
-        if (root / "handoffs").is_dir():   # the owner check handoff.py makes: a mismatch is refused here too
-            note = led.load_config(root / "handoffs")[2]
-            if note:
-                print(f"note: {note}", file=sys.stderr)
+            for n in (where, led.load_config(d)[2]):
+                if n:
+                    print(f"note: {n}", file=sys.stderr)
     except led.Refused as e:
         sys.exit(f"refused: {e}")
+    root = root or pathlib.Path(".")
 
     fresh = freshness(root, not a.no_fetch, gaps)
     rows, unauthorized = handoffs(root, gaps, a.stale_hours)
