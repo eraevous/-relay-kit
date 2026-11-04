@@ -49,7 +49,8 @@ can't pass.
 | Delivery | browser relay (chat-relay), paste, shared folder | Paste with two files is the coldest and most portable route |
 | Browser | Claude's built-in browser, Claude in Chrome | Site markup changes; the selector table records what was verified when |
 | Contexts per task | one context, or inquiry + builder (+ fresh check) | Not yet compared; the first pilot does that |
-| Record store | the owner's private repo | Chosen by the owner |
+| Record store | a private git repository, made with `relay-kit init` | Other stores need the five operations in [docs/storage.md](docs/storage.md); none built yet |
+| Delivery of the kit | `relay-kit` package (pin a tag or commit), skill zips | Telosmith pins a tagged release (DEC-042) |
 | Starting back up | `tools/status.py` over the record store | Read-only; it reads the records, so it's only as current as they are |
 
 Nothing in this layer is mandated. Add a context, a role or a tool only when removing it

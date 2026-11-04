@@ -29,8 +29,10 @@ It changes nothing; `git fetch` only updates remote-tracking refs (skip it with
 --no-fetch). Standard library only."""
 import argparse, datetime as dt, fnmatch, importlib.util, json, os, pathlib, re, subprocess, sys
 
-KIT = pathlib.Path(__file__).resolve().parent.parent
-LEDGER = KIT / "skills" / "handoff-ledger" / "scripts" / "handoff.py"
+HERE = pathlib.Path(__file__).resolve().parent
+KIT = HERE.parent   # a checkout: tools/ next to skills/. Installed: skills/ sits inside the package.
+SKILLS = KIT / "skills" if (KIT / "skills" / "handoff-ledger").is_dir() else HERE / "skills"
+LEDGER = SKILLS / "handoff-ledger" / "scripts" / "handoff.py"
 WAITING = {"sent": "NO ACK", "acknowledged": "STALE CLAIM", "in_progress": "STALE CLAIM"}   # timeout, as in a job queue's visibility timeout
 ALERT_TITLE = "Records check failing on main"   # the issue the records workflow opens on a red push
 HOLDER = {"prepared": "from", "sent": "to", "acknowledged": "to", "in_progress": "to", "blocked": "from"}
@@ -392,8 +394,11 @@ def changed_since(root, since, me, gaps, fetch=True, cap=15):
     try:
         when = git(root, "log", "-1", "--format=%cI", base)
     except RuntimeError:   # the empty tree isn't a commit
-        when = "1970-01-01T00:00:00Z"
-    lines = [f"{label} ({base[:7]}, {when[:16]})"]
+        when = ""
+    when = when or "1970-01-01T00:00:00Z"
+    if when.startswith("1970"):
+        label = "since the first commit"
+    lines = [f"{label} ({base[:7]}, {when[:16]})" if not when.startswith("1970") else label]
     for name, key in (("decisions.jsonl", "decision"), ("challenges.jsonl", "concern")):
         try:
             diff = git(root, "diff", f"{base}..{tip}", "--", f"governance/{name}")
@@ -412,10 +417,12 @@ def changed_since(root, since, me, gaps, fetch=True, cap=15):
         if len(added) > cap:
             lines.append(f"... and {len(added) - cap} more in {name}")
     try:
+        if SKILLS != KIT / "skills":   # installed: never run git in whatever repository encloses site-packages
+            raise RuntimeError("installed package")
         moved = git(KIT, "log", shared_tip(KIT, fetch), f"--since={kit_since or when}", "--format=%h %s", "--", "governance/contracts.json")
         lines += [f"contract change in the kit: {m}" for m in moved.splitlines()]
     except (RuntimeError, FileNotFoundError):
-        gaps.append("the kit isn't a git checkout: contract changes weren't looked for")
+        gaps.append("the kit isn't a git checkout (installed package): contract changes weren't looked for")
     if len(lines) == 1:
         lines.append("nothing new in the ledgers or contracts")
     return lines

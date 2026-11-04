@@ -14,6 +14,14 @@ Thanks for considering a contribution.
    using `handoff.py new --review`. Fix or answer every finding on the pull request, with a
    test that fails when the fix is removed.
 
+## Releases
+
+The version is in `pyproject.toml` and `tools/__init__.py`. A release is a commit on main
+tagged `vX.Y.Z` by the owner. Anything that depends on the kit (Telosmith, a records
+repository's CI made by `relay-kit init`) pins a tag, or better a commit, never a branch.
+A change to a contract's format is at least a minor version; a change to `relay-kit init`'s
+template only affects records made after it.
+
 ## License
 
 The project is licensed under the terms in [LICENSE](LICENSE). Contributions are made

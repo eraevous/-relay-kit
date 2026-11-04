@@ -1,0 +1,35 @@
+#!/bin/sh
+# relay-kit pre-push hook: run the records checks on the commits being pushed, before they leave
+# this machine. Turn on once per clone: git config core.hooksPath .githooks
+# (skip once: git push --no-verify). Procedure, not enforcement: CI checks again after the push.
+if command -v relay-kit >/dev/null 2>&1; then RK="relay-kit"
+elif python3 -c "import relaykit" >/dev/null 2>&1; then RK="python3 -m relaykit"
+else
+  echo "pre-push: relay-kit isn't installed, so the records checks can't run; not pushing." >&2
+  echo "          Install it (see README.md), or push with --no-verify to skip the checks." >&2
+  exit 1
+fi
+zero=0000000000000000000000000000000000000000
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue                      # deleting a remote branch: nothing to check
+  # The oldest commit being pushed that the remote doesn't have yet; its parent is the base.
+  if [ "$remote_sha" != "$zero" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+    first=$(git rev-list --reverse "$local_sha" "^$remote_sha" | head -n 1)
+  else
+    first=$(git rev-list --reverse "$local_sha" --not --remotes | head -n 1)
+  fi
+  [ -z "$first" ] && continue                                 # nothing new to push
+  base=$(git rev-parse --verify -q "$first~1" || echo "")
+  # Check the pushed commit itself, in a temporary worktree, not whatever is checked out here.
+  wt=$(mktemp -d)
+  git worktree add --quiet --detach "$wt" "$local_sha" || { echo "pre-push: couldn't check out $local_sha to check it" >&2; exit 1; }
+  if [ -n "$base" ]; then
+    (cd "$wt" && $RK handoff --dir handoffs check --base "$base" && $RK ledger check --dir governance --git --base "$base") || status=1
+  else
+    (cd "$wt" && $RK handoff --dir handoffs check && $RK ledger check --dir governance) || status=1
+  fi
+  git worktree remove --force "$wt"
+  [ $status -ne 0 ] && { echo "pre-push: the records checks failed on $local_ref; not pushing." >&2; exit 1; }
+done
+exit 0

@@ -8,6 +8,57 @@ They're written as [Claude skills](https://docs.claude.com/en/docs/agents-and-to
 each is a `SKILL.md` that an assistant reads and follows, with any code it needs
 embedded in it. The procedures also work as plain instructions for other assistants.
 
+## Quickstart
+
+You need Python 3.10+ and git. Everything is standard library.
+
+1. **Install the command** (in a virtual environment if your system Python is "externally managed"):
+   `python3 -m pip install "relay-kit @ git+https://github.com/eraevous/relay-kit@v0.1.0"`
+2. **Create your records**, the private repository that holds handoffs and decisions:
+   `relay-kit init my-records --owner <your name> --lanes research=RS`, then follow the printed
+   steps: git init, turn on the pre-push hook, commit, and push to a **private** repository.
+   (A remote that isn't GitHub works too; make a bare one with `git init --bare -b main`.)
+3. **Give your assistants the skills:** `relay-kit zips` builds one zip per skill in
+   `relay-kit-upload/`. Upload them as skills on claude.ai; for Claude Code, unzip them into
+   `~/.claude/skills` (`unzip -o relay-kit-upload/handoff-ledger.zip -d ~/.claude/skills`);
+   for other assistants, paste the `SKILL.md` you need.
+4. **Start every session the same way:**
+   `export RELAYKIT_ACTOR=<assistant>:<lane>#<session id>` (for example `claude:research#01AB`),
+   then `relay-kit status --root my-records`.
+5. **Hand work over** (worked example below), and record decisions with
+   `relay-kit ledger append --dir my-records/governance decision '{"status": "proposed", "decision": "...", "scope": "..."}'`.
+
+Records live in git for now: it gives every guarantee the kit relies on (see
+[docs/storage.md](docs/storage.md) for what other storage would need). Pin a tag, or
+better a commit, wherever you depend on the kit.
+
+### A handoff, start to finish
+
+```
+cd my-records
+relay-kit handoff --dir handoffs new --from claude:research --to chatgpt:review --title "Review the survey draft"
+# prints the id, e.g. HO-RS-20261103-K7QF; open handoffs/HO-RS-20261103-K7QF.md and fill in every
+# TODO: Task, Authorized (the owner's exact words, where and when they said them), Context, Limits
+relay-kit handoff --dir handoffs set HO-RS-20261103-K7QF sent --expect prepared --note "pasted into a ChatGPT chat"
+# the recipient works; whoever files its result also records its steps for it:
+relay-kit handoff --dir handoffs set HO-RS-20261103-K7QF acknowledged --for chatgpt:review --note "from its reply"
+relay-kit handoff --dir handoffs set HO-RS-20261103-K7QF completed --for chatgpt:review --note "outputs/HO-RS-20261103-K7QF.md"
+git add -A && git commit -m "HO-RS-20261103-K7QF completed" -m "Relay-Session: 01AB" && git push
+```
+
+`sent`, `blocked` and `completed` need a `--note`; a handoff can't leave `prepared` while any
+TODO is left. The `Relay-Session:` line (any `...-Session:` trailer ending in your session id)
+is how `status` finds your last commit and shows what other lanes changed since.
+
+### When two sessions take the same number
+
+Two clones that each append a decision before pulling both get the same next id. The second
+push is refused by git, and `relay-kit ledger append` refuses too ("different lines under the
+same ids"). To recover without losing your line:
+1. `git merge --abort` if a pull left a conflict, and note your line's text.
+2. `git reset --hard origin/main` (this drops **your** unpushed line; you're about to re-add it).
+3. Run the same `relay-kit ledger append` again: it takes the next free id. Commit and push.
+
 ## The skills
 
 | Skill | What it does | Code |
@@ -43,8 +94,11 @@ Decisions and objections go in append-only ledgers kept with your private record
 
 ## Install
 
-- **claude.ai:** run `python3 tools_extract.py --zips`, then upload the zips from `upload/`
-  as skills (one per skill).
+- **The command:** see Quickstart. From a checkout, `python3 -m pip install .` installs it. From a checkout, every tool also runs directly
+  (`python3 tools/status.py`, `python3 skills/handoff-ledger/scripts/handoff.py`, ...);
+  `relay-kit <command>` runs the same scripts with the same output.
+- **claude.ai:** run `relay-kit zips` (zips in `relay-kit-upload/`), or from a checkout
+  `python3 tools_extract.py --zips` (zips in `upload/`), then upload them as skills (one per skill).
 - **Claude Code:** copy the folders under `skills/` into `~/.claude/skills/`.
 - **Other assistants:** attach or paste the `SKILL.md` you need.
 

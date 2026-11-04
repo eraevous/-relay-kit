@@ -15,6 +15,19 @@ PATTERNS = {
     "token": re.compile(r"\b(?:sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{30,})"),
 }
 ALLOWED = {"noreply@anthropic.com"}   # commit-trailer address used in docs
+# The kit's own public repository (its Homepage in pyproject.toml, and the same name with the
+# leading hyphen it had before the rename): its address isn't private, and the @tag in an
+# install line isn't an email address. Only that repository is exempt, not any */relay-kit.
+def own_repo_pattern(root):
+    try:
+        text = (pathlib.Path(root) / "pyproject.toml").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    m = re.search(r'Homepage\s*=\s*"https://github\.com/([\w.-]+)/-?([\w.-]+)"', text)
+    if not m:
+        return None
+    owner, name = map(re.escape, m.groups())
+    return re.compile(rf"(?:https://)?(?:github\.com/)?{owner}/-?{name}(?:@[\w./-]+)?(?![\w-])")   # not relay-kit-private
 NAME_EXEMPT = {"LICENSE", "CLA.md"}   # the copyright holder is named there on purpose
 
 
@@ -31,6 +44,7 @@ def main():
     pats = dict(PATTERNS)
     if names:
         pats["private name"] = re.compile(r"\b(?:" + "|".join(map(re.escape, names)) + r")\b", re.I)
+    public = own_repo_pattern(root)
     files = subprocess.run(["git", "-C", str(root), "ls-files"], capture_output=True, text=True, check=True).stdout.split()
     hits = 0
     for f in files:
@@ -40,6 +54,8 @@ def main():
         except (UnicodeDecodeError, IsADirectoryError, FileNotFoundError):
             continue
         for n, line in enumerate(text.splitlines(), 1):
+            if public:
+                line = public.sub("", line)
             for kind, rx in pats.items():
                 if kind == "private name" and f in NAME_EXEMPT:
                     continue
