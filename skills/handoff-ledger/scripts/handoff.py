@@ -731,33 +731,46 @@ def history_problems(d, base):
     if mb.returncode != 0:
         return [f"--base {base}: {mb.stderr.strip() or 'no common history with HEAD'}"]
     base = mb.stdout.strip()   # compare with where this branch left the base, not the base's tip
-    listed = git("ls-tree", "-r", "--name-only", base, "--", ".")
+    listed = git("ls-tree", "-r", "-z", "--name-only", base, "--", ".")   # -z: names with spaces stay whole
     if listed.returncode != 0:
         return [f"--base {base}: {listed.stderr.strip() or 'not a git revision'}"]
     # Handoffs are HO-*.md anywhere under the folder (archived into a subfolder still counts),
     # except in its own outputs/ folder, which holds results under the same names. Every copy is
     # compared: one handoff may live in only one place, so a second copy is itself a problem.
     is_handoff = lambda rel: re.match(rf"^{ID_PAT}\.md$", rel.name) and rel.parts[0] != "outputs"
-    here = {}
+    here, out = {}, []
     for q in sorted(d.rglob("HO-*.md")):
         if is_handoff(q.relative_to(d)):
+            if q.is_symlink():   # a link would let one file stand in for another (or for its output)
+                out.append(f"{q.relative_to(d).as_posix()}: is a symlink; a handoff must be a file of its own")
+                continue
             here.setdefault(q.name, []).append(q)
-    out = [f"{name}: {len(ps)} copies (" + ", ".join(q.relative_to(d).as_posix() for q in ps) + "); a handoff lives in one place"
-           for name, ps in sorted(here.items()) if len(ps) > 1]
-    for rel in sorted({pathlib.PurePosixPath(x) for x in listed.stdout.split()}, key=str):
+    out += [f"{name}: {len(ps)} copies (" + ", ".join(q.relative_to(d).as_posix() for q in ps) + "); a handoff lives in one place"
+            for name, ps in sorted(here.items()) if len(ps) > 1]
+    for rel in sorted({pathlib.PurePosixPath(x) for x in listed.stdout.split("\0") if x}, key=str):
         if not is_handoff(rel):
             continue
         name = rel.name
-        old_text = git("show", f"{base}:{prefix}{rel.as_posix()}").stdout
+        shown = git("show", f"{base}:{prefix}{rel.as_posix()}")
+        if shown.returncode != 0:   # fail closed: a base version that can't be read can't vouch for anything
+            out.append(f"{rel.as_posix()}: its version at {base[:7]} can't be read ({shown.stderr.strip()})")
+            continue
+        old_text = shown.stdout
         for p in here.get(name, []) or [None]:
             if p is None:
                 out.append(f"{name}: removed since {base[:7]}")
                 continue
-            text = p.read_text(encoding="utf-8")
+            try:
+                text = p.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                out.append(f"{p.relative_to(d).as_posix()}: can't be read ({e.__class__.__name__})")
+                continue
             try:
                 old_meta, old_log, _, _ = parse_text(old_text, name)
-            except Refused:
-                continue   # unreadable at the base: nothing to hold it to
+            except Refused:   # unreadable at the base: it may not change at all until it's fixed in a new handoff
+                if text != old_text:
+                    out.append(f"{p.relative_to(d).as_posix()}: changed since {base[:7]}, where it couldn't be read as a handoff")
+                continue
             try:
                 meta, log, _, _ = parse_text(text, name)
             except Refused as e:

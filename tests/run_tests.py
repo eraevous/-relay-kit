@@ -1314,8 +1314,12 @@ def output_name_tests():
         base = g(c1, "rev-parse", "HEAD").stdout.strip()
         for rel in at_base:
             (d / rel).unlink()
-        for rel, body in after.items():
-            (d / rel).parent.mkdir(parents=True, exist_ok=True); (d / rel).write_text(body, encoding="utf-8")
+        for rel, body in after.items():   # "-> path" makes a symlink to that path
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            if body.startswith("-> "):
+                os.symlink(d / body[3:], d / rel)
+            else:
+                (d / rel).write_text(body, encoding="utf-8", errors="surrogateescape")
         g(c1, "add", "-A"); g(c1, "commit", "-qm", "after")
         r = run(LEDGER, "--dir", d, "check", "--base", base)
         return r[0], r[1] + r[2]
@@ -1324,6 +1328,7 @@ def output_name_tests():
         "output added": scenario("a", {top: text}, {top: text, out: output}),
         "archived unchanged, output present": scenario("c", {top: text}, {arc: text, out: output}),
         "archived into archive/outputs/": scenario("f", {top: text}, {f"archive/outputs/{FIXTURE.name}": text}),
+        "archived under a name with a space": scenario("q", {f"closed history/{FIXTURE.name}": text}, {f"closed history/{FIXTURE.name}": text}),
     }
     caught = {
         "deleted, output kept": scenario("b", {top: text}, {out: output}),
@@ -1335,6 +1340,13 @@ def output_name_tests():
         "archived copy made unreadable": scenario("m", {top: text}, {arc: "no front matter\n"}),
         "archived at the base, then edited": scenario("n", {arc: text}, {arc: edited}),
         "archived at the base, then deleted": scenario("o", {arc: text}, {}),
+        "archived under a name with a space, then edited": scenario("p", {f"closed history/{FIXTURE.name}": text},
+                                                                    {f"closed history/{FIXTURE.name}": edited}),
+        "archived under a non-ASCII name, then edited": scenario("q2", {f"arch\u00e9/{FIXTURE.name}": text}, {f"arch\u00e9/{FIXTURE.name}": edited}),
+        "archived under a non-ASCII name, then deleted": scenario("r", {f"arch\u00e9/{FIXTURE.name}": text}, {}),
+        "unreadable at the base, then rewritten": scenario("aa", {top: "no front matter\n"}, {top: "something else\n"}),
+        "not UTF-8 any more": scenario("u", {arc: text}, {arc: "\udcff"}),
+        "handoff replaced by a symlink to its output": scenario("w", {top: text}, {out: text, top: f"-> {out}"}),
     }
     case("ledger: check --base ignores outputs/<id>.md and accepts archiving: " + ", ".join(ok),
          all(r[0] == 0 for r in ok.values()), str({k: v for k, v in ok.items() if v[0] != 0}))
