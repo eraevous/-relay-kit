@@ -42,7 +42,7 @@ CONTENT_POLICY = {
 # free-text fields, by record kind, that --content metadata|none suppresses
 TEXT_FIELDS = {
     "conversation": ["title"],
-    "message": ["text", "sources", "relay.origin_label", "relay.origin_ref"],
+    "message": ["text", "sources", "label", "relay.origin_label", "relay.origin_ref"],
     "handoff": ["title", "text", "log[].note"],
     "output": ["text", "first_line"],
     "decision": ["decision", "scope", "basis", "locator", "evidence", "note", "not_covered", "(any other string field)"],
@@ -54,6 +54,15 @@ KNOWN_FIELDS = {
                  "proposed_by", "note", "recorded_by", "not_covered", "supersedes"},
     "challenge": {"id", "date", "status", "concern", "raised_by", "resolution", "check", "fix", "resolves",
                   "scope", "evidence", "recorded_by"},
+    # conversation@1 as chat-capture's renderer writes it, plus the optional actor/lane this export reads
+    "conversation": {"schema", "meta", "hidden_counts", "turns"},
+    "conversation.meta": {"title", "platform", "kind", "source_url", "conversation_id", "share_id", "record_created",
+                          "record_updated", "first_message_at", "last_message_at", "retrieved_at", "retrieval",
+                          "default_model", "models_seen", "turns", "user_turns", "assistant_turns", "visible_messages",
+                          "hidden_items", "nodes_total", "dictated_user_turns", "raw_sha256", "timezone", "checks",
+                          "actor", "lane"},
+    "conversation.turn": {"n", "role", "label", "messages"},
+    "conversation.message": {"mid", "id", "ts", "model", "dictated", "text", "sources"},
 }
 LIMITS = [
     "Only files under --root are read. Platform histories that were never captured (ChatGPT, Claude, "
@@ -140,9 +149,9 @@ def split_actor(a):
     """'claude:aec#01N4 for codex:aec' -> [('claude:aec', '01N4'), ('codex:aec', None)]. Non-actors -> []."""
     out = []
     for part in re.split(r"\s+for\s+", str(a or "").strip()):
-        m = re.fullmatch(r"([a-z][\w.-]*):([\w.-]+)(?:#([\w-]+))?", part.strip().lower())
-        if m:
-            out.append((f"{m.group(1)}:{m.group(2)}", m.group(3)))
+        m = re.fullmatch(r"([A-Za-z][\w.-]*):([\w.-]+)(?:#([\w-]+))?", part.strip())
+        if m:   # the assistant and lane are case-insensitive names; a session id keeps its case
+            out.append((f"{m.group(1).lower()}:{m.group(2).lower()}", m.group(3)))
     return out
 
 
@@ -150,13 +159,32 @@ def actor_str(base, session):
     return f"{base}#{session}" if session else base
 
 
-def lane_of(base):
-    return base.split(":", 1)[1] if base and ":" in base else None
+def url_segments(url):
+    """The path segments of a link, with claude.ai's 'session_' prefix removed, for whole-segment matching."""
+    segs = [x for x in re.split(r"[/?#]", re.sub(r"^\w+://[^/]+", "", url or "")) if x]
+    return set(segs) | {x[len("session_"):] for x in segs if x.startswith("session_")}
 
 
 class Lanes:
+    """Lane names declared by handoffs/.ledger.json or threads.md, and their codes. An actor's
+    name part ('kate' in chatgpt:kate) is a lane only when it is declared (or is a declared lane's
+    unique code); otherwise the actor is reported without a lane."""
     def __init__(self, codes):
         self.codes = {k.lower(): str(v).upper() for k, v in (codes or {}).items()}
+        self.declared = set(self.codes)
+
+    def declare(self, name):
+        if name:
+            self.declared.add(name.lower())
+
+    def lane(self, base):
+        if not base or ":" not in base:
+            return None
+        name = base.split(":", 1)[1].lower()
+        if name in self.declared:
+            return name
+        by_code = self.from_code(name)
+        return by_code[0] if len(by_code) == 1 else None
 
     def matches(self, query, lane):
         """--lane AEC matches lane 'aec' and any lane whose code is AEC (aec-release)."""
@@ -204,20 +232,30 @@ def git_dirs(start):
 
 
 def remote_urls(cfg):
-    urls, in_remote = [], False
+    """Remote URLs in a git config, with the same file's url.<base>.insteadOf rewrites applied."""
+    urls, rewrites, section, base = [], [], None, None
     for line in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
         s = line.strip()
         if s.startswith("["):
-            in_remote = s.lower().startswith("[remote ")
-        elif in_remote:
-            m = re.match(r"url\s*=\s*(.+)", s, re.I)
+            m = re.match(r'\[\s*(\w+)(?:\s+"([^"]*)")?\s*\]', s)
+            section, base = (m.group(1).lower(), m.group(2)) if m else (None, None)
+        elif section == "remote":
+            m = re.match(r"(?:push)?url\s*=\s*(.+)", s, re.I)
             if m:
-                urls.append(m.group(1).strip())
-    return urls
+                urls.append(m.group(1).strip().strip('"'))
+        elif section == "url" and base is not None:
+            m = re.match(r"(?:push)?insteadof\s*=\s*(.+)", s, re.I)
+            if m:
+                rewrites.append((m.group(1).strip().strip('"'), base))
+    out = []
+    for u in urls:
+        hits = sorted((p for p in rewrites if u.startswith(p[0])), key=lambda p: -len(p[0]))
+        out.append(hits[0][1] + u[len(hits[0][0]):] if hits else u)
+    return out
 
 
 def github_repo(url):
-    m = re.search(r"github\.com[:/]([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", url)
+    m = re.match(r"^(?:https?://(?:[^@/]+@)?github\.com/|ssh://git@github\.com(?::\d+)?/|git@github\.com:)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", url)
     return f"{m.group(1)}/{m.group(2)}" if m else None
 
 
@@ -247,11 +285,16 @@ def check_destination(out, root, allow_public):
         existing = existing.parent
     found = []
     for folder, cfg in git_dirs(existing):
-        urls = remote_urls(cfg) if cfg else []
+        if cfg is None:   # a .git we can't read: its remotes are unknown
+            found.append({"repo_folder": str(folder), "remote": "(git config unreadable)", "visibility": "unknown"})
+            continue
+        urls = remote_urls(cfg)
         for u in urls:
+            # only a github.com remote can be checked; anything else (GitLab, an ssh host alias,
+            # an unresolved insteadOf alias) can't be confirmed private, so it counts as unknown
             repo = github_repo(u)
-            vis = repo_visibility(repo) if repo else "not GitHub"
-            found.append({"repo_folder": str(folder), "remote": repo or "(non-GitHub remote)", "visibility": vis})
+            vis = repo_visibility(repo) if repo else "unknown"
+            found.append({"repo_folder": str(folder), "remote": repo or "(unrecognized remote)", "visibility": vis})
         if not urls:
             found.append({"repo_folder": str(folder), "remote": None, "visibility": "no remote"})
     risky = [f for f in found if f["visibility"] in ("public", "unknown")]
@@ -263,7 +306,10 @@ def check_destination(out, root, allow_public):
     if found:
         print(f"note: {o} is inside a git repository ({found[0]['repo_folder']}); don't commit the export by accident",
               file=sys.stderr)
-    return {"path": str(o), "inside_git": found, "allow_public_dest": bool(allow_public)}
+    # local paths stay out of the manifest: the out folder's name, and each repository relative to it
+    for f in found:
+        f["repo_folder"] = os.path.relpath(f["repo_folder"], o)
+    return {"name": o.name, "inside_git": found, "allow_public_dest": bool(allow_public)}
 
 
 # ---------------- reading the records ----------------
@@ -290,6 +336,10 @@ class Reader:
 
     def bad(self, p, why):
         self.unreadable.append({"path": self.rel(p) if isinstance(p, pathlib.Path) else p, "reason": why})
+
+    def unknown(self, obj, kind):
+        for k in set(obj) - KNOWN_FIELDS[kind]:
+            self.unknown_fields.setdefault(kind, set()).add(k)
 
     def note_actor(self, a, where):
         for base, sess in split_actor(a):
@@ -340,8 +390,7 @@ class Reader:
             except ValueError as e:
                 self.bad(f"{self.rel(p)}:{n}", f"not a JSON object: {e}")
                 continue
-            for k in sorted(set(row) - KNOWN_FIELDS[kind]):
-                self.unknown_fields.setdefault(kind, set()).add(k)
+            self.unknown(row, kind)
             for f in ("recorded_by", "raised_by", "proposed_by"):
                 self.note_actor(row.get(f), self.rel(p))
             rows.append((n, line, row))
@@ -370,22 +419,31 @@ def conv_records(rd, p, raw, d, threads_by_id):
     fh = sha(raw)
     key = f"{meta.get('platform') or 'unknown'}:{cid}" if cid else f"file:{fh[:16]}"
     url = meta.get("source_url") or ""
+    segs = url_segments(url) | ({cid} if cid else set())
     # actor and lane: the capture's own meta first, then the records
     actor, actor_source = meta.get("actor"), "capture" if meta.get("actor") else None
     if not actor:
         for sess, bases in sorted(rd.session_actor.items()):
-            if (sess in url or (cid and sess == cid)) and len(bases) == 1:
+            if sess in segs and len(bases) == 1:
                 actor, actor_source = actor_str(next(iter(bases)), sess), "records session id"
                 break
     lane, lane_source = meta.get("lane"), "capture" if meta.get("lane") else None
     if not lane:
         t = threads_by_id.get(cid) if cid else None
         if t is None:
-            t = next((v for k, v in sorted(threads_by_id.items()) if k and k in url), None)
+            t = next((v for k, v in sorted(threads_by_id.items()) if k and k in segs), None)
         if t and t.get("lane"):
             lane, lane_source = t["lane"], "threads.md"
         elif actor:
-            lane, lane_source = lane_of(split_actor(actor)[0][0]) if split_actor(actor) else None, "actor"
+            lane, lane_source = rd.lanes.lane(split_actor(actor)[0][0]) if split_actor(actor) else None, "actor"
+    rd.unknown(d, "conversation")
+    rd.unknown(meta, "conversation.meta")
+    for t in turns:
+        if isinstance(t, dict):
+            rd.unknown(t, "conversation.turn")
+            for m in t.get("messages") or []:
+                if isinstance(m, dict):
+                    rd.unknown(m, "conversation.message")
     hidden = d.get("hidden_counts") if isinstance(d.get("hidden_counts"), dict) else {}
     msgs, seq, models, tss = [], 0, set(), []
     for t in turns:
@@ -446,11 +504,12 @@ def parse_threads(rd):
             h = line[4:].strip()
             cands = [h] + re.findall(r"\(([^)]+)\)", h) + h.split()[:1]
             lane = next((n for c in cands for n in ([c.lower()] if c.lower() in rd.lanes.codes else rd.lanes.from_code(c))), None) \
-                or next((n for c in cands for n in sorted(rd.lanes.codes) if n == c.lower()), None) or h
+                or h.lower()
+            rd.lanes.declare(lane)   # a lane heading in threads.md declares the lane
         actors = actor_re.findall(line)
         for a in actors:
             rd.note_actor(a, "threads.md")
-        line_lane = lane if section == "lanes" else (lane_of(split_actor(actors[0])[0][0]) if actors and split_actor(actors[0]) else None)
+        line_lane = lane if section == "lanes" else (rd.lanes.lane(split_actor(actors[0])[0][0]) if actors and split_actor(actors[0]) else None)
         for u in URL.findall(line):
             u = u.rstrip(".,;:")
             m = re.search(r"/(?:c|chat|share)/([\w-]+)|/code/session_([\w-]+)|/code/project/([\w-]+)", u)
@@ -483,11 +542,15 @@ def handoff_records(rd, led):
         raw = rd.read(p, "handoff")
         text = raw.decode("utf-8", errors="replace")
         try:
-            meta, log, _, _ = led.parse_text(text, p.stem)
+            meta, log, sections, _ = led.parse_text(text, p.stem)
         except led.Refused as e:
             rd.bad(p, str(e))
             continue
-        hid = meta.get("id") or p.stem
+        missing = [f for f in ("id", "status", "from", "created") if not meta.get(f)]
+        if missing or not sections:
+            rd.bad(p, "not a readable handoff: " + (f"front matter lacks {', '.join(missing)}" if missing else "no sections"))
+            continue
+        hid = meta.get("id")
         actors = []
         for f in ("from", "to"):
             rd.note_actor(meta.get(f), rd.rel(p))
@@ -498,15 +561,16 @@ def handoff_records(rd, led):
         for f in ("from", "to"):
             for b, s in split_actor(meta.get(f)):
                 actors.append(actor_str(b, s))
-        lanes = sorted({lane_of(split_actor(a)[0][0]) for a in actors if split_actor(a)})
+        lanes = {l for a in actors for b, _ in split_actor(a) for l in [rd.lanes.lane(b)] if l}
         frm = split_actor(meta.get("from"))
-        lane = lane_of(frm[0][0]) if frm else None
+        lane = rd.lanes.lane(frm[0][0]) if frm else None
         m = re.match(r"^HO-([A-Z0-9]{1,12})-\d{8}-\w{4}$", hid)
-        if m:
+        if m:   # the id's lane code: one lane with that code is that lane; a shared code adds nothing
             by_code = rd.lanes.from_code(m.group(1))
-            if lane not in by_code and by_code:
-                lane = by_code[0]
-            lanes = sorted(set(lanes) | set(by_code))
+            if len(by_code) == 1:
+                lanes.add(by_code[0])
+                lane = lane if lane == by_code[0] else (lane or by_code[0])
+        lanes = sorted(lanes)
         expected = [f"{p.stem}.md"]   # the file handoff.py's completed check requires
         present = [x for x in expected if (d / "outputs" / x).is_file()]
         status = meta.get("status")
@@ -561,13 +625,14 @@ def ledger_records(rd, name, kind):
     p, rows = got
     fh = rd.files[rd.rel(p)]["sha256"]
     recs, seen = [], {}
+    superseded = {r.get("supersedes") for _, _, r in rows if r.get("supersedes") and r.get("status") == "adopted"}
     for n, line, row in rows:
         rid = f"{kind}:{row.get('id') or 'line' + str(n)}"
         seen[rid] = seen.get(rid, 0) + 1
         if seen[rid] > 1:
             rid += f"~line{n}"
         actors = sorted({actor_str(b, s) for f in ("recorded_by", "raised_by", "proposed_by") for b, s in split_actor(row.get(f))})
-        lanes = sorted({lane_of(split_actor(a)[0][0]) for a in actors})
+        lanes = sorted({l for a in actors for l in [rd.lanes.lane(split_actor(a)[0][0])] if l})
         st = row.get("status")
         if kind == "decision":
             ev = "decision" if st in ("adopted", "rejected", "superseded") else "proposal"
@@ -577,6 +642,8 @@ def ledger_records(rd, name, kind):
                "ts": row.get("date"), "source_path": rd.rel(p), "source_hash": sha(line), "source_file_hash": fh,
                "lane": lanes[0] if len(lanes) == 1 else None, "lanes": lanes,
                "actor": actors[0] if len(actors) == 1 else None, "actors": actors, "evidence_class": ev}
+        if kind == "decision":   # explicitly adopted and not superseded by a later adopted line
+            rec["in_force"] = st == "adopted" and row.get("id") not in superseded
         if kind == "decision" and ev == "decision" and not str(row.get("basis", "")).strip():
             rec["authority_basis_missing"] = True
         recs.append(rec)
@@ -597,7 +664,7 @@ def suppress(rec, content):
 
     r = dict(rec)
     k = r["kind"]
-    for f in ("text", "title", "first_line", "sources"):
+    for f in ("text", "title", "first_line", "sources", "label"):
         if f in r and r[f] is not None:
             h = gone(r.pop(f))
             if h:
@@ -606,7 +673,15 @@ def suppress(rec, content):
     if k == "message" and r.get("relay"):
         r["relay"] = {"marker": r["relay"]["marker"], "origin_suppressed": True}
     if k == "handoff":
-        r["log"] = [{kk: vv for kk, vv in e.items() if kk != "note"} for e in r["log"]]
+        log = []
+        for e in r["log"]:
+            e2 = {kk: vv for kk, vv in e.items() if kk != "note"}
+            h = gone(e.get("note"))
+            if h:
+                e2["note_hash"] = h
+            e2["note_suppressed"] = True
+            log.append(e2)
+        r["log"] = log
     if k in ("decision", "challenge"):
         f = {}
         for kk, vv in r["fields"].items():
@@ -644,13 +719,13 @@ def export(root, out, lane=None, actors=(), since=None, until=None, kinds=None, 
     rd = Reader(root)
     led = load_ledger()
     rd.config()
+    tpath, threads = parse_threads(rd)   # first: its lane headings declare lanes
     queried = {}
     # ledgers and handoffs first: they name the actors and sessions a capture may belong to
     dpath, decisions = ledger_records(rd, "decisions.jsonl", "decision")
     cpath, challenges = ledger_records(rd, "challenges.jsonl", "challenge")
     hdir, handoffs, missing_outputs = handoff_records(rd, led)
     outputs = output_records(rd, handoffs)
-    tpath, threads = parse_threads(rd)
     queried["governance/decisions.jsonl"] = "read" if dpath else "absent"
     queried["governance/challenges.jsonl"] = "read" if cpath else "absent"
     queried["handoffs/"] = "read" if hdir else "absent"
@@ -784,7 +859,7 @@ def export(root, out, lane=None, actors=(), since=None, until=None, kinds=None, 
     actor_sessions = {s for b, i in rd.referenced.items() for s in i["sessions"]
                       if actor_matches(actors, [actor_str(b, s)])} if actors else set()
     threads_gap = [dict(t) for cid, t in sorted(threads.items())
-                   if cid not in captured_ids and not any(cid in u for u in conv_urls)
+                   if cid not in captured_ids and not any(cid in url_segments(u) for u in conv_urls)
                    and (lane is None or (t["lane"] and in_scope_lane(t["lane"])))
                    and (not actors or cid in actor_sessions)]
     captured_actor_sessions = {}
@@ -793,17 +868,17 @@ def export(root, out, lane=None, actors=(), since=None, until=None, kinds=None, 
             captured_actor_sessions.setdefault(b, set()).add(s)
     actors_gap = []
     for base, info in sorted(rd.referenced.items()):
-        if not in_scope_lane(lane_of(base)) or not (not actors or actor_matches(actors, [base] + [actor_str(base, s) for s in info["sessions"]])):
+        if not in_scope_lane(rd.lanes.lane(base)) or not (not actors or actor_matches(actors, [base] + [actor_str(base, s) for s in info["sessions"]])):
             continue
         have = captured_actor_sessions.get(base, set())
-        missing = sorted(s for s in info["sessions"] if s not in have and not any(s in u for u in conv_urls))
+        missing = sorted(s for s in info["sessions"] if s not in have and not any(s in url_segments(u) for u in conv_urls))
         if base not in captured_actor_sessions or missing:
-            actors_gap.append({"actor": base, "uncaptured_sessions": missing,
+            actors_gap.append({"actor": base, "lane": rd.lanes.lane(base), "uncaptured_sessions": missing,
                                "no_capture_at_all": base not in captured_actor_sessions and not any(
-                                   s in u for s in info["sessions"] for u in conv_urls),
+                                   s in url_segments(u) for s in info["sessions"] for u in conv_urls),
                                "referenced_in": sorted(info["in"])[:20], "referenced_in_count": len(info["in"])})
     all_lanes = set(rd.lanes.codes) | {t["lane"] for t in threads.values() if t["lane"]} | \
-        {lane_of(b) for b in rd.referenced}
+        {l for b in rd.referenced for l in [rd.lanes.lane(b)] if l}
     captured_lanes = {c["lane"] for c in convs if c["lane"]}
     lanes_gap = sorted(l for l in all_lanes if l and in_scope_lane(l) and l not in captured_lanes)
     kept_ids = {r["rid"] for r in kept}
@@ -845,7 +920,8 @@ def export(root, out, lane=None, actors=(), since=None, until=None, kinds=None, 
         "schema": SCHEMA,
         "generator": {"tool": "relay-kit export (tools/export.py)", "kit_version": __version__},
         "contracts_read": {"conversation": CONVERSATION, "handoff": HANDOFF_CONTRACTS, "paste_markers": PASTE_MARKERS},
-        "root": str(rd.root),
+        "root": {"name": rd.root.name,
+                 "root_hash": sha("".join(f"{k}\t{v['sha256']}\n" for k, v in sorted(rd.files.items())))},
         "query": {"lane": lane, "actors": sorted(actors), "since": since, "until": until, "kinds": sorted(kinds),
                   "granularity": granularity, "format": fmt, "content": content},
         "redaction": {"content": content, "policy": CONTENT_POLICY[content],

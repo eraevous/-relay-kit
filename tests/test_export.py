@@ -298,5 +298,116 @@ class ExportTests(unittest.TestCase):
         self.assertIn("refused", bad.stderr)
 
 
+class ReviewFixTests(ExportTests):
+    """Fixes from the fresh-context review of PR #16."""
+    test_two_actors = test_round_trip = test_relay_distinguishable = test_gaps_reported = None
+    test_decisions_vs_proposals = test_deterministic = test_no_mutation = test_public_destination_refused = None
+    test_metadata_only = test_cli = None
+
+    def repo(self, name, config):
+        r = self.tmp / name
+        (r / ".git").mkdir(parents=True)
+        (r / ".git" / "config").write_text(config, encoding="utf-8")
+        return r
+
+    def test_unconfirmed_remotes_refused(self):
+        """export: a remote whose visibility can't be confirmed (GitLab, ssh alias, unresolved insteadOf, unreadable .git) is refused; no remote is allowed"""
+        calls = []
+        ex.repo_visibility = lambda repo: calls.append(repo) or "private"
+        remote = '[remote "origin"]\n\turl = {}\n'
+        cases = {
+            "gitlab": remote.format("https://gitlab.com/example/public-thing.git"),
+            "ssh-alias": remote.format("git@github-work:example/public-thing.git"),
+            "unresolved-alias": remote.format("gh:example/public-thing"),
+        }
+        for name, cfg in cases.items():
+            with self.assertRaises(ex.Refused, msg=name):
+                ex.export(self.root, self.repo(name, cfg) / "exp")
+        self.assertEqual(calls, [])   # none of them was mistaken for a checkable GitHub remote
+        aliased = self.repo("alias", '[url "https://github.com/"]\n\tinsteadOf = gh:\n' + remote.format("gh:example/public-thing"))
+        ex.repo_visibility = lambda repo: calls.append(repo) or "public"
+        with self.assertRaises(ex.Refused):
+            ex.export(self.root, aliased / "exp")
+        self.assertEqual(calls, ["example/public-thing"])   # the insteadOf alias was resolved, then found public
+        broken = self.tmp / "broken"
+        broken.mkdir()
+        (broken / ".git").write_text("gitdir: /nonexistent/place\n", encoding="utf-8")
+        with self.assertRaises(ex.Refused):
+            ex.export(self.root, broken / "exp")
+        m = ex.export(self.root, self.repo("no-remote", "[core]\n\tbare = false\n") / "exp")
+        self.assertEqual(m["destination"]["inside_git"][0]["visibility"], "no remote")
+
+    def test_sessions_keep_case_and_match_whole_segments(self):
+        """export: session ids keep their case and match a whole link segment, never a substring"""
+        h = HANDOFF_DONE.replace("claude:research#SESSA1", "claude:research#SessMix9").replace("HO-RS-20261101-AB12", "HO-RS-20261105-EF56")
+        h = h.replace("- 2026-11-01T12:05Z", "- 2026-11-01T12:04Z | acknowledged | claude:research#0000 | short\n- 2026-11-01T12:05Z")
+        (self.root / "handoffs" / "HO-RS-20261105-EF56.md").write_text(h, encoding="utf-8")
+        for name, url in (("c.json", "https://claude.ai/code/session_SessMix9"),
+                          ("d.json", "https://chatgpt.com/c/00000000-0000-0000-0000-00000000000d")):
+            c = json.loads(json.dumps(CONV_B))
+            del c["meta"]["actor"], c["meta"]["lane"]
+            c["meta"]["source_url"], c["meta"]["conversation_id"] = url, url.rsplit("/", 1)[-1]
+            (self.root / "captures" / name).write_text(json.dumps(c), encoding="utf-8")
+        _, recs, _ = self.run_export(kinds=["conversations", "handoffs"], granularity="inventory")
+        by = {r["source_path"]: r for r in recs}
+        self.assertEqual(by["captures/c.json"]["actor"], "claude:research#SessMix9")
+        self.assertEqual(by["captures/c.json"]["actor_source"], "records session id")
+        self.assertIsNone(by["captures/d.json"]["actor"])   # '0000' is inside its id, but isn't a segment of it
+        self.assertIn("claude:research#SessMix9", by["handoffs/HO-RS-20261105-EF56.md"]["actors"])
+
+    def test_personas_and_shared_codes_are_not_lanes(self):
+        """export: only declared lanes count as lanes; a persona name or a shared lane code adds none"""
+        cfg = {"owner": "sam", "lanes": {"research": "RS", "review": "RV", "ops": "OP", "ops-rel": "OP"}}
+        (self.root / "handoffs" / ".ledger.json").write_text(json.dumps(cfg), encoding="utf-8")
+        h = HANDOFF_OPEN.replace("HO-RS-20261102-CD34", "HO-OP-20261102-GH78").replace("from: claude:review", "from: claude:ops") \
+            .replace("to: chatgpt:review", "to: chatgpt:kate").replace("claude:review#SESSR9", "claude:ops#OPS1")
+        (self.root / "handoffs" / "HO-OP-20261102-GH78.md").write_text(h, encoding="utf-8")
+        m, recs, _ = self.run_export(kinds=["handoffs"])
+        ho = next(r for r in recs if r["rid"] == "handoff:HO-OP-20261102-GH78")
+        self.assertEqual(ho["lanes"], ["ops"])
+        self.assertEqual(ho["lane"], "ops")
+        g = m["coverage_gaps"]
+        self.assertNotIn("kate", g["lanes_without_capture"])
+        kate = next(a for a in g["actors_without_capture"] if a["actor"] == "chatgpt:kate")
+        self.assertIsNone(kate["lane"])
+
+    def test_in_force(self):
+        """export: in_force separates adopted decisions still in force from rejected and superseded ones"""
+        extra = [dict(DECISIONS[0], id="DEC-003", status="rejected"),
+                 dict(DECISIONS[0], id="DEC-004", decision="Use survey v2.", supersedes="DEC-001")]
+        with open(self.root / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
+            f.write("".join(json.dumps(d) + "\n" for d in extra))
+        _, recs, _ = self.run_export(kinds=["decisions"])
+        force = {r["ledger_id"]: (r["evidence_class"], r["in_force"]) for r in recs}
+        self.assertEqual(force, {"DEC-001": ("decision", False), "DEC-002": ("proposal", False),
+                                 "DEC-003": ("decision", False), "DEC-004": ("decision", True)})
+
+    def test_manifest_has_no_local_paths(self):
+        """export: the manifest names the root by folder name and hash, not by its local path"""
+        for content in ("full", "metadata", "none"):
+            m, _, out = self.run_export(f"p-{content}", content=content)
+            text = (out / "manifest.json").read_text(encoding="utf-8")
+            self.assertNotIn(str(self.tmp), text)
+            self.assertEqual(m["root"]["name"], "records")
+            self.assertEqual(len(m["root"]["root_hash"]), 64)
+
+    def test_metadata_nits(self):
+        """export: metadata hides labels and keeps hashes of log notes; bad handoffs and unknown capture fields are reported"""
+        (self.root / "handoffs" / "HO-RS-20261106-JK90.md").write_text("---\nid: HO-RS-20261106-JK90\ntitle: t\n---\nno sections\n", encoding="utf-8")
+        c = json.loads(json.dumps(CONV_B))
+        c["meta"]["mystery"] = 1
+        c["turns"][0]["messages"][0]["extra"] = True
+        (self.root / "captures" / "e.json").write_text(json.dumps(c).replace("0000000b", "0000000e"), encoding="utf-8")
+        m, recs, out = self.run_export(content="metadata")
+        body = (out / "records.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn('"label"', body)
+        ho = next(r for r in recs if r["rid"] == "handoff:HO-RS-20261101-AB12")
+        self.assertTrue(all(e["note_suppressed"] and len(e["note_hash"]["sha256"]) == 64 for e in ho["log"]))
+        self.assertIn("handoffs/HO-RS-20261106-JK90.md", [u["path"] for u in m["coverage_gaps"]["unreadable"]])
+        self.assertNotIn("handoff:HO-RS-20261106-JK90", [r["rid"] for r in recs])
+        self.assertEqual(m["coverage_gaps"]["unknown_fields"]["conversation.meta"], ["mystery"])
+        self.assertEqual(m["coverage_gaps"]["unknown_fields"]["conversation.message"], ["extra"])
+
+
 if __name__ == "__main__":
     unittest.main()

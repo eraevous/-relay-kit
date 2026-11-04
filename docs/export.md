@@ -51,7 +51,7 @@ Two files in `--out` (a new folder, or one holding only a previous export):
 | `kind` | `conversation`, `message`, `handoff`, `output`, `decision`, `challenge` |
 | `rid` | Stable id: `conv:<platform>:<conversation_id>`, `msg:<platform>:<conversation_id>:<mid>`, `handoff:<id>`, `output:<path>`, `decision:<DEC-id>`, `challenge:<CH-id>`. Two files capturing the same conversation get a `~<file hash>` suffix. |
 | `source_path`, `source_hash` | Path under the root and the sha256 of the source file (of the line, for ledger lines; the file's is `source_file_hash`). |
-| `lane`, `lanes`, `actor`, `actors` | Where known. Conversations also say where they came from: `lane_source` / `actor_source` is `capture` (the capture's meta), `threads.md`, `records session id` or `actor`. |
+| `lane`, `lanes`, `actor`, `actors` | Where known. A lane is a name declared in `handoffs/.ledger.json` or as a lane heading in `threads.md` (or a declared lane's unique code); an actor's name part that isn't declared (a persona such as `chatgpt:kate`) gives no lane, and a lane code shared by several lanes adds none. Session ids keep their case and match a capture only as a whole link segment or its conversation id. Conversations also say where they came from: `lane_source` / `actor_source` is `capture` (the capture's meta), `threads.md`, `records session id` or `actor`. |
 | `ts`, `ts_missing` | The record's own timestamp (message `ts`, handoff `created`, ledger `date`); `null` with `ts_missing: true` when the source has none. Nothing is guessed. |
 | `evidence_class` | See below. |
 
@@ -66,7 +66,7 @@ Message rows copy `mid`, `id`, `ts`, `model`, `dictated`, `text` and `sources` e
 | `source-grounded` | Copied from a record as it stands: an original message, a handoff file, an output, a challenge. |
 | `relay` | A user-side message that opens with `FROM: <source>` (`relay-kit/paste-markers@1`): material carried from elsewhere, not the user's own words. `relay.origin_label` is the source as marked; `relay.origin_ref` is the first message id, handoff id or link on that line, when there is one. A `FROM:` block *later* in a message leaves the speaker as is and sets `contains_paste`. |
 | `derived` | Computed by the export: the `conversation` summary rows (counts, time span). |
-| `decision` | A decision-ledger line whose status is `adopted`, `rejected` or `superseded`. |
+| `decision` | A decision-ledger line whose status is `adopted`, `rejected` or `superseded`: the owner decided something. Decision records also carry `in_force`: `true` only when the line is `adopted` and no later adopted line `supersedes` it, so "explicitly adopted and current" is `in_force: true`. |
 | `proposal` | A decision-ledger line whose status is `proposed` (or anything else). |
 
 The export reports a ledger's status; it never upgrades a proposal or an inference. An adopted
@@ -74,13 +74,14 @@ line without a `basis` is listed under `coverage_gaps.decisions_without_basis`.
 
 **`manifest.json`** (`schema: relay-kit/export@1`):
 
+- `root`: the records folder's name and `root_hash` (sha256 over every file read, as `path<TAB>sha256` lines), never its local path; `destination` likewise gives the output folder's name and any enclosing repository relative to it.
 - `query`: the filters as given; `contracts_read`; `generator` (kit version).
 - `sources`: each source location and whether it was read or absent, and every file read with
   its sha256 and size.
 - `seen` (before filters) and `counts` (exported, per kind); `time_bounds` of the exported records;
   `outputs`: the records file's sha256 and record count.
 - `redaction`: the `--content` level, its policy in words, and the fields it suppresses.
-- `destination`: the output folder and any git repository around it, with each remote's visibility.
+- `destination`: any git repository around the output folder, with each remote's visibility.
 - `exclusions`: records left out by lane, actor or time (and those with no lane, actor or time to
   match on), kinds not requested, JSON files that aren't conversations, symlinks not followed.
 - `coverage_gaps`, in the scope of the query:
@@ -95,7 +96,9 @@ line without a `basis` is listed under `coverage_gaps.decisions_without_basis`.
     counted but not captured) and `incomplete_captures` (renderer checks other than `ok`);
   - `raw_captures_not_rendered`: chat-capture raw downloads that were never rendered to conversation@1
     (render them with chat-capture to export them; this list isn't narrowed by lane or actor);
-  - `records_missing_timestamps`, `messages_with_derived_ids`, `unreadable`, `unknown_fields`;
+  - `records_missing_timestamps`, `messages_with_derived_ids`, `unreadable` (including handoff files
+    without `id`, `status`, `from`, `created` or any section), `unknown_fields` (ledger fields, and
+    conversation top-level, `meta`, turn and message fields the renderer doesn't write);
   - `summary`: a count for each.
 - `limits`: what this export can't see, in words.
 - `nondeterministic.generated_at`: the only field that changes between runs over unchanged input.
@@ -111,13 +114,16 @@ Exports can carry the owner's words, so:
 - **Destination.** The export refuses an `--out` inside `--root`, and one inside any git
   repository whose remote is a public GitHub repository, or whose visibility it couldn't confirm
   (it asks GitHub's API without credentials: a repository anyone can read answers; a private one
-  looks absent). Offline, a GitHub-backed folder therefore counts as unconfirmed and is refused.
+  looks absent). Only `github.com` remotes can be checked, after the repository's own
+  `url.<base>.insteadOf` rewrites; any other remote (GitLab, an ssh host alias such as
+  `git@github-work:`, an unresolved alias) and a `.git` whose config can't be read count as
+  unconfirmed and are refused, as is a GitHub remote when offline. A repository with no remote is allowed.
   `--allow-public-dest` overrides this, and the manifest records that it was used. A folder
   outside any repository (a scratch folder) needs no flag. A private repository is allowed, with
   a note not to commit the export by accident.
 - **Content.** `--content full` (default) keeps exact text. `metadata` leaves out every free-text
-  field (message text and sources, titles, handoff bodies and log notes, ledger prose) and keeps
-  each one's sha256 and length, so text can be matched to its source later. `none` also leaves
+  field (message text, sources and turn labels, titles, handoff bodies and log notes, ledger prose)
+  and keeps each one's sha256 and length, so text can be matched to its source later. `none` also leaves
   out those hashes and lengths. The policy and the suppressed fields are written to the manifest.
 - The command prints only counts. Tests use synthetic records only.
 
