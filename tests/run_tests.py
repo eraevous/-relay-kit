@@ -1186,9 +1186,11 @@ def finding_tests():
     # with relay-kit.json naming the repository
     bake(owner="sam", records="sam/records")
     found = at(one, baked, "list")
-    st = at(one, KIT / "tools" / "status.py", "--no-fetch", "--no-ci")
+    st = at(TMP, KIT / "tools" / "status.py", "--no-fetch", "--no-ci", env={"RELAYKIT_RECORDS": str(one / "records")})
     case("find: with relay-kit.json, the one clone of that repository below the current folder is used, and said so",
-         found[0] == 0 and HID in found[1] and "records found at" in found[2], str(found) + str(st)[:300])
+         found[0] == 0 and HID in found[1] and "records found at" in found[2], str(found))
+    case("find: status.py without --root uses the records handoff.py would find (RELAYKIT_RECORDS here) (review round 2)",
+         st[0] == 0 and "Open handoffs" in st[1], str(st)[:400])
     told = at(TMP / "find-home", baked, "list")
     case("find: no clone is refused with the clone command, and nothing is created",
          told[0] != 0 and "git clone https://github.com/sam/records" in told[2] and not (home / "handoffs").exists(), str(told))
@@ -1232,6 +1234,14 @@ def finding_tests():
     case("find: status --root is used as given, with no new owner check (review round 2)",
          asgiven[0] == 0 and "refused" not in asgiven[2], str(asgiven))
 
+    gl = TMP / "find-govlink"; records(gl / "r", gh); shutil.rmtree(gl / "r" / "governance")
+    (TMP / "find-other-gov").mkdir(); os.symlink(TMP / "find-other-gov", gl / "r" / "governance")
+    glink = at(gl, KIT / "tools" / "ledger_append.py", "decision", '{"status": "proposed", "decision": "x", "scope": "t"}', "--offline",
+               env={"RELAYKIT_RECORDS": str(gl / "r"), **actor})
+    glocal = at(gl / "r", KIT / "tools" / "ledger_append.py", "decision", '{"status": "proposed", "decision": "x", "scope": "t"}', "--offline", env=actor)
+    case("find: ledger_append without --dir refuses a governance folder that links out of the records (review round 2)",
+         glink[0] != 0 and glocal[0] != 0 and not list((TMP / "find-other-gov").iterdir()), str(glink) + str(glocal))
+
     two = TMP / "find-two"; two.mkdir(); records(two / "x", gh); records(two / "y", "git" + "@github.com:Sam/Records")
     several = at(two, baked, "list")
     case("find: two clones of the named repository are refused", several[0] != 0 and "several clones" in several[2], str(several))
@@ -1266,6 +1276,10 @@ def finding_tests():
     kept = at(here, KIT / "tools" / "ledger_append.py", "decision", '{"status": "proposed", "decision": "x", "scope": "t"}', "--offline", env=actor)
     viaenv = at(TMP, KIT / "tools" / "ledger_append.py", "decision", '{"status": "proposed", "decision": "x", "scope": "t"}', "--offline",
                 env={"RELAYKIT_RECORDS": str(one / "records"), **actor})
+    (here / "handoffs").mkdir(); (here / "handoffs" / ".ledger.json").write_text("not json", encoding="utf-8")
+    checked_here = at(here, KIT / "tools" / "ledger_append.py", "decision", '{"status": "proposed", "decision": "y", "scope": "t"}', "--offline", env=actor)
+    case("find: ledger_append with ./governance still makes the owner check on ./handoffs (review round 2)",
+         checked_here[0] != 0 and ".ledger.json" in checked_here[2], str(checked_here))
     case("find: ledger_append keeps ./governance when it exists, else uses the found records' governance folder",
          kept[0] == 0 and (here / "governance" / "decisions.jsonl").exists() and viaenv[0] == 0 and viaenv[1] == "DEC-001"
          and (one / "records" / "governance" / "decisions.jsonl").exists(), str(kept) + str(viaenv))

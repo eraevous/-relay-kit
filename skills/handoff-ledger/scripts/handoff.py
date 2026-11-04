@@ -54,8 +54,8 @@ def repo_id(url):
     The whole path must be owner/name, so https://elsewhere/x/owner/name doesn't pass for it."""
     u = str(url).strip()
     m = (re.fullmatch(r"([\w.-]+/[\w.-]+)", u) and ("github.com", u)
-         or (lambda m: m and (m.group(1), m.group(2)))(re.fullmatch(r"(?:https|ssh)://(?:[^@/]+@)?([\w.-]+(?::\d+)?)/([\w.-]+/[\w.-]+?)(?:\.git)?/?", u))
-         or (lambda m: m and (m.group(1), m.group(2)))(re.fullmatch(r"[\w.-]+@([\w.-]+):([\w.-]+/[\w.-]+?)(?:\.git)?/?", u)))
+         or (lambda m: m and (m.group(1), m.group(2)))(re.fullmatch(r"(?:https|ssh)://(?:[^@/]+@)?([\w.-]+(?::\d+)?)/([\w.-]+/[\w.-]+)/?", u))
+         or (lambda m: m and (m.group(1), m.group(2)))(re.fullmatch(r"[\w.-]+@([\w.-]+):([\w.-]+/[\w.-]+)/?", u)))
     if not m:
         return None
     host, path = m[0].lower().rstrip("."), m[1].lower()
@@ -104,6 +104,15 @@ def clone_of(folder, records):
 def contained(d, root):
     """handoffs/ and everything in it resolve inside root: no symlink leads out of the clone."""
     return d.resolve().is_relative_to(root) and all(p.resolve().is_relative_to(root) for p in d.rglob("*"))
+
+
+def records_folder(d, name):
+    """<records>/<name> (governance, say) next to a handoffs folder found without --dir, refused
+    when it leads out of the records (a symlink): the same containment as handoffs/."""
+    root, f = pathlib.Path(d).parent.resolve(), pathlib.Path(d).parent / name
+    if f.exists() and not contained(f, root):
+        raise Refused(f"{f} leads out of {root} (a symlink); pass the folder explicitly if that's intended")
+    return f
 
 
 def find_dir(given):

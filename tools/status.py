@@ -466,9 +466,12 @@ def main():
         if root is None and not (pathlib.Path("governance").is_dir() and not pathlib.Path("handoffs").is_dir()):
             d, where = led.find_dir(None)
             root = d.parent
+            led.records_folder(d, "governance")
             for n in (where, led.load_config(d)[2]):
                 if n:
                     print(f"note: {n}", file=sys.stderr)
+        elif root is None:   # governance/ and no handoffs/ here (a kit checkout): read as before
+            led.records_folder(pathlib.Path("handoffs"), "governance")
     except led.Refused as e:
         sys.exit(f"refused: {e}")
     root = root or pathlib.Path(".")

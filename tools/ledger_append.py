@@ -98,19 +98,21 @@ def main():
     ap.add_argument("json", help="the line's fields as a JSON object; id, date and recorded_by are filled if missing")
     ap.add_argument("--offline", action="store_true", help="allow appending without reading the shared copy")
     a = ap.parse_args()
-    if a.dir is None and pathlib.Path("governance").is_dir():
-        a.dir = pathlib.Path("governance")   # as before: the governance folder here
     if a.dir is None:
+        # ./governance as before; else next to the handoffs folder handoff.py finds. Either way the
+        # owner check handoff.py makes runs when there's a handoffs folder beside it, and the
+        # governance folder must not lead out of the records.
         m = handoff_module()
         try:
-            d, where = m.find_dir(None)
-        except m.Refused as e:
-            sys.exit(f"refused: {e}")
-        a.dir = d.parent / "governance"
-        if not a.dir.is_dir():
-            sys.exit(f"refused: {a.dir} doesn't exist; these records have no governance folder (pass --dir to create one)")
-        try:
-            note = m.load_config(d)[2]   # the owner check handoff.py makes: a mismatch is refused here too
+            if pathlib.Path("governance").is_dir():
+                d, where = pathlib.Path("handoffs"), None
+                a.dir = m.records_folder(d, "governance")
+            else:
+                d, where = m.find_dir(None)
+                a.dir = m.records_folder(d, "governance")
+                if not a.dir.is_dir():
+                    sys.exit(f"refused: {a.dir} doesn't exist; these records have no governance folder (pass --dir to create one)")
+            note = m.load_config(d)[2] if d.is_dir() else None
         except m.Refused as e:
             sys.exit(f"refused: {e}")
         for n in (where, note):
