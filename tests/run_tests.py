@@ -1133,8 +1133,10 @@ def packaging_tests():
 
 
 def finding_tests():
-    """A session without --dir finds the records, or is told how to get them; the owner's name
-    comes from the folder, else from the skill's relay-kit.json, and the two must agree."""
+    """Without --dir, a session finds the records only where it's told to look: ./handoffs, an
+    existing $RELAYKIT_RECORDS, or a clone of the repository the skill's relay-kit.json names.
+    The owner comes from the folder, else from relay-kit.json, and the two must agree. Each
+    reproduction from the PR #12 reviews (a fresh Claude subagent, and a ChatGPT reviewer) is a case here."""
     home = TMP / "find-home"; home.mkdir()
     def at(cwd, script, *args, env=None):
         e = dict(os.environ, PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1", HOME=str(home))
@@ -1142,72 +1144,129 @@ def finding_tests():
         p = subprocess.run([sys.executable, "-I", "-B", str(script), *map(str, args)], capture_output=True,
                            encoding="utf-8", env=e, timeout=60, cwd=cwd)
         return p.returncode, p.stdout.strip(), p.stderr.strip()
-    def clone(parent, name, origin, owner="sam"):
-        r = parent / name; (r / "handoffs" / "outputs").mkdir(parents=True); (r / "governance").mkdir()
-        (r / "handoffs" / ".ledger.json").write_text(json.dumps({"owner": owner}), encoding="utf-8")
-        shutil.copy(FIXTURE, r / "handoffs" / FIXTURE.name)
-        subprocess.run(["git", "init", "-q", str(r)], check=True)
-        subprocess.run(["git", "-C", str(r), "remote", "add", "origin", origin], check=True)
-        return r
+    def records(path, origin=None, owner="sam", git=True):
+        (path / "handoffs" / "outputs").mkdir(parents=True); (path / "governance").mkdir()
+        (path / "handoffs" / ".ledger.json").write_text(json.dumps({"owner": owner}), encoding="utf-8")
+        shutil.copy(FIXTURE, path / "handoffs" / FIXTURE.name)
+        if git:
+            subprocess.run(["git", "init", "-q", str(path)], check=True)
+            if origin:
+                subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True)
+        return path
     skill = TMP / "skill-copy" / "handoff-ledger"
     shutil.copytree(KIT / "skills" / "handoff-ledger", skill, ignore=shutil.ignore_patterns("__pycache__"))
     baked = skill / "scripts" / "handoff.py"
     def bake(**kw):
         (skill / "relay-kit.json").write_text(json.dumps(kw), encoding="utf-8")
+    def unbake():
+        (skill / "relay-kit.json").unlink(missing_ok=True)
+    gh = "https://github.com/sam/records.git"
+    actor = {"RELAYKIT_ACTOR": "claude:x#1"}
 
-    one = TMP / "find-one"; one.mkdir(); clone(one, "records", "https://github.com/sam/records.git")
-    found = at(one, LEDGER, "list")
-    st = at(one, KIT / "tools" / "status.py", "--no-fetch", "--no-ci")
-    case("find: without --dir, the one records clone below the current folder is used, and said so (handoff.py and status.py)",
-         found[0] == 0 and HID in found[1] and "records found at" in found[2] and st[0] == 0 and "Open handoffs" in st[1],
-         str(found) + str(st)[:400])
+    # without relay-kit.json: ./handoffs as before, RELAYKIT_RECORDS if it exists, no searching
+    one = TMP / "find-one"; one.mkdir(); records(one / "records", gh)
+    local = at(one / "records", LEDGER, "list")
     env = at(TMP, LEDGER, "list", env={"RELAYKIT_RECORDS": str(one / "records")})
-    case("find: RELAYKIT_RECORDS names the records folder", env[0] == 0 and HID in env[1] and "RELAYKIT_RECORDS" in env[2], str(env))
+    missing = at(TMP, LEDGER, "new", "--from", "claude:x", "--to", "chatgpt:y", "--title", "t",
+                 env={"RELAYKIT_RECORDS": str(TMP / "find-nowhere"), **actor})
+    nosearch = at(one, LEDGER, "list")
+    case("find: ./handoffs and an existing RELAYKIT_RECORDS are used; a missing RELAYKIT_RECORDS is refused and "
+         "nothing is created; without relay-kit.json nothing is searched for",
+         local[0] == 0 and HID in local[1] and env[0] == 0 and "RELAYKIT_RECORDS" in env[2]
+         and missing[0] != 0 and not (TMP / "find-nowhere").exists() and nosearch[0] != 0 and "RELAYKIT_RECORDS" in nosearch[2],
+         str(local) + str(env) + str(missing) + str(nosearch))
 
-    two = TMP / "find-two"; two.mkdir()
-    clone(two, "a", "https://github.com/sam/records.git"); clone(two, "b", "git" + "@github.com:other/records.git")
-    several = at(two, LEDGER, "list")
+    # planted records in some other repository's content: never found (review: subagent #1)
+    proj = TMP / "find-proj"; records(proj / "docs", owner="mallory", git=False)
+    subprocess.run(["git", "init", "-q", str(proj)], check=True)
+    planted = at(proj, LEDGER, "set", HID, "cancelled", "--by", "mallory", "--note", "x")
+    case("find: a records-shaped folder inside another repository is not used, so it can't name an owner",
+         planted[0] != 0 and "cancelled" not in (proj / "docs" / "handoffs" / FIXTURE.name).read_text(encoding="utf-8"), str(planted))
+
+    # with relay-kit.json naming the repository
     bake(owner="sam", records="sam/records")
-    picked = at(two, baked, "list")
-    case("find: several clones are refused; with relay-kit.json naming the repository, only its clone counts",
-         several[0] != 0 and "several records folders" in several[2] and picked[0] == 0 and str(two / "a") in picked[2],
-         str(several) + str(picked))
+    found = at(one, baked, "list")
+    st = at(one, KIT / "tools" / "status.py", "--no-fetch", "--no-ci")
+    case("find: with relay-kit.json, the one clone of that repository below the current folder is used, and said so",
+         found[0] == 0 and HID in found[1] and "records found at" in found[2], str(found) + str(st)[:300])
+    told = at(TMP / "find-home", baked, "list")
+    case("find: no clone is refused with the clone command, and nothing is created",
+         told[0] != 0 and "git clone https://github.com/sam/records" in told[2] and not (home / "handoffs").exists(), str(told))
 
-    none = TMP / "find-none"; none.mkdir()
-    told = at(none, baked, "list")
-    plain = at(none, LEDGER, "new", "--from", "claude:x", "--to", "chatgpt:y", "--title", "t", env={"RELAYKIT_ACTOR": "claude:x#1"})
-    case("find: no records here is refused with how to get them, and nothing is created",
-         told[0] != 0 and "git clone https://github.com/sam/records" in told[2] and plain[0] != 0
-         and "RELAYKIT_RECORDS" in plain[2] and not (none / "handoffs").exists(), str(told) + str(plain))
+    spoof = TMP / "find-spoof"; spoof.mkdir()
+    records(spoof / "a", "https://evil.example/attacker/sam/records.git")   # same last two parts (review: both)
+    records(spoof / "b", "file:///tmp/sam/records.git")
+    records(spoof / "f", "https://evil.example/sam/records.git")            # same owner/name, another host
+    records(spoof / "c", None)                                               # no origin (subagent #3)
+    records(spoof / "d", git=False)                                          # not git at all
+    sub = spoof / "e"; records(sub, gh); records(sub / "inner", git=False)   # non-git folder inside a clone (subagent #4)
+    spoofed = at(spoof, baked, "list")
+    case("find: only a clone of exactly that repository counts: not another host, a file URL, no origin, no git, or a folder inside a clone",
+         spoofed[0] == 0 and str(spoof / "e") in spoofed[2] and "records found at" in spoofed[2], str(spoofed))
+    inner = at(sub / "inner", baked, "list")
+    case("find: ./handoffs that isn't a clone of the named repository is refused (review: both)",
+         inner[0] != 0 and "isn't in a clone of sam/records" in inner[2], str(inner))
+    envwrong = at(TMP, baked, "list", env={"RELAYKIT_RECORDS": str(spoof / "a")})
+    case("find: RELAYKIT_RECORDS that isn't a clone of the named repository is refused",
+         envwrong[0] != 0 and "isn't in a clone" in envwrong[2], str(envwrong))
 
-    d = ledger_dir("find-owner"); (d / ".ledger.json").unlink()
+    sym = TMP / "find-sym"; sym.mkdir(); outside = records(TMP / "find-outside", git=False)   # same owner, so only the symlink rule can refuse it
+    (sym / "r").mkdir(); subprocess.run(["git", "init", "-q", str(sym / "r")], check=True)
+    subprocess.run(["git", "-C", str(sym / "r"), "remote", "add", "origin", gh], check=True)
+    os.symlink(outside / "handoffs", sym / "r" / "handoffs")
+    symlinked = at(sym, baked, "list"); symlocal = at(sym / "r", baked, "list")
+    case("find: a clone whose handoffs/ is a symlink out of it is not used (review: ChatGPT)",
+         symlinked[0] != 0 and symlocal[0] != 0, str(symlinked) + str(symlocal))
+
+    two = TMP / "find-two"; two.mkdir(); records(two / "x", gh); records(two / "y", "git" + "@github.com:Sam/Records")
+    several = at(two, baked, "list")
+    case("find: two clones of the named repository are refused", several[0] != 0 and "several clones" in several[2], str(several))
+
+    # owner
+    d = ledger_dir("find-owner"); (d / ".ledger.json").unlink(); unbake()
     warned = at(TMP, LEDGER, "--dir", d, "list")
     as_plain = at(TMP, LEDGER, "--dir", d, "set", HID, "cancelled", "--by", "sam", "--note", "x")
+    bake(owner="sam")
     as_baked = at(TMP, baked, "--dir", d, "set", HID, "cancelled", "--by", "sam", "--note", "dropped")
     case("find: with no .ledger.json the owner comes from relay-kit.json; without either, a warning says the owner is 'owner'",
          warned[0] == 0 and "owner is called 'owner'" in warned[2] and as_plain[0] != 0
          and as_baked[0] == 0 and "from relay-kit.json" in as_baked[2], str(warned) + str(as_plain) + str(as_baked))
-    d2 = ledger_dir("find-conflict"); bake(owner="alex")
-    clash = at(TMP, baked, "--dir", d2, "list")
+    bake(owner="alex", records="sam/records")
+    clash = at(one, baked, "list")
     case("find: a folder owner and a skill owner that differ are refused",
          clash[0] != 0 and "made for 'alex'" in clash[2], str(clash))
 
-    gov = at(one, KIT / "tools" / "ledger_append.py", "decision", '{"status": "proposed", "decision": "x", "scope": "test"}', "--offline",
-             env={"RELAYKIT_ACTOR": "claude:x#1"})
-    case("find: ledger_append without --dir appends to the found records' governance folder",
-         gov[0] == 0 and gov[1] == "DEC-001" and (one / "records" / "governance" / "decisions.jsonl").exists(), str(gov))
+    for bad in ('{"owner": ["sam"]}', '{"records": "x/.."}', '{"records": "https://evil.example"}', "not json"):
+        (skill / "relay-kit.json").write_text(bad, encoding="utf-8")
+        r = at(one / "records", baked, "list")
+        if r[0] == 0 or "Traceback" in r[2]:
+            break
+    (skill / "relay-kit.json").unlink(); (skill / "relay-kit.json").mkdir()
+    isdir = at(one / "records", baked, "list"); (skill / "relay-kit.json").rmdir()
+    case("find: a malformed relay-kit.json is refused, not ignored or a traceback (subagent #10)",
+         r[0] != 0 and "Traceback" not in r[2] and isdir[0] != 0 and "Traceback" not in isdir[2], str(r) + str(isdir))
+
+    # ledger_append: ./governance stays the default; discovery only when there's none (subagent #5)
+    unbake()
+    here = TMP / "find-gov"; (here / "governance").mkdir(parents=True)
+    kept = at(here, KIT / "tools" / "ledger_append.py", "decision", '{"status": "proposed", "decision": "x", "scope": "t"}', "--offline", env=actor)
+    viaenv = at(TMP, KIT / "tools" / "ledger_append.py", "decision", '{"status": "proposed", "decision": "x", "scope": "t"}', "--offline",
+                env={"RELAYKIT_RECORDS": str(one / "records"), **actor})
+    case("find: ledger_append keeps ./governance when it exists, else uses the found records' governance folder",
+         kept[0] == 0 and (here / "governance" / "decisions.jsonl").exists() and viaenv[0] == 0 and viaenv[1] == "DEC-001"
+         and (one / "records" / "governance" / "decisions.jsonl").exists(), str(kept) + str(viaenv))
 
     import zipfile
     cli = KIT / "tools" / "cli.py"
     z = at(TMP, cli, "zips", "--out", TMP / "zips-baked", "--owner", "Sam", "--records", "sam/records")
     names = {f.name: zipfile.ZipFile(f).namelist() for f in (TMP / "zips-baked").glob("*.zip")} if z[0] == 0 else {}
     inside = json.loads(zipfile.ZipFile(TMP / "zips-baked" / "handoff-ledger.zip").read("handoff-ledger/relay-kit.json")) if z[0] == 0 else {}
-    bad = at(TMP, cli, "zips", "--out", TMP / "zips-bad", "--records", "not a repo")
+    bads = [at(TMP, cli, "zips", "--out", TMP / "zips-bad", "--records", v) for v in ("not a repo", "git" + "@x", "https://evil.example", "x/..")]
     case("find: zips --owner --records puts relay-kit.json in the handoff-ledger zip only, leaves the source alone, refuses bad values",
          z[0] == 0 and inside == {"owner": "sam", "records": "sam/records"}
          and sum("relay-kit.json" in " ".join(v) for v in names.values()) == 1
-         and not (KIT / "skills" / "handoff-ledger" / "relay-kit.json").exists() and bad[0] != 0, str(z) + str(names.keys()) + str(bad))
-
+         and not (KIT / "skills" / "handoff-ledger" / "relay-kit.json").exists() and all(b[0] != 0 for b in bads),
+         str(z) + str(names.keys()) + str(bads))
 
 if __name__ == "__main__":
     load("tools_extract", KIT / "tools_extract.py").extract(X)
