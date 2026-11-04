@@ -959,7 +959,7 @@ def learning_tests():
          and f"outputs/{hid}.md" in t and "NOT AUTHORIZED YET" in t and run(LEDGER, "--dir", d, "check")[0] == 0, no[2] + t[:400])
 
 
-# ---------------- deployable: the relay-kit command and init (DEC-041) ----------------
+# ---------------- deployable: the relay-kit command and init (DEC-042) ----------------
 def deploy_tests():
     link = TMP / "pkgpath"; link.mkdir()
     os.symlink(KIT / "tools", link / "relaykit")   # the checkout's tools/ as the installed `relaykit` package
