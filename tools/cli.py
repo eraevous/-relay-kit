@@ -128,8 +128,11 @@ def zips(argv):
         if not re.fullmatch(r"[\w.:-]+", settings["owner"]):
             sys.exit("refused: --owner must be one word (letters, digits, . : - _)")
     if a.records:
-        if not re.fullmatch(r"[\w.-]+/[\w.-]+|(https://|git@)[\w./:@-]+", a.records.strip()):
-            sys.exit("refused: --records must be owner/name or a git URL")
+        spec = importlib.util.spec_from_file_location("relaykit_handoff", SCRIPTS["handoff"])
+        led = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(led)
+        if not led.repo_id(a.records):
+            sys.exit("refused: --records must be owner/name (GitHub) or a repository URL ending in owner/name")
         settings["records"] = a.records.strip()
     spec = importlib.util.spec_from_file_location("relaykit_extract", SCRIPTS["zips"])
     ext = importlib.util.module_from_spec(spec)

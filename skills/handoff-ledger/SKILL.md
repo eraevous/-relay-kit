@@ -30,14 +30,18 @@ handoffs/
   outputs/HO-RK-20261101-K7QF.md   the recipient's result, same id
 ```
 
-**Finding the folder.** Run the script from the records (the parent of `handoffs/`), or
-pass `--dir`. Otherwise it uses `$RELAYKIT_RECORDS/handoffs`, or the one records clone it
-finds one level below the current folder or the home folder. If this skill has a
-`relay-kit.json` naming the records repository (`{"owner": "sam", "records": "sam/records"}`,
-written by `relay-kit zips --owner --records`), only a clone of that repository counts, and
-when there isn't one the script says where to get it. **At the start of a session with no
-records:** get that repository (clone it; in Claude Code on the web, add it to the session),
-or ask the owner to connect the folder. Don't create a new `handoffs/` in its place.
+**Finding the folder.** `--dir` is used as given. Without it the script uses `./handoffs`,
+then `$RELAYKIT_RECORDS/handoffs` (which must exist). It searches further only when this
+skill has a `relay-kit.json` naming the records repository (`{"owner": "sam", "records":
+"sam/records"}`, written by `relay-kit zips --owner --records`): then it looks for a clone of
+exactly that repository directly below the current folder or the home folder, and every
+folder it picks without `--dir` must be inside such a clone. When there's none it says where
+to get it. **At the start of a session with no records:** get that repository (clone it; in
+Claude Code on the web, add it to the session), or ask the owner to connect the folder.
+Don't create a new `handoffs/` in its place. The settings belong to this copy of the skill:
+the `relay-kit` command uses its own copy and doesn't see them. The origin check tells the
+records apart from other folders; it doesn't authenticate them (anyone who can write to your
+folders can set an origin), so it guards against mistakes, not someone with your account.
 
 Keep the folder narrow: handoffs and their outputs only, and keep it private: it
 holds the owner's words. The owner decides where it lives (a private repo, a Drive

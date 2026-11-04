@@ -445,7 +445,7 @@ def jsonl(path, gaps):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", type=pathlib.Path, default=None,
-                    help="the records folder (default: found as handoff.py finds it: $RELAYKIT_RECORDS, ., or the clone nearby)")
+                    help="the records folder (default: found as handoff.py finds it: ., $RELAYKIT_RECORDS, or the clone its relay-kit.json names)")
     ap.add_argument("--no-fetch", action="store_true")
     ap.add_argument("--no-ci", action="store_true", help="don't read the checks on the shared branch")
     ap.add_argument("--since", help="show ledger lines and contract changes since this date (from the start of that day, UTC) or git revision "
@@ -459,15 +459,22 @@ def main():
                     help="flag a sent handoff with no acknowledgement, or a claimed one with no log line, after this long (default 24)")
     a = ap.parse_args()
     root, gaps = a.root, []
-    if root is None:
-        led = load_ledger()
-        try:
+    led = load_ledger()
+    # Without --root: the records handoff.py would find (a folder with governance/ and no handoffs/,
+    # such as a kit checkout, is read as before), with the same owner check. --root is used as given.
+    try:
+        if root is None and not (pathlib.Path("governance").is_dir() and not pathlib.Path("handoffs").is_dir()):
             d, where = led.find_dir(None)
-        except led.Refused as e:
-            sys.exit(f"refused: {e}")
-        root = d.parent
-        if where:
-            print(f"note: {where}", file=sys.stderr)
+            root = d.parent
+            led.records_folder(d, "governance")
+            for n in (where, led.load_config(d)[2]):
+                if n:
+                    print(f"note: {n}", file=sys.stderr)
+        elif root is None:   # governance/ and no handoffs/ here (a kit checkout): read as before
+            led.records_folder(pathlib.Path("handoffs"), "governance")
+    except led.Refused as e:
+        sys.exit(f"refused: {e}")
+    root = root or pathlib.Path(".")
 
     fresh = freshness(root, not a.no_fetch, gaps)
     rows, unauthorized = handoffs(root, gaps, a.stale_hours)

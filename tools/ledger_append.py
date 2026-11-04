@@ -93,20 +93,31 @@ def shared_text(path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dir", type=pathlib.Path, default=None,
-                    help="the governance folder (default: next to the handoffs folder handoff.py finds)")
+                    help="the governance folder (default: ./governance, else next to the handoffs folder handoff.py finds)")
     ap.add_argument("kind", choices=sorted(KINDS))
     ap.add_argument("json", help="the line's fields as a JSON object; id, date and recorded_by are filled if missing")
     ap.add_argument("--offline", action="store_true", help="allow appending without reading the shared copy")
     a = ap.parse_args()
     if a.dir is None:
+        # ./governance as before; else next to the handoffs folder handoff.py finds. Either way the
+        # owner check handoff.py makes runs when there's a handoffs folder beside it, and the
+        # governance folder must not lead out of the records.
         m = handoff_module()
         try:
-            d, where = m.find_dir(None)
+            if pathlib.Path("governance").is_dir():
+                d, where = pathlib.Path("handoffs"), None
+                a.dir = m.records_folder(d, "governance")
+            else:
+                d, where = m.find_dir(None)
+                a.dir = m.records_folder(d, "governance")
+                if not a.dir.is_dir():
+                    sys.exit(f"refused: {a.dir} doesn't exist; these records have no governance folder (pass --dir to create one)")
+            note = m.load_config(d)[2] if d.is_dir() else None
         except m.Refused as e:
             sys.exit(f"refused: {e}")
-        a.dir = d.parent / "governance"
-        if where:
-            print(f"note: {where}", file=sys.stderr)
+        for n in (where, note):
+            if n:
+                print(f"note: {n}", file=sys.stderr)
     name, prefix = KINDS[a.kind]
     path = a.dir / name
     try:

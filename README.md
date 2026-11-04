@@ -26,9 +26,10 @@ You need Python 3.10+ and git. Everything is standard library.
    for other assistants, paste the `SKILL.md` you need.
 4. **Start every session the same way:**
    `export RELAYKIT_ACTOR=<assistant>:<lane>#<session id>` (for example `claude:research#01AB`),
-   then `relay-kit status`, from the records or a folder that contains them
-   (or `--root my-records`). A session that has no copy of the records is told where to get
-   them: a clone, or in Claude Code on the web, the repository added to the session.
+   then `relay-kit status` from inside the records (or `--root my-records`, or set
+   `RELAYKIT_RECORDS`). An assistant using the uploaded skill can do more: its own copy finds
+   a clone of the repository named by `--records`, or says how to get one. The `relay-kit`
+   command doesn't read those settings.
 5. **Hand work over** (worked example below), and record decisions with
    `relay-kit ledger append --dir my-records/governance decision '{"status": "proposed", "decision": "...", "scope": "..."}'`.
 

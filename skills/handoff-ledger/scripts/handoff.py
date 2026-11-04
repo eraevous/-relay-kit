@@ -11,8 +11,8 @@ single-line fields; log lines written inside the Log section; an actor with a se
 or recipient (acknowledged, in_progress, completed), or the owner. The owner's name
 comes from <dir>/.ledger.json ({"owner": "sam"}); without it, from this copy of the skill's
 relay-kit.json (written by `relay-kit zips --owner`); without either it is "owner", with a
-warning. Without --dir, the folder is $RELAYKIT_RECORDS/handoffs, else ./handoffs, else the
-one records clone found next to here or in the home folder (see find_dir).
+warning. Without --dir, the folder is ./handoffs, else $RELAYKIT_RECORDS/handoffs, else a
+clone of the records repository relay-kit.json names (see find_dir).
 Writes go to a temporary file that replaces the original, under a lock file, and are
 refused if the file changed after it was read, if --expect names another state, or if
 the upstream branch changed the file since this clone last pulled. `check --base REF`
@@ -48,66 +48,121 @@ SKILL_CONFIG = pathlib.Path(__file__).resolve().parent.parent / "relay-kit.json"
 OWNER_RE = r"[\w.:-]+"
 
 
+def repo_id(url):
+    """(host, "owner/name"), lowercased, from owner/name (GitHub), https://host/owner/name[.git],
+    ssh://[user@]host/owner/name[.git] or user@host:owner/name[.git]; None for anything else.
+    The whole path must be owner/name, so https://elsewhere/x/owner/name doesn't pass for it."""
+    u = str(url).strip()
+    m = (re.fullmatch(r"([\w.-]+/[\w.-]+)", u) and ("github.com", u)
+         or (lambda m: m and (m.group(1), m.group(2)))(re.fullmatch(r"(?:https|ssh)://(?:[^@/]+@)?([\w.-]+(?::\d+)?)/([\w.-]+/[\w.-]+)/?", u))
+         or (lambda m: m and (m.group(1), m.group(2)))(re.fullmatch(r"[\w.-]+@([\w.-]+):([\w.-]+/[\w.-]+)/?", u)))
+    if not m:
+        return None
+    host, path = m[0].lower().rstrip("."), m[1].lower()
+    path = path[:-4] if path.endswith(".git") else path
+    return (host, path) if all(x not in ("", ".", "..") for x in path.split("/")) else None
+
+
 def skill_config():
     """Settings written into this copy of the skill by `relay-kit zips --owner --records`:
-    {"owner": "sam", "records": "sam/records"}. {} when there are none."""
+    {"owner": "sam", "records": "sam/records"}. {} when there are none. A file that's there
+    but malformed is refused, never ignored."""
     if not SKILL_CONFIG.exists():
         return {}
     try:
         data = json.loads(SKILL_CONFIG.read_text(encoding="utf-8"))
-    except ValueError:
-        raise Refused(f"{SKILL_CONFIG} isn't valid JSON")
-    if not isinstance(data, dict):
-        raise Refused(f"{SKILL_CONFIG} must be a JSON object")
-    owner = str(data.get("owner", "")).strip().lower()
+    except (OSError, ValueError) as e:
+        raise Refused(f"{SKILL_CONFIG} can't be read as JSON ({e})")
+    if not isinstance(data, dict) or not all(isinstance(data.get(k, ""), str) for k in ("owner", "records")):
+        raise Refused(f'{SKILL_CONFIG} must be a JSON object like {{"owner": "sam", "records": "sam/records"}}')
+    owner, records = data.get("owner", "").strip().lower(), data.get("records", "").strip()
     if owner and not re.fullmatch(OWNER_RE, owner):
         raise Refused(f"{SKILL_CONFIG}: owner must be one word (letters, digits, . : - _)")
-    return {"owner": owner, "records": str(data.get("records", "")).strip()}
+    if records and not repo_id(records):
+        raise Refused(f"{SKILL_CONFIG}: records must be owner/name or a repository URL ending in owner/name")
+    return {"owner": owner, "records": records}
 
 
-def repo_key(url):
-    """'owner/name' from a GitHub-style URL or owner/name, lowercased, without .git."""
-    parts = re.split(r"[/:]", url.strip().lower().removesuffix(".git").rstrip("/"))
-    return "/".join(parts[-2:]) if len(parts) >= 2 else ""
+def clone_of(folder, records):
+    """True when folder is the top of a git clone whose origin is the records repository. (Content
+    inside some other repository, or a plain folder, doesn't count: git would report the
+    enclosing repository's origin for it.)"""
+    env = {k: v for k, v in os.environ.items()   # git in a hook or alias would otherwise follow GIT_DIR
+           if not (k.startswith("GIT_") and k not in ("GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS"))}
+    def g(*a):
+        try:
+            return subprocess.run(["git", "-C", str(folder), *a], capture_output=True, text=True, timeout=30, env=env)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise Refused(f"git couldn't check {folder} ({e}); pass --dir to choose the records yourself")
+    top = g("rev-parse", "--show-toplevel")
+    if top.returncode or pathlib.Path(top.stdout.strip()).resolve() != pathlib.Path(folder).resolve():
+        return False
+    url = g("remote", "get-url", "origin")
+    return url.returncode == 0 and repo_id(url.stdout) is not None and repo_id(url.stdout) == repo_id(records)
+
+
+def contained(d, root):
+    """handoffs/ and everything in it resolve inside root: no symlink leads out of the clone."""
+    return d.resolve().is_relative_to(root) and all(p.resolve().is_relative_to(root) for p in d.rglob("*"))
+
+
+def records_folder(d, name):
+    """<records>/<name> (governance, say) next to a handoffs folder found without --dir, refused
+    when it leads out of the records (a symlink): the same containment as handoffs/."""
+    root, f = pathlib.Path(d).parent.resolve(), pathlib.Path(d).parent / name
+    if f.exists() and not contained(f, root):
+        raise Refused(f"{f} leads out of {root} (a symlink); pass the folder explicitly if that's intended")
+    return f
 
 
 def find_dir(given):
     """The handoffs folder to use, and a note saying how it was found (None when it was given or
-    is ./handoffs). Order: --dir; $RELAYKIT_RECORDS/handoffs; ./handoffs; else a records clone one
-    level below the current folder or the home folder (a folder whose handoffs/ holds a
-    .ledger.json). When this skill's relay-kit.json names the records repository, only a clone of
-    that repository counts. Exactly one match is used; none or several are refused, with what to do."""
+    is ./handoffs). --dir is used as given: it's the caller's choice. Otherwise: ./handoffs (as
+    before); $RELAYKIT_RECORDS/handoffs, which must exist; then, only when this skill's
+    relay-kit.json names the records repository, a clone of exactly that repository directly below
+    the current folder or the home folder. Without that setting nothing is searched for. With it,
+    every implicit choice must be inside a clone of that repository. None or several are refused,
+    with what to do; nothing is created."""
     if given is not None:
         return given, None
-    env = os.environ.get("RELAYKIT_RECORDS", "").strip()
-    if env:
-        return pathlib.Path(env) / "handoffs", f"records from RELAYKIT_RECORDS: {env}"
+    records = skill_config().get("records", "")
+    def checked(d, note):
+        """An implicit choice must be the records this skill names, when it names them: a clone of
+        that repository, with handoffs/ really inside it (not a symlink out)."""
+        if records:
+            root = d.parent.resolve()
+            if not clone_of(root, records) or not contained(d, root):
+                raise Refused(f"{d.resolve()} isn't in a clone of {records}, the records this copy of the skill "
+                              "was made for; run from that clone, or pass --dir to choose a folder yourself")
+        return d, note
     here = pathlib.Path("handoffs")
     if here.is_dir():
-        return here, None
-    records = skill_config().get("records", "")
+        return checked(here, None)
+    env = os.environ.get("RELAYKIT_RECORDS", "").strip()
+    if env:
+        d = pathlib.Path(env) / "handoffs"
+        if not d.is_dir():
+            raise Refused(f"RELAYKIT_RECORDS={env} has no handoffs folder; fix the path or unset it")
+        return checked(d, f"records from RELAYKIT_RECORDS: {env}")
+    if not records:
+        raise Refused("no handoffs folder here. Get the owner's records (a clone of their private records "
+                      "repository, or the folder connected from their computer), then run from it, pass "
+                      "--dir <records>/handoffs, or set RELAYKIT_RECORDS=<records>")
     found = []
-    for base in dict.fromkeys([pathlib.Path.cwd(), pathlib.Path.home()]):
-        for cfg in sorted(base.glob("*/handoffs/.ledger.json")):
-            clone = cfg.parent.parent
-            if records:
-                url = subprocess.run(["git", "-C", str(clone), "remote", "get-url", "origin"],
-                                     capture_output=True, text=True).stdout
-                if repo_key(url) != repo_key(records):
-                    continue
-            found.append(cfg.parent.resolve())
+    for base in dict.fromkeys([pathlib.Path.cwd().resolve(), pathlib.Path.home().resolve()]):
+        for d in sorted(base.glob("*/handoffs")):
+            clone = d.parent
+            if d.is_dir() and not clone.is_symlink() and contained(d, clone.resolve()) and clone_of(clone, records):
+                found.append(d.resolve())
     found = list(dict.fromkeys(found))
     if len(found) == 1:
-        return found[0], f"records found at {found[0].parent}"
+        return found[0], f"records found at {found[0].parent} (a clone of {records})"
     if found:
-        raise Refused("several records folders found (" + ", ".join(str(f.parent) for f in found) + "); pass --dir <one>/handoffs")
-    if records:
-        raise Refused(f"no handoffs folder here. This copy of the skill keeps its records in {records}: "
-                      f"clone it next to here (git clone https://github.com/{repo_key(records)}), or in Claude Code "
-                      "on the web add that repository to the session; then rerun, or pass --dir <clone>/handoffs")
-    raise Refused("no handoffs folder here. Get the owner's records (a clone of their private records repository, "
-                  "or the folder connected from their computer) and pass --dir <records>/handoffs, "
-                  "or set RELAYKIT_RECORDS=<records>")
+        raise Refused(f"several clones of {records} found (" + ", ".join(str(f.parent) for f in found) + "); pass --dir <one>/handoffs")
+    host, path = repo_id(records)
+    raise Refused(f"no handoffs folder here. This copy of the skill keeps its records in {records}: clone it "
+                  f"into this folder or your home folder (git clone https://{host}/{path}), or in Claude Code on "
+                  "the web add that repository to the session; then rerun, or pass --dir <clone>/handoffs")
 
 
 def load_config(d):
