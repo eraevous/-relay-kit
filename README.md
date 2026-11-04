@@ -18,13 +18,17 @@ You need Python 3.10+ and git. Everything is standard library.
    `relay-kit init my-records --owner <your name> --lanes research=RS`, then follow the printed
    steps: git init, turn on the pre-push hook, commit, and push to a **private** repository.
    (A remote that isn't GitHub works too; make a bare one with `git init --bare -b main`.)
-3. **Give your assistants the skills:** `relay-kit zips` builds one zip per skill in
-   `relay-kit-upload/`. Upload them as skills on claude.ai; for Claude Code, unzip them into
+3. **Give your assistants the skills:**
+   `relay-kit zips --owner <your name> --records <you>/my-records` builds one zip per skill in
+   `relay-kit-upload/`. The two settings go into the handoff-ledger zip, so every session
+   knows the owner and, when it doesn't have the records, where to get them. Upload them as skills on claude.ai; for Claude Code, unzip them into
    `~/.claude/skills` (`unzip -o relay-kit-upload/handoff-ledger.zip -d ~/.claude/skills`);
    for other assistants, paste the `SKILL.md` you need.
 4. **Start every session the same way:**
    `export RELAYKIT_ACTOR=<assistant>:<lane>#<session id>` (for example `claude:research#01AB`),
-   then `relay-kit status --root my-records`.
+   then `relay-kit status`, from the records or a folder that contains them
+   (or `--root my-records`). A session that has no copy of the records is told where to get
+   them: a clone, or in Claude Code on the web, the repository added to the session.
 5. **Hand work over** (worked example below), and record decisions with
    `relay-kit ledger append --dir my-records/governance decision '{"status": "proposed", "decision": "...", "scope": "..."}'`.
 
@@ -108,8 +112,10 @@ JavaScript in a signed-in page, such as Claude's built-in browser or Claude in C
 ## Setup
 
 - **Private records:** keep a private repo or folder for handoffs and the decision and
-  challenge ledgers, since they hold the owner's words. Put a `.ledger.json` in the
-  handoff folder naming the owner: `{"owner": "sam"}`.
+  challenge ledgers, since they hold the owner's words. `relay-kit init` makes one, with
+  `handoffs/.ledger.json` naming the owner (`{"owner": "sam"}`). For a folder you made by
+  hand, add that file, or build the skills with `relay-kit zips --owner sam`; without
+  either, the owner is called `owner` and the script warns.
 - **Names:** selective-self-distillation takes `--user-names` and `--assistant-names`, and
   thread-seed takes `--names ChatGPT=Ada`, so transcripts that use names instead of
   "You"/"ChatGPT" are read correctly.

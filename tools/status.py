@@ -444,7 +444,8 @@ def jsonl(path, gaps):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--root", type=pathlib.Path, default=pathlib.Path("."))
+    ap.add_argument("--root", type=pathlib.Path, default=None,
+                    help="the records folder (default: found as handoff.py finds it: $RELAYKIT_RECORDS, ., or the clone nearby)")
     ap.add_argument("--no-fetch", action="store_true")
     ap.add_argument("--no-ci", action="store_true", help="don't read the checks on the shared branch")
     ap.add_argument("--since", help="show ledger lines and contract changes since this date (from the start of that day, UTC) or git revision "
@@ -458,6 +459,15 @@ def main():
                     help="flag a sent handoff with no acknowledgement, or a claimed one with no log line, after this long (default 24)")
     a = ap.parse_args()
     root, gaps = a.root, []
+    if root is None:
+        led = load_ledger()
+        try:
+            d, where = led.find_dir(None)
+        except led.Refused as e:
+            sys.exit(f"refused: {e}")
+        root = d.parent
+        if where:
+            print(f"note: {where}", file=sys.stderr)
 
     fresh = freshness(root, not a.no_fetch, gaps)
     rows, unauthorized = handoffs(root, gaps, a.stale_hours)

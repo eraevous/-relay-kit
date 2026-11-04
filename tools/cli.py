@@ -6,7 +6,7 @@
     relay-kit ledger check [--dir governance] [...]   tools/check_ledgers.py
     relay-kit ledger append [--dir governance] decision|challenge '<json>'   tools/ledger_append.py
     relay-kit new-id --prefix C --lane AEC [...]      tools/new_id.py
-    relay-kit zips [--out DIR]                        one zip per skill (default ./relay-kit-upload)
+    relay-kit zips [--out DIR] [--owner NAME --records OWNER/REPO]   one zip per skill (default ./relay-kit-upload)
     relay-kit --version
 
 Each subcommand runs the same script the checkout runs (python3 tools/status.py and so on),
@@ -109,7 +109,8 @@ Next (init doesn't run git or create anything outside {out}):
   git add . && git commit -m "Records, from relay-kit init"
   # create a PRIVATE repository on GitHub, then: git remote add origin <url> && git push -u origin main
   export RELAYKIT_ACTOR=<assistant>:<lane>#<session id>
-  relay-kit status --root .""")
+  relay-kit status --root .
+  # skills that know these records: relay-kit zips --owner {owner} --records <owner/repo>""")
 
 
 def zips(argv):
@@ -118,15 +119,26 @@ def zips(argv):
     import argparse, importlib.util
     ap = argparse.ArgumentParser(prog="relay-kit zips", description=zips.__doc__)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path.cwd() / "relay-kit-upload")
+    ap.add_argument("--owner", help="write the owner's name into the handoff-ledger zip, used where a handoffs folder has no .ledger.json")
+    ap.add_argument("--records", help="the records repository (owner/name or URL), so a session without it is told where to get it")
     a = ap.parse_args(argv)
+    settings = {}
+    if a.owner:
+        settings["owner"] = a.owner.strip().lower()
+        if not re.fullmatch(r"[\w.:-]+", settings["owner"]):
+            sys.exit("refused: --owner must be one word (letters, digits, . : - _)")
+    if a.records:
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+|(https://|git@)[\w./:@-]+", a.records.strip()):
+            sys.exit("refused: --records must be owner/name or a git URL")
+        settings["records"] = a.records.strip()
     spec = importlib.util.spec_from_file_location("relaykit_extract", SCRIPTS["zips"])
     ext = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ext)
     try:
-        made = ext.build_zips(a.out, root=SKILLS.parent)
+        made = ext.build_zips(a.out, root=SKILLS.parent, settings=settings or None)
     except ValueError as e:
         sys.exit(f"refused: {e}")
-    print(f"{len(made)} skill zips in {a.out.resolve()}")
+    print(f"{len(made)} skill zips in {a.out.resolve()}" + (f"; handoff-ledger.zip carries {settings}" if settings else ""))
 
 
 def main(argv=None):
