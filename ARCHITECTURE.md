@@ -38,7 +38,7 @@ Registry: [governance/contracts.json](governance/contracts.json).
 | `relay-kit/export@1` | read-only export: records file and coverage manifest | [docs/export.md](docs/export.md) |
 | `relay-kit/lifecycle@1` | what the ledgers say is open, settled, in force or contested, shared by every reader | [docs/lifecycle.md](docs/lifecycle.md) |
 | `relay-kit/cockpit@4` | static control surface: index.html and the cockpit.json it was built from | [docs/cockpit.md](docs/cockpit.md) |
-| `relay-kit/prs@1` | governance/pr-state.jsonl: pull-request state read from GitHub at build time | [docs/prs.md](docs/prs.md) |
+| `relay-kit/prs@2` | governance/pr-state.jsonl: pull-request state read from GitHub at build time | [docs/prs.md](docs/prs.md) |
 | `relay-kit/mcp@1` | read-only MCP server over the records (stdio) | [docs/mcp.md](docs/mcp.md) |
 
 **How a contract changes:** only by a new version. The spec, every implementer and the
@@ -87,7 +87,7 @@ Run/Drift and the other surfaces of the v0.4 design prototype) plus the `cockpit
 It keeps DEC-019 by construction: its buttons only compose lines for the owner to paste, so the
 ledger still changes only through a human-run `ledger_append` or `handoff set`. Its one new record
 is `governance/budget.jsonl`, append-only, written by `relay-kit budget-append`, never by the page.
-**The pull-request reader** ([tools/prs.py](tools/prs.py), `relay-kit/prs@1`) is the one part of the kit that
+**The pull-request reader** ([tools/prs.py](tools/prs.py), `relay-kit/prs@2`) is the one part of the kit that
 reads pull requests from GitHub, and only when someone runs it: it appends what changed to
 `governance/pr-state.jsonl`. The cockpit renders that file; any other reader (a telemetry collector, say)
 should read the file rather than GitHub again. It copies PR body sections verbatim and summarises nothing.
