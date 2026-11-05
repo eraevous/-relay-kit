@@ -86,6 +86,22 @@
         "cockpit: Run commitments count only authorized handoffs in progress; prepared or unauthorized ones are pending",
         "cockpit: only an adopted decision with delegates_to draws a recorded delegation edge"
       ]
+    },
+    {
+      "id": "relay-kit/mcp@1",
+      "what": "Read-only MCP server over a records store, JSON-RPC 2.0 over stdio, protocol revisions 2024-11-05, 2025-03-26, 2025-06-18 and 2025-11-25 (any other gets -32022 with the supported list): the tool names and arguments, relaykit:// resource URIs, the result envelope (schema, evidence_class as in export@1, provenance 'read from <path> at records sha256:<hash>', content_level, notice) and the --content metadata policy. No tool writes to the records (DEC-019).",
+      "spec": "docs/mcp.md",
+      "implementers": [
+        "tools/mcp_server.py"
+      ],
+      "tests": [
+        "mcp: initialize handshake, tools/list and ping over stdio, for each supported protocol version",
+        "mcp: a 2026-07-28 or unknown protocol version gets -32022 with the supported list, never a silent fallback",
+        "mcp: every read tool answers with evidence_class and a provenance line naming the records hash",
+        "mcp: with --content metadata no tool or resource returns record text, and text filters are refused",
+        "mcp: read tools change nothing in the records, and instruction-like record text isn't acted on",
+        "mcp: malformed JSON-RPC gets a proper error and the server keeps serving"
+      ]
     }
   ]
 }
