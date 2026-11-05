@@ -56,11 +56,25 @@ class RpcError(Exception):
 
 
 # ---------------- reading the records ----------------
+class CachingReader(ex.Reader):
+    """export@1's reader, keeping the bytes it hashed, so a result is served from exactly the
+    bytes its provenance hash covers. A file changed after the read can't slip in under an old hash."""
+    def __init__(self, root):
+        super().__init__(root)
+        self.bytes = {}
+
+    def read(self, p, kind):
+        b = super().read(p, kind)
+        self.bytes[self.rel(p)] = b
+        return b
+
+
 class Snapshot:
     """One read of the records: ledgers, handoffs, outputs, threads.md, using export@1's readers,
-    so every record has export@1's fields and evidence_class. Read fresh for every call."""
+    so every record has export@1's fields and evidence_class. Read fresh for every call, once:
+    text served later comes from the bytes read here (self.text), never from reopening a file."""
     def __init__(self, root):
-        rd = ex.Reader(root)
+        rd = CachingReader(root)
         self.led = ex.load_ledger()
         rd.config()
         self.threads_path, self.threads = ex.parse_threads(rd)
@@ -74,6 +88,10 @@ class Snapshot:
         # the files this server reads: captures aren't read, so it can differ from an export's)
         self.hash = ex.sha("".join(f"{k}\t{v['sha256']}\n" for k, v in sorted(rd.files.items())))
         self.unreadable = sorted(rd.unreadable, key=lambda u: str(u["path"]))
+
+    def text(self, path):
+        """The text of a file as this snapshot read and hashed it."""
+        return self.rd.bytes[self.rd.rel(pathlib.Path(path).resolve())].decode("utf-8", errors="replace")
 
     def provenance(self, what):
         return f"read from {what} at records sha256:{self.hash}"
@@ -257,7 +275,7 @@ class Server:
                 add(r)
         if s.threads_path:
             if full:
-                for n, line in enumerate(s.threads_path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                for n, line in enumerate(s.text(s.threads_path).splitlines(), 1):
                     if ql in line.lower():
                         hits.append({"kind": "threads", "rid": f"threads.md:{n}", "source_path": "threads.md", "line": n,
                                      "evidence_class": "source-grounded", "snippet": line[:200]})
@@ -277,7 +295,7 @@ class Server:
         items = [dict(t) for _, t in sorted(s.threads.items())]
         body = {"present": bool(s.threads_path), "count": len(items), "items": items}
         if s.threads_path and self.content == "full":
-            changes = [l for l in s.threads_path.read_text(encoding="utf-8", errors="replace").splitlines() if l.startswith("- 20")]
+            changes = [l for l in s.text(s.threads_path).splitlines() if l.startswith("- 20")]
             body["last_change"] = changes[-1][:300] if changes else None
         return self.result(s, "threads.md", "derived", body)
 
@@ -297,9 +315,12 @@ class Server:
                           sanitize=bool(a.get("sanitize_manifest")))
         except ex.Refused as e:
             raise ToolError(f"refused: {e}")
-        s = self.snap()
-        return self.result(s, "the records, through tools/export.py (relay-kit/export@1)", "derived",
-                           {"path": str(out), "manifest": m})
+        # The export read the records itself: its manifest's root_hash covers what it read.
+        # A second snapshot here could describe different bytes, so the provenance is the export's own.
+        root_hash = (m.get("root") or {}).get("root_hash")
+        return {"schema": SCHEMA, "evidence_class": "derived",
+                "provenance": f"read from the records, through tools/export.py (relay-kit/export@1), at records sha256:{root_hash}",
+                "content_level": self.content, "notice": NOTICE, "path": str(out), "manifest": m}
 
     # ---- resources ----
     def resources(self, s):
@@ -327,7 +348,7 @@ class Server:
                 raise RpcError(-32602, f"no governance/{m.group(2)}.jsonl in these records", {"uri": uri})
             src, ev = f"governance/{m.group(2)}.jsonl", "source-grounded"
             if self.content == "full":
-                text, mime = path.read_text(encoding="utf-8"), "application/jsonl"
+                text, mime = s.text(path), "application/jsonl"
             else:
                 text, mime = ex.dumps([self.shown(r) for r in recs]), "application/json"
         elif m.group(1) == "handoff":

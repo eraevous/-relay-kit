@@ -192,6 +192,30 @@ class McpTests(unittest.TestCase):
         self.assertEqual(led["text"], (self.root / "governance" / "decisions.jsonl").read_text(encoding="utf-8"))
         self.assertEqual(c.request("resources/read", {"uri": "relaykit://nope/x"})["error"]["code"], -32602)
 
+    def test_served_bytes_match_their_hash(self):
+        """mcp: text is served from the bytes the provenance hash covers, even if a file changes after the read"""
+        server = srv.Server(self.root, "full")
+        taken = []   # (hash, marker) per call: each call's snapshot is followed by its own late append
+        orig = server.snap
+        def snap_then_change():
+            s = orig()
+            marker = f"late-append-{len(taken)}"
+            taken.append((s.hash, marker))
+            for rel in ("threads.md", "governance/decisions.jsonl"):
+                f = self.root / rel
+                f.write_text(f.read_text(encoding="utf-8") + f"- 2026-11-05 | {marker}\n", encoding="utf-8")
+            return s
+        server.snap = snap_then_change
+        threads = server.t_threads({})
+        self.assertNotIn(taken[-1][1], str(threads.get("last_change")))
+        self.assertIn(taken[-1][0], threads["provenance"])
+        hits = server.t_search({"query": "late-append-1"})
+        self.assertEqual(hits["count"], 0, hits)
+        self.assertIn(taken[-1][0], hits["provenance"])
+        res = json.dumps(server.read_resource("relaykit://ledger/decisions"))
+        self.assertNotIn(taken[-1][1], res)
+        self.assertIn(taken[-1][0], res)
+
     def test_metadata_mode_hides_bodies(self):
         """mcp: with --content metadata no tool or resource returns record text, and text filters are refused"""
         c = self.client("--content", "metadata")
