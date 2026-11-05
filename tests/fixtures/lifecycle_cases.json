@@ -1,5 +1,6 @@
 {
  "schema": "relay-kit/lifecycle@1 fixture",
+ "note": "effective dates are evaluated against the ledger's latest date (lifecycle.ledger_as_of), never the clock",
  "cases": [
   {
    "name": "review 1: a proposed replacement leaves its target open",
@@ -55,7 +56,10 @@
      "DEC-001"
     ],
     "problems": [
-     "self"
+     [
+      "DEC-001",
+      "self"
+     ]
     ]
    }
   },
@@ -92,7 +96,10 @@
      "DEC-001"
     ],
     "problems": [
-     "forward"
+     [
+      "DEC-001",
+      "forward"
+     ]
     ]
    }
   },
@@ -124,7 +131,10 @@
      "CH-002"
     ],
     "problems": [
-     "ineffective"
+     [
+      "CH-002",
+      "ineffective"
+     ]
     ]
    }
   },
@@ -161,7 +171,10 @@
      "DEC-001"
     ],
     "problems": [
-     "ineffective"
+     [
+      "DEC-002",
+      "ineffective"
+     ]
     ]
    }
   },
@@ -303,6 +316,115 @@
    }
   },
   {
+   "name": "conflict: a proposal and its proposed replacement both adopted",
+   "decisions": [
+    {
+     "id": "DEC-001",
+     "date": "2026-11-01",
+     "status": "proposed",
+     "decision": "Synthetic decision 1.",
+     "scope": "synthetic",
+     "recorded_by": "sam"
+    },
+    {
+     "id": "DEC-002",
+     "date": "2026-11-02",
+     "status": "proposed",
+     "decision": "Synthetic decision 2.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "supersedes": "DEC-001"
+    },
+    {
+     "id": "DEC-003",
+     "date": "2026-11-03",
+     "status": "adopted",
+     "decision": "Synthetic decision 3.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "decider": "sam",
+     "basis": "\"yes\"",
+     "locator": "synthetic chat",
+     "supersedes": "DEC-001"
+    },
+    {
+     "id": "DEC-004",
+     "date": "2026-11-04",
+     "status": "adopted",
+     "decision": "Synthetic decision 4.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "decider": "sam",
+     "basis": "\"yes\"",
+     "locator": "synthetic chat",
+     "supersedes": "DEC-002"
+    }
+   ],
+   "challenges": [],
+   "expect": {
+    "open_decisions": [],
+    "in_force": [
+     "DEC-003",
+     "DEC-004"
+    ],
+    "conflicts": [
+     "DEC-001"
+    ],
+    "problems": []
+   }
+  },
+  {
+   "name": "conflict: a decision both revoked and superseded",
+   "decisions": [
+    {
+     "id": "DEC-001",
+     "date": "2026-11-01",
+     "status": "adopted",
+     "decision": "Synthetic decision 1.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "decider": "sam",
+     "basis": "\"yes\"",
+     "locator": "synthetic chat"
+    },
+    {
+     "id": "DEC-002",
+     "date": "2026-11-02",
+     "status": "adopted",
+     "decision": "Synthetic decision 2.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "decider": "sam",
+     "basis": "\"yes\"",
+     "locator": "synthetic chat",
+     "revokes": "DEC-001"
+    },
+    {
+     "id": "DEC-003",
+     "date": "2026-11-03",
+     "status": "adopted",
+     "decision": "Synthetic decision 3.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "decider": "sam",
+     "basis": "\"yes\"",
+     "locator": "synthetic chat",
+     "supersedes": "DEC-001"
+    }
+   ],
+   "challenges": [],
+   "expect": {
+    "in_force": [
+     "DEC-002",
+     "DEC-003"
+    ],
+    "conflicts": [
+     "DEC-001"
+    ],
+    "problems": []
+   }
+  },
+  {
    "name": "a settled challenge closes another; unknown targets are refused",
    "decisions": [
     {
@@ -354,13 +476,19 @@
      "DEC-001"
     ],
     "problems": [
-     "unknown",
-     "unknown"
+     [
+      "CH-003",
+      "unknown"
+     ],
+     [
+      "DEC-001",
+      "unknown"
+     ]
     ]
    }
   },
   {
-   "name": "budget rule, tightened, then relaxed: amends keep the rule standing; a revocation ends it",
+   "name": "budget rule, tightened, then relaxed: the revocation ends the rule and the tightening lapses with it",
    "decisions": [
     {
      "id": "DEC-001",
@@ -405,14 +533,13 @@
     }
    ],
    "challenges": [],
-   "as_of": "2026-11-05T12:00:00Z",
    "expect": {
     "in_force": [
-     "DEC-002",
      "DEC-003"
     ],
     "applicability": {
-     "DEC-001": "revoked"
+     "DEC-001": "revoked",
+     "DEC-002": "lapsed with what it amends"
     },
     "amended_by": {
      "DEC-001": [
@@ -423,7 +550,114 @@
    }
   },
   {
-   "name": "a delegation with a date limit expires after it, and only when dates are evaluated",
+   "name": "a delegation for one day: a later revocation dated the next day is pending until the ledger reaches that day",
+   "decisions": [
+    {
+     "id": "DEC-001",
+     "date": "2026-11-01",
+     "status": "adopted",
+     "decision": "Delegation for 2026-11-04.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "decider": "sam",
+     "basis": "\"yes\"",
+     "locator": "synthetic chat"
+    },
+    {
+     "id": "DEC-002",
+     "date": "2026-11-01",
+     "status": "adopted",
+     "decision": "It ends at the end of 2026-11-04.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "decider": "sam",
+     "basis": "\"yes\"",
+     "locator": "synthetic chat",
+     "revokes": "DEC-001",
+     "effective_from": "2026-11-05"
+    },
+    {
+     "id": "DEC-003",
+     "date": "2026-11-04",
+     "status": "adopted",
+     "decision": "Unrelated.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "decider": "sam",
+     "basis": "\"yes\"",
+     "locator": "synthetic chat"
+    }
+   ],
+   "challenges": [],
+   "expect": {
+    "in_force": [
+     "DEC-001",
+     "DEC-003"
+    ],
+    "pending": {
+     "DEC-001": [
+      "DEC-002"
+     ]
+    },
+    "applicability": {
+     "DEC-002": "not yet effective"
+    },
+    "problems": []
+   }
+  },
+  {
+   "name": "the same delegation once the ledger has moved past the revocation date",
+   "decisions": [
+    {
+     "id": "DEC-001",
+     "date": "2026-11-01",
+     "status": "adopted",
+     "decision": "Delegation for 2026-11-04.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "decider": "sam",
+     "basis": "\"yes\"",
+     "locator": "synthetic chat"
+    },
+    {
+     "id": "DEC-002",
+     "date": "2026-11-01",
+     "status": "adopted",
+     "decision": "It ends at the end of 2026-11-04.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "decider": "sam",
+     "basis": "\"yes\"",
+     "locator": "synthetic chat",
+     "revokes": "DEC-001",
+     "effective_from": "2026-11-05"
+    },
+    {
+     "id": "DEC-003",
+     "date": "2026-11-06",
+     "status": "adopted",
+     "decision": "Unrelated.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "decider": "sam",
+     "basis": "\"yes\"",
+     "locator": "synthetic chat"
+    }
+   ],
+   "challenges": [],
+   "expect": {
+    "in_force": [
+     "DEC-002",
+     "DEC-003"
+    ],
+    "applicability": {
+     "DEC-001": "revoked"
+    },
+    "problems": []
+   }
+  },
+  {
+   "name": "a decision with its own end date expires once the ledger is past it",
    "decisions": [
     {
      "id": "DEC-001",
@@ -436,12 +670,24 @@
      "basis": "\"yes\"",
      "locator": "synthetic chat",
      "effective_until": "2026-11-04"
+    },
+    {
+     "id": "DEC-002",
+     "date": "2026-11-05",
+     "status": "adopted",
+     "decision": "Synthetic decision 2.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "decider": "sam",
+     "basis": "\"yes\"",
+     "locator": "synthetic chat"
     }
    ],
    "challenges": [],
-   "as_of": "2026-11-05T12:00:00Z",
    "expect": {
-    "in_force": [],
+    "in_force": [
+     "DEC-002"
+    ],
     "applicability": {
      "DEC-001": "expired"
     },
@@ -482,8 +728,84 @@
      "DEC-002"
     ],
     "problems": [
-     "ineffective",
-     "format"
+     [
+      "DEC-002",
+      "ineffective"
+     ],
+     [
+      "DEC-002",
+      "format"
+     ]
+    ]
+   }
+  },
+  {
+   "name": "targets that aren't one id as text are format problems and close nothing",
+   "decisions": [
+    {
+     "id": "DEC-001",
+     "date": "2026-11-01",
+     "status": "proposed",
+     "decision": "Synthetic decision 1.",
+     "scope": "synthetic",
+     "recorded_by": "sam"
+    },
+    {
+     "id": "DEC-002",
+     "date": "2026-11-02",
+     "status": "adopted",
+     "decision": "Synthetic decision 2.",
+     "scope": "synthetic",
+     "recorded_by": "sam",
+     "decider": "sam",
+     "basis": "\"yes\"",
+     "locator": "synthetic chat",
+     "supersedes": [
+      "DEC-001"
+     ]
+    }
+   ],
+   "challenges": [
+    {
+     "id": "CH-001",
+     "date": "2026-11-01",
+     "status": "open",
+     "concern": "Synthetic concern 1.",
+     "raised_by": "claude:review#S1",
+     "recorded_by": "sam"
+    },
+    {
+     "id": "CH-002",
+     "date": "2026-11-02",
+     "status": "resolved",
+     "concern": "Synthetic concern 2.",
+     "raised_by": "claude:review#S1",
+     "recorded_by": "sam",
+     "resolution": "handled",
+     "resolves": [
+      "CH-001"
+     ]
+    }
+   ],
+   "expect": {
+    "open_decisions": [
+     "DEC-001"
+    ],
+    "open_challenges": [
+     "CH-001"
+    ],
+    "in_force": [
+     "DEC-002"
+    ],
+    "problems": [
+     [
+      "DEC-002",
+      "format"
+     ],
+     [
+      "CH-002",
+      "format"
+     ]
     ]
    }
   }

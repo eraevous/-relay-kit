@@ -487,7 +487,8 @@ def main():
     rows, unauthorized = handoffs(root, gaps, a.stale_hours)
     decs = jsonl(root / "governance" / "decisions.jsonl", gaps)
     chs = jsonl(root / "governance" / "challenges.jsonl", gaps)
-    res = load_lifecycle().resolve(decs, chs)   # relay-kit/lifecycle@1: only effective transitions close anything
+    lc = load_lifecycle()
+    res = lc.resolve(decs, chs, lc.ledger_as_of(decs))   # relay-kit/lifecycle@1: only effective transitions close anything
     waiting = [x for x in decs if (res["decisions"].get(x.get("id")) or {}).get("open")]
     open_ch = [x for x in chs if (res["challenges"].get(x.get("id")) or {}).get("open")]
 

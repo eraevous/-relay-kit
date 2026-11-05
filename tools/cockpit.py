@@ -20,8 +20,9 @@ the page was built from). Four surfaces:
 
 It reads with the export module's readers (tools/export.py), changes nothing under --root, and
 refuses a destination inside the records or inside a public (or unconfirmed) git repository,
-using the export's guard. Output is deterministic: the only date on the page is the latest
-timestamp found in the records. Spec: docs/cockpit.md. Standard library only."""
+using the export's guard. Output is deterministic: no clock is read. The page shows the records'
+git revision, its commit time and the last fetch (fixed for a given clone), apart from the newest
+record's timestamp; the browser counts their age. Spec: docs/cockpit.md. Standard library only."""
 import argparse, datetime as dt, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
 SCHEMA = "relay-kit/cockpit@4"
@@ -153,18 +154,37 @@ REQ = {"decider": "<<REQUIRED: your name>>", "basis": "<<REQUIRED: your words, q
 
 
 def ledger_cmd(kind, obj, expect=None):
-    """expect: 'DEC-N=open@hash'. ledger_append refuses the line if the item changed since this page (lifecycle@1)."""
-    ex_ = f" --expect {shlex.quote(expect)}" if expect else ""
+    """expect: 'DEC-N=open@hash', or several. ledger_append refuses the line if any item changed since this
+    page (relay-kit/lifecycle@1)."""
+    ex_ = "".join(f" --expect {shlex.quote(x)}" for x in ([expect] if isinstance(expect, str) else expect or []) if x)
     return f"relay-kit ledger append --dir governance{ex_} {kind} {shlex.quote(dumps(obj))}"
 
 
-def expect_of(rec, state="open"):
+def state_name(rec):
+    """A record's state as ledger_append --expect names it."""
+    if rec.get("kind") == "challenge":
+        return "open" if rec.get("open") else "closed"
+    a = rec.get("applicability") or "open"
+    return "standing" if a.startswith("adopted, no structured") else a
+
+
+def expect_of(rec, state=None):
     rid = (rec.get("fields") or {}).get("id")
     h = str(rec.get("source_hash") or "")[:12]
-    return f"{rid}={state}" + (f"@{h}" if h else "") if rid else None
+    return f"{rid}={state or state_name(rec)}" + (f"@{h}" if h else "") if rid else None
 
 
-def compose_decision(rec, owner, as_of, full):
+def expects_for(rec, by_id):
+    """The item itself, and what it proposes to replace: accepting a replacement whose target has since
+    been settled some other way would adopt both (CH-035 finding 5: revalidate what it depends on)."""
+    out = [expect_of(rec, "open")]
+    x = (rec.get("fields") or {}).get("supersedes")
+    if isinstance(x, str) and x in by_id:
+        out.append(expect_of(by_id[x]))
+    return [e for e in out if e]
+
+
+def compose_decision(rec, owner, as_of, full, by_id=None):
     f = rec["fields"]
     did = f.get("id")
     text = f.get("decision") if full else f"As proposed in {did} (text left out of this page)."
@@ -174,7 +194,7 @@ def compose_decision(rec, owner, as_of, full):
         obj = {"status": status, "supersedes": did, "decision": text or f"As proposed in {did}.",
                "scope": scope or f"As in {did}.", "decider": REQ["decider"],
                "basis": REQ["basis"], "locator": REQ["locator"]}   # recorded_by: ledger_append fills it from $RELAYKIT_ACTOR
-        out[action] = {"command": ledger_cmd("decision", obj, expect_of(rec)), "json": obj}
+        out[action] = {"command": ledger_cmd("decision", obj, expects_for(rec, by_id or {})), "json": obj}
     out["defer"] = {"command": f"# {did}: deferred. Nothing to append; it stays proposed and stays on this page.",
                     "json": None}
     return out
@@ -303,7 +323,7 @@ def derived_ask(kind, cid, text, full, nxt=None, why=()):
     gist = first_sentence(text) if full and text else None
     if kind == "decision":
         q = f"Should this be adopted: “{gist}”?" if gist else f"Should {cid} be adopted?"
-        opts = [("Accept", f"an adopted line supersedes {cid}: it is in force, with your words as the basis"),
+        opts = [("Accept", f"an adopted line supersedes {cid}: it stands as adopted (no later line ends it), with your words as the basis"),
                 ("Reject", f"a rejected line supersedes {cid}: it is closed and won't be acted on"),
                 ("Amend", f"an adopted line supersedes {cid} with your edited text instead of the proposal's"),
                 ("Defer", "nothing is written: it stays proposed and stays here")]
@@ -522,9 +542,10 @@ def pr_items(ps, owner, settings, full):
 
 
 def snapshot_of(root, as_of):
-    """Which revision of the records this page was built from, and when that revision was committed:
-    fixed for a given revision, so the page stays deterministic, while the browser counts its age.
-    Separate from the newest record's time (CH-035 finding 5)."""
+    """Where the records this page was built from came from, kept apart from the newest record's time
+    (CH-035 finding 5): the git revision, when it was committed, and when this clone last fetched
+    (FETCH_HEAD's time: the collection time). Fixed for a given clone, so the page stays deterministic
+    while the browser counts their age. Anything that can't be read is "unknown", never left blank."""
     import subprocess
     def g(*args):
         try:
@@ -533,14 +554,19 @@ def snapshot_of(root, as_of):
         except (OSError, subprocess.TimeoutExpired):
             return None
         return p.stdout.strip() if p.returncode == 0 else None
-    rev = g("rev-parse", "HEAD")
-    if not rev or g("rev-parse", "--show-toplevel") is None or \
-            pathlib.Path(g("rev-parse", "--show-toplevel")).resolve() != pathlib.Path(root).resolve():
-        return {"revision": None, "committed_at": None, "uncommitted": None, "newest_record": as_of,
-                "note": "the records folder isn't the top of a git repository: no revision to show"}
+    top = g("rev-parse", "--show-toplevel")
+    rev = g("rev-parse", "HEAD") if top else None
+    if not rev or pathlib.Path(top).resolve() != pathlib.Path(root).resolve():
+        return {"revision": None, "committed_at": None, "fetched_at": None, "uncommitted": None, "newest_record": as_of,
+                "note": "the records folder isn't the top of a git repository: revision and collection time unknown"}
     when = g("log", "-1", "--date=format-local:%Y-%m-%dT%H:%M:%SZ", "--format=%cd")
-    dirty = g("status", "--porcelain", "--", "governance", "handoffs", "threads.md")
-    return {"revision": rev[:12], "committed_at": when, "uncommitted": bool(dirty), "newest_record": as_of}
+    gitdir = g("rev-parse", "--absolute-git-dir")
+    fh = pathlib.Path(gitdir) / "FETCH_HEAD" if gitdir else None
+    fetched = (dt.datetime.fromtimestamp(fh.stat().st_mtime, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+               if fh and fh.is_file() else None)
+    dirty = g("status", "--porcelain")       # everything the readers may read, captures included
+    return {"revision": rev[:12], "committed_at": when, "fetched_at": fetched,
+            "uncommitted": None if dirty is None else bool(dirty), "newest_record": as_of}
 
 
 # ---------------- collecting ----------------
@@ -627,6 +653,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
 
 
     # ---- Choices ----
+    dec_by_id = {d["fields"].get("id"): d for d in decisions_all if isinstance(d["fields"].get("id"), str)}
     choices = []
     for d in decisions:
         f = d["fields"]
@@ -634,8 +661,10 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             continue
         item = {"kind": "decision", "id": f.get("id"), "status": "proposed", "date": f.get("date"),
                 "proposed_replacements": d.get("proposed_replacements") or [],
+                "replaces": ({"id": f["supersedes"], "state": state_name(dec_by_id[f["supersedes"]])}
+                             if isinstance(f.get("supersedes"), str) and f["supersedes"] in dec_by_id else None),
                 "proposed_by": f.get("proposed_by") or f.get("recorded_by"), "decider": f.get("decider"),
-                "source": f"{d['source_path']}:{d['line']}", "compose": compose_decision(d, owner, as_of, full)}
+                "source": f"{d['source_path']}:{d['line']}", "compose": compose_decision(d, owner, as_of, full, dec_by_id)}
         if full:
             item.update(text=f.get("decision"), scope=f.get("scope"), basis=f.get("basis"), locator=f.get("locator"))
         choices.append(item)
@@ -713,7 +742,8 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     pr_states = {}
     # Clarify questions and the lines that answer them talk about an item without settling it
     q_ids = {c["fields"].get("id") for c in challenges_all if c["fields"].get("kind") == "question"}
-    answer_ids = {("challenge", c["fields"].get("id")) for c in challenges_all if c["fields"].get("resolves") in q_ids}
+    answer_ids = {("challenge", c["fields"].get("id")) for c in challenges_all
+                  if isinstance(c["fields"].get("resolves"), str) and c["fields"]["resolves"] in q_ids}
     question_ids = {("challenge", i) for i in q_ids}
     known_repos = set()
     if owner_hint:
@@ -803,7 +833,8 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         item["effects"] = item["effects"] + extra
         if kind != "handoff":
             proposer = f.get("proposed_by") or f.get("recorded_by") if kind == "decision" else f.get("raised_by")
-            item["compose"].update(compose_extra(kind, cid, owner, proposer, full, body, f.get("scope"), expect_of(rec)))
+            item["compose"].update(compose_extra(kind, cid, owner, proposer, full, body, f.get("scope"),
+                                                 expects_for(rec, dec_by_id) if kind == "decision" else expect_of(rec, "open")))
         else:
             # a handoff's question goes to its sender, who wrote what it asks for
             item["compose"].update({k: v for k, v in compose_extra(kind, cid, owner, (rec or {}).get("from"), full, "", None).items()
@@ -1241,7 +1272,9 @@ def choice_card(c, pr_fetched_at=None):
             [("scope", c.get("scope")), ("proposed by", c.get("proposed_by")), ("decider", c.get("decider")),
              ("basis", c.get("basis")), ("locator", c.get("locator")), ("source", c["source"]),
              ("proposed replacement", (", ".join(c["proposed_replacements"]) + " (proposed, so this is still open)")
-              if c.get("proposed_replacements") else None)])
+              if c.get("proposed_replacements") else None),
+             ("proposes to replace", f'{c["replaces"]["id"]} ({c["replaces"]["state"]}); accepting it replaces that too'
+              if c.get("replaces") else None)])
         hint = "Accept appends an adopted line that supersedes it; Reject a rejected one. You fill in decider, basis and locator."
     elif c["kind"] == "handoff":
         body = (f'<p class="txt">{e(c.get("title"))}</p>' if c.get("title") else "") + dl(
@@ -1258,8 +1291,8 @@ def choice_card(c, pr_fetched_at=None):
     ledger_kind = {"decision": "decision", "challenge": "challenge"}.get(c["kind"])
 
     def expect_attr(a):
-        m = re.search(r" --expect ([\w=@.-]+) ", str(comp.get(a, {}).get("command") or ""))
-        return f' data-expect="{e(m.group(1))}"' if m else ""
+        xs = re.findall(r" --expect ([\w=@.-]+)", str(comp.get(a, {}).get("command") or ""))
+        return f' data-expect="{e(" ".join(xs))}"' if xs else ""
 
     def tmpl(a):
         x = comp[a]
@@ -1693,9 +1726,15 @@ more than one line is shown with all of them.</p>
 <p class="hint" id="settle-body"></p><pre id="settle-line"></pre><div class="btns"><button value="ok" class="primary small" id="settle-ok">Add to To apply</button>
 <button value="cancel" class="secondary small">Cancel</button></div></form></dialog>"""
     sn = data.get("snapshot") or {}
-    snap_label = ((f'records rev <code>{e(sn["revision"])}</code>, committed <span class="age" data-ts="{e(sn["committed_at"] or "")}">'
-                   f'{e(sn["committed_at"] or "?")}</span>' + (' <b class="warn">+ uncommitted changes</b>' if sn.get("uncommitted") else "")
-                   + " · ") if sn.get("revision") else "")
+    if sn.get("revision"):
+        snap_label = (f'records rev <code>{e(sn["revision"])}</code>, committed <span class="age" data-ts="{e(sn["committed_at"] or "")}">'
+                      f'{e(sn["committed_at"] or "?")}</span>, last fetched '
+                      + (f'<span class="age" data-ts="{e(sn["fetched_at"])}">{e(sn["fetched_at"])}</span>' if sn.get("fetched_at") else "unknown")
+                      + (' <b class="warn">+ uncommitted changes</b>' if sn.get("uncommitted")
+                         else ' <b class="warn">(working tree state unknown)</b>' if sn.get("uncommitted") is None else "") + " · ")
+    else:
+        snap_label = '<b class="warn">records revision unknown (not a git repository)</b> · '
+
     theme = data.get("theme")
     dflt = (theme or {}).get("default", "auto")
     html_theme = f' data-theme="{dflt}"' if theme and dflt != "auto" else ""
@@ -2025,7 +2064,7 @@ JS = """
     if(!v){miss=miss||f;return}obj[f]=obj[f].replace(RQ,function(){return v})});RQ.lastIndex=0;
    if(miss)return say(card,'Fill in the '+miss+' first (it is empty).',miss==='decider'?dec:loc);return obj}
   return w}
- function xp(b){var x=b.getAttribute('data-expect');return x&&/^[\\w=@.-]+$/.test(x)?'--expect '+x+' ':''}
+ function xp(b){var x=b.getAttribute('data-expect')||'',o='';x.split(' ').forEach(function(e){if(/^[\\w=@.-]+$/.test(e))o+='--expect '+e+' '});return o}
  function lineFor(b){var card=b.closest('.card'),t=b.getAttribute('data-template');
   if(t){var o=filled(b,card,JSON.parse(t));return o&&('relay-kit ledger append --dir governance '+xp(b)+b.getAttribute('data-kind')+' '+shq(JSON.stringify(o)))}
   var raw=b.getAttribute('data-line');if(!/--note '/.test(raw))return raw;   // a comment line: nothing to fill
