@@ -503,7 +503,7 @@ def serve(server, inp, out):
             else:
                 resp = server.handle(msg)
         if resp is not None:
-            out.write((json.dumps(resp, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
+            out.write((json.dumps(resp, ensure_ascii=True, sort_keys=True) + "\n").encode("utf-8"))
             out.flush()
 
 
