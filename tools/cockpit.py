@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@1.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@2.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
@@ -22,7 +22,7 @@ using the export's guard. Output is deterministic: the only date on the page is 
 timestamp found in the records. Spec: docs/cockpit.md. Standard library only."""
 import argparse, datetime as dt, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@1"
+SCHEMA = "relay-kit/cockpit@2"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -221,8 +221,132 @@ def compose_handoff(h, owner, unauthorized, nxt, output_exists):
             "defer": {"command": f"# {hid}: deferred. Nothing to run; it stays {st}.", "json": None}}
 
 
+# ---------------- what a choice is asking (HO-RK-20261105-VZH4) ----------------
+ID_REF = re.compile(r"\b(?:DEC|CH)-\d{3,}\b|\bHO-[A-Z0-9]{1,12}-\d{8}-[0-9A-HJKMNP-TV-Z]{4}\b|\bHO-\d{8}-\d{3}\b")
+# a pull request named in prose: a full URL, or "<repo> PR #N" / "<repo> pull request #N" (bare "#N" is too ambiguous)
+PR_REF = re.compile(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)|\b([A-Za-z][\w.-]*)\s+(?:PR|pull request)\s*#(\d+)", re.I)
+ASK_FIELDS = "ask: {question, options: [{label, effect}], default_if_unanswered}"
+
+
+def first_sentence(s, n=220):
+    s = " ".join(str(s or "").split())
+    m = re.match(r"(.+?[.?!])(\s|$)", s)
+    s = m.group(1) if m else s
+    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+
+
+def written_ask(a):
+    """The proposer's own `ask` object, normalised; None when it's absent or unusable (then the
+    card shows a derived summary, labelled as such)."""
+    if not isinstance(a, dict) or not isinstance(a.get("question"), str) or not a["question"].strip():
+        return None
+    opts = [{"label": str(o.get("label")).strip(), "effect": str(o.get("effect") or "").strip()}
+            for o in (a.get("options") or []) if isinstance(o, dict) and str(o.get("label") or "").strip()]
+    d = a.get("default_if_unanswered")
+    return {"source": "proposer", "question": a["question"].strip(), "options": opts,
+            "default_if_unanswered": d.strip() if isinstance(d, str) and d.strip() else None}
+
+
+def derived_ask(kind, cid, text, full, nxt=None, why=()):
+    """A plain question built from the record when the proposer wrote none. Labelled 'derived':
+    it is this page's reading, never the proposer's words. Effects describe what each action's
+    composed line would do once you run it."""
+    gist = first_sentence(text) if full and text else None
+    if kind == "decision":
+        q = f"Should this be adopted: “{gist}”?" if gist else f"Should {cid} be adopted?"
+        opts = [("Accept", f"an adopted line supersedes {cid}: it is in force, with your words as the basis"),
+                ("Reject", f"a rejected line supersedes {cid}: it is closed and won't be acted on"),
+                ("Amend", f"an adopted line supersedes {cid} with your edited text instead of the proposal's"),
+                ("Defer", "nothing is written: it stays proposed and stays here")]
+    elif kind == "challenge":
+        q = f"Is this a real problem: “{gist}”?" if gist else f"Is {cid} a real problem?"
+        opts = [("Accept", f"an accepted-risk line resolves {cid}: you accept the risk, no fix"),
+                ("Reject", f"a resolved line resolves {cid}: dismissed, or fixed (your resolution says which)"),
+                ("Defer", "nothing is written: it stays open and stays here")]
+    else:
+        reason = "; ".join(why) or "it waits on you"
+        q = (f"{cid} needs you ({reason}). Should it move to {nxt}?" if nxt
+             else f"{cid} needs you ({reason}). Should it be cancelled?")
+        opts = ([("Accept", f"handoff.py records {nxt}, with your note")] if nxt else []) + \
+               [("Reject", "handoff.py records cancelled (owner only), with your note"),
+                ("Defer", "nothing is run: it stays as it is")]
+    return {"source": "derived", "question": q, "options": [{"label": l, "effect": e_} for l, e_ in opts],
+            "default_if_unanswered": "nothing changes: it stays waiting on you"}
+
+
+def pr_refs(text, owner_hint, known=()):
+    """(owner, repo, number) for each pull request named in text; a bare '<repo> PR #N' counts only
+    when <repo> is a repository the records spell out as '<owner>/<repo>' somewhere (`known`, lowercased),
+    and takes the records' GitHub owner. De-duplicated, in order."""
+    out = []
+    for m in PR_REF.finditer(str(text or "")):
+        bare_ok = owner_hint and m.group(4) and m.group(4).lower() in known
+        ref = (m.group(1), m.group(2), int(m.group(3))) if m.group(1) else \
+              ((owner_hint, m.group(4), int(m.group(5))) if bare_ok else None)
+        if ref and ref not in out:
+            out.append(ref)
+    return out
+
+
+def gh_pr_state(owner, repo, number):
+    """'merged', 'closed' or 'open' from GitHub through the gh CLI, or None. Build time only, opt-in."""
+    import subprocess
+    try:
+        p = subprocess.run(["gh", "api", f"repos/{owner}/{repo}/pulls/{number}", "-q",
+                            '(if .merged_at then "merged" else .state end)'],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    s = p.stdout.strip()
+    return s if p.returncode == 0 and s in ("merged", "closed", "open") else None
+
+
+def records_github_owner(root):
+    """The GitHub owner of the records' origin (for '<repo> PR #N'), or None."""
+    import subprocess
+    try:
+        url = subprocess.run(["git", "-C", str(root), "remote", "get-url", "origin"], capture_output=True,
+                             text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"github\.com[/:]([\w.-]+)/", url)
+    return m.group(1) if m else None
+
+
+def compose_extra(kind, cid, owner, proposer, full, text, scope):
+    """Amend (decisions), Close as overtaken, Clarify and Inquire. All compose; none writes.
+    Clarify is a record: an open challenge with kind 'question', addressed to the proposer, about the
+    item; whoever answers resolves it. Inquire is not a record: a prompt for you to paste to an assistant."""
+    out = {}
+    if kind == "decision":
+        amend = {"status": "adopted", "supersedes": cid, "decision": text if full and text else f"<<REQUIRED: your text for {cid}>>",
+                 "scope": scope if full and scope else f"As in {cid}.", "amends": cid,
+                 "decider": REQ["decider"], "basis": REQ["basis"], "locator": REQ["locator"]}
+        out["amend"] = {"json": amend, "command": ledger_cmd("decision", amend), "edit_field": "decision"}
+        over = {"status": "adopted", "supersedes": cid, "decision": f"{cid} is closed as overtaken: <<REQUIRED: what overtook it (a merged PR, a later decision)>>",
+                "scope": scope if full and scope else f"As in {cid}.",
+                "decider": REQ["decider"], "basis": REQ["basis"], "locator": REQ["locator"]}
+        out["overtaken"] = {"json": over, "command": ledger_cmd("decision", over)}
+    elif kind == "challenge":
+        over = {"status": "resolved", "resolves": cid, "concern": f"As raised in {cid}.",
+                "raised_by": proposer or owner, "resolution": f"Overtaken: <<REQUIRED: what made {cid} moot, in your words>>"}
+        out["overtaken"] = {"json": over, "command": ledger_cmd("challenge", over)}
+    clar = {"status": "open", "kind": "question", "about": cid, "addressed_to": proposer or "<<REQUIRED: who should answer>>",
+            "concern": "<<REQUIRED: your question>>", "raised_by": owner}
+    out["clarify"] = {"json": clar, "command": ledger_cmd("challenge", clar), "edit_field": "concern"}
+    out["inquire"] = {"json": None, "command": None,
+                      "prompt": (f"Explain {cid} from my records (relay-kit status, or the ledgers and handoffs directly): "
+                                 f"what is being decided, what has changed since it was proposed, and the consequence "
+                                 f"of each option. Cite record ids. This is a question, not an instruction: don't "
+                                 f"change any record.")}
+    return out
+
+
 # ---------------- collecting ----------------
-def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None, brand=None):
+def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None, brand=None,
+            pr_lookup=None, pr_fetched_at=None):
+    """pr_lookup(owner, repo, number) -> 'merged' | 'closed' | 'open' | None, at build time only (--pr-state);
+    None leaves pull request states out. Nothing here touches the network otherwise."""
     root = pathlib.Path(root)
     if not root.is_dir():
         raise Refused(f"--root {root} isn't a folder")
@@ -258,6 +382,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     # that supersedes a proposal or resolves a challenge still settles it under --lane
     superseded = {d["fields"].get("supersedes") for d in decisions if d["fields"].get("supersedes")}
     closed = {c["fields"].get("resolves") for c in challenges if c["fields"].get("resolves")}
+    decisions_all, challenges_all, handoffs_all = list(decisions), list(challenges), list(handoffs)
     decisions = [d for d in decisions if lane_ok(d)]
     challenges = [c for c in challenges if lane_ok(c)]
     handoffs = [h for h in handoffs if lane_ok(h)]
@@ -327,9 +452,17 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             item["title"] = h["title"]
         waiting_handoffs.append(item["id"])
         choices.append(item)
+    questions = []
     for c in challenges:
         f = c["fields"]
         if c["status"] != "open" or f.get("id") in closed:
+            continue
+        if f.get("kind") == "question":   # a Clarify: waits on whoever it's addressed to, not on the owner
+            q = {"id": f.get("id"), "date": f.get("date"), "about": f.get("about"), "addressed_to": f.get("addressed_to"),
+                 "raised_by": f.get("raised_by"), "source": f"{c['source_path']}:{c['line']}"}
+            if full:
+                q["text"] = f.get("concern")
+            questions.append(q)
             continue
         item = {"kind": "challenge", "id": f.get("id"), "status": "open", "date": f.get("date"),
                 "raised_by": f.get("raised_by"), "source": f"{c['source_path']}:{c['line']}",
@@ -338,6 +471,72 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             item.update(text=f.get("concern"), affects=f.get("affects"), proposed_test=f.get("proposed_test"))
         choices.append(item)
     choices.sort(key=lambda i: (["decision", "handoff", "challenge"].index(i["kind"]), str(i["id"])))
+    questions.sort(key=lambda q: str(q["id"]))
+
+    # ---- what each choice is asking, what cites it, and whether it may be overtaken ----
+    owner_hint = records_github_owner(rd.root) if pr_lookup else None
+    texts = {}   # every record's searchable text, by (kind, id)
+    for d in decisions_all:
+        texts[("decision", d["fields"].get("id"))] = (d, dumps(d["fields"]))
+    for c in challenges_all:
+        texts[("challenge", c["fields"].get("id"))] = (c, dumps(c["fields"]))
+    for h in handoffs_all:
+        texts[("handoff", h["handoff_id"])] = (h, h.get("text") or "")
+    pr_states = {}
+    known_repos = set()
+    if pr_lookup and owner_hint:
+        own_re = re.compile(rf"\b{re.escape(owner_hint)}/([\w.-]+)", re.I)
+        for _, txt in list(texts.values()) + [(None, threads_text)]:
+            known_repos |= {x.lower().removesuffix(".git") for x in own_re.findall(txt)}
+    for item in choices:
+        cid, kind = item["id"], item["kind"]
+        rec, own = texts.get((kind, cid), (None, ""))
+        f = (rec or {}).get("fields") or {}
+        body = f.get("decision") or f.get("concern") or (rec or {}).get("text") or ""
+        ask = written_ask(f.get("ask")) if kind != "handoff" else None
+        if ask:
+            ask["by"] = f.get("proposed_by") or f.get("raised_by") or f.get("recorded_by")
+        else:
+            ask = derived_ask(kind, cid, (rec or {}).get("title") if kind == "handoff" else body, full,
+                              nxt=item["compose"]["accept"].get("state") if kind == "handoff" else None,
+                              why=item.get("why", ()))
+        item["ask"] = ask
+        item["refs"] = sorted({x for x in ID_REF.findall(own) if x != cid}) if full else []
+        pat = re.compile(rf"\b{re.escape(str(cid))}\b")
+        cited, waiting = [], []
+        for (k2, i2), (r2, txt) in texts.items():
+            if i2 == cid or not pat.search(txt):
+                continue
+            st2 = r2.get("status") if k2 == "handoff" else r2["fields"].get("status")
+            d2 = (r2.get("created") if k2 == "handoff" else r2["fields"].get("date")) or ""
+            ref = {"kind": k2, "id": i2, "status": st2, "date": d2}
+            if (k2 == "handoff" and st2 not in led.FINAL) or (k2 == "decision" and st2 == "proposed") or \
+               (k2 == "challenge" and st2 == "open"):
+                waiting.append(ref)
+            elif str(d2)[:10] >= str(item.get("date") or "")[:10]:
+                cited.append(ref)   # a later record that settled or acted on something citing this one
+        item["waiting_on_it"] = sorted(waiting, key=lambda r: str(r["id"]))
+        item["cited_later_by"] = sorted(cited, key=lambda r: str(r["id"]))
+        prs = []
+        if pr_lookup and full:
+            for o_, r_, n_ in pr_refs(body + " " + str(f.get("evidence") or ""), owner_hint, known_repos):
+                key = f"{o_}/{r_}#{n_}"
+                if key not in pr_states:
+                    pr_states[key] = pr_lookup(o_, r_, n_)
+                prs.append({"pr": key, "state": pr_states[key]})
+        item["prs"] = prs
+        sp = ex.span(item.get("date"))
+        item["age_days"] = (as_of_dt - sp[0]).days if sp and as_of_dt else None
+        reasons = [f"cited later by {r['kind']} {r['id']} ({r['status']})" for r in item["cited_later_by"]]
+        reasons += [f"{x['pr']} is {x['state']}" for x in prs if x["state"] in ("merged", "closed")]
+        item["possibly_overtaken"] = reasons
+        if kind != "handoff":
+            proposer = f.get("proposed_by") or f.get("recorded_by") if kind == "decision" else f.get("raised_by")
+            item["compose"].update(compose_extra(kind, cid, owner, proposer, full, body, f.get("scope")))
+        else:
+            # a handoff's question goes to its sender, who wrote what it asks for
+            item["compose"].update({k: v for k, v in compose_extra(kind, cid, owner, (rec or {}).get("from"), full, "", None).items()
+                                    if k in ("clarify", "inquire")})
 
     # handoff titles in metadata mode: ids only (the title can carry the substance)
     def htitle(h):
@@ -579,7 +778,8 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
               "authorized_in_progress": sum(1 for h in handoffs if run_class(h) == "authorized"),
               "pending_authorization": sum(1 for h in handoffs if run_class(h) == "pending"),
               "drift_flags": len([c for c in drift_ch if c["open"]]) + len(stale),
-              "delegations_inferred": len(delegations), "delegations_recorded": len(rec_edges)}
+              "delegations_inferred": len(delegations), "delegations_recorded": len(rec_edges),
+              "questions_open": len(questions), "possibly_overtaken": sum(1 for c in choices if c["possibly_overtaken"])}
     return {
         "schema": SCHEMA,
         "generator": {"tool": "relay-kit cockpit (tools/cockpit.py)", "kit_version": __version__,
@@ -589,6 +789,9 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
                   "coordinator": coords, "brand": brand},
         "counts": counts,
         "choices": choices,
+        "questions": questions,
+        "pr_state": ({"looked_up": True, "fetched_at": pr_fetched_at, "via": "gh api (build time)", "states": pr_states}
+                     if pr_lookup else {"looked_up": False}),
         "topology": {"information": info, "authority": authority},
         "budget": b,
         "run": run,
@@ -765,9 +968,54 @@ def choice_card(c):
             [("raised by", c.get("raised_by")), ("affects", c.get("affects")), ("proposed test", c.get("proposed_test")),
              ("source", c["source"])])
         hint = "Accept records accepted-risk; Reject records resolved (dismissed or fixed). You write the resolution."
+    comp = c["compose"]
     btns = "".join(f'<button type="button" class="act {a}" data-key="{e(key)}" data-act="{a}" '
-                   f'data-line="{e(c["compose"][a]["command"])}">{a.title()}</button>' for a in ("accept", "reject", "defer"))
-    return f'<article class="card choice" data-key="{e(key)}">{head}{body}<p class="hint">{e(hint)}</p><div class="btns">{btns}</div></article>'
+                   f'data-line="{e(comp[a]["command"])}">{a.title()}</button>' for a in ("accept", "reject", "defer"))
+    if "overtaken" in comp and c.get("possibly_overtaken"):
+        btns += (f'<button type="button" class="act overtaken" data-key="{e(key)}" data-act="overtaken" '
+                 f'data-line="{e(comp["overtaken"]["command"])}">Close as overtaken</button>')
+    edits = ""
+    for a, label, what in (("amend", "Amend", "Your text for the decision (it replaces the proposal's in the adopted line):"),
+                           ("clarify", "Clarify", "Your question to " + (str(comp.get("clarify", {}).get("json", {}).get("addressed_to")) if comp.get("clarify") else "the proposer") + ":")):
+        if a not in comp:
+            continue
+        x = comp[a]
+        cls = "act amend" if a == "amend" else "act clarify onrec"
+        btns += f'<button type="button" class="{cls}" data-key="{e(key)}" data-open="{a}" aria-expanded="false">{label}</button>'
+        pre = (c.get("text") or "") if a == "amend" else ""
+        edits += (f'<div class="editor" data-for="{a}" hidden><label>{e(what)}<textarea rows="{4 if a == "amend" else 3}">{e(pre)}</textarea></label>'
+                  f'<button type="button" class="primary small compose" data-key="{e(key)}" data-act="{a}" '
+                  f'data-kind="{"decision" if a == "amend" else "challenge"}" data-field="{e(x["edit_field"])}" '
+                  f'data-template="{e(dumps(x["json"]))}">Add to To apply</button></div>')
+    off = ""
+    if "inquire" in comp:
+        off = (f'<div class="offrec"><button type="button" class="act inquire" data-key="{e(key)}" '
+               f'data-prompt="{e(comp["inquire"]["prompt"])}">Inquire</button>'
+               f'<span>off record: copies a question for an assistant; nothing is written, nobody is obliged</span></div>')
+    onrec = ('<p class="onrec-note">Clarify is on the record: it composes an open question addressed to '
+             f'{e(comp["clarify"]["json"]["addressed_to"])}, who then owes an answer.</p>') if "clarify" in comp else ""
+    return (f'<article class="card choice" data-key="{e(key)}">{head}{ask_block(c)}{body}<p class="hint">{e(hint)}</p>'
+            f'<div class="btns">{btns}</div>{edits}{onrec}{off}</article>')
+
+
+def ask_block(c):
+    """'So what is this asking?' above the raw record: the question, what each action would do,
+    what waits on it and its age, and whether it may be overtaken. Says whose words it is."""
+    a = c.get("ask") or {}
+    whose = (f'written by {e(a.get("by") or "the proposer")}' if a.get("source") == "proposer"
+             else 'derived by this page from the record, not written by the proposer')
+    opts = "".join(f'<li><b>{e(o["label"])}</b> → {e(o["effect"])}</li>' for o in a.get("options", []))
+    dflt = f'<p class="dflt">If unanswered: {e(a["default_if_unanswered"])}</p>' if a.get("default_if_unanswered") else ""
+    refs = lambda rs: ", ".join(f'{r["kind"]} {r["id"]} ({r["status"]})' for r in rs)
+    facts = [("age", f'{c["age_days"]} d' if c.get("age_days") is not None else None),
+             ("waiting on it", refs(c.get("waiting_on_it") or [])), ("cites", ", ".join(c.get("refs") or [])),
+             ("pull requests", ", ".join(f'{x["pr"]} {x["state"] or "unknown"}' for x in c.get("prs") or []))]
+    over = ""
+    if c.get("possibly_overtaken"):
+        over = ('<p class="overtaken-flag"><span class="tag warn">POSSIBLY OVERTAKEN</span> '
+                + e("; ".join(c["possibly_overtaken"])) + '. Check before settling it; "Close as overtaken" composes the closing line.</p>')
+    return (f'<div class="ask"><p class="mini-label">SO WHAT IS THIS ASKING? · <span class="whose {e(a.get("source"))}">{whose}</span></p>'
+            f'<p class="q">{e(a.get("question"))}</p><ul class="effects">{opts}</ul>{dflt}{dl(facts)}{over}</div>')
 
 
 def table(head, rows, cls=""):
@@ -800,6 +1048,14 @@ def not_wired(what, links, also):
             f'content. {e(also)}</p><p class="mini-label">INTAKE THREAD, FROM THREADS.MD</p>'
             + (f'<ul class="links">{li}</ul>' if li else '<p class="empty">threads.md lists no line mentioning intake.</p>')
             + "</div>")
+
+
+def questions_table(qs):
+    if not qs:
+        return '<p class="empty">No open questions. Use Clarify on a choice to ask its proposer on the record.</p>'
+    rows = [(q["id"], q.get("about"), q.get("addressed_to"), q.get("raised_by"), q.get("date"), q.get("text") or "(text left out)")
+            for q in qs]
+    return table(["question", "about", "addressed to", "asked by", "date", "question text"], rows)
 
 
 def render(data):
@@ -857,8 +1113,12 @@ def render(data):
 </section>"""
     s_questions = f"""
 <section class="section surface" id="questions">
-{head(3, "QUESTIONS & REALIZATIONS", "Question stewards", "A persistent home for questions worth answering, challenging, or asking you.", "NO AGENT EXECUTION")}
-{not_wired("Question stewards", data["intake_links"], "Questions that are already recorded live as open challenges and proposed decisions: see Choices.")}
+{head(3, "QUESTIONS & REALIZATIONS", "Questions", "Open questions on the record: each was asked with Clarify, and waits on whoever it is addressed to.", "ON THE RECORD / NO AGENT EXECUTION")}
+<div class="notice"><b>A question is a record.</b> Clarify on a choice composes an open challenge with <code>"kind": "question"</code>,
+<code>about</code> the item and <code>addressed_to</code> its proposer. It leaves Choices (it waits on them, not you) and shows here
+until someone appends a line that <code>resolves</code> it, with the answer as its resolution. Off-record questions (Inquire)
+are never recorded and never appear here.</div>
+{questions_table(data.get("questions") or [])}
 </section>"""
 
     cards = "".join(choice_card(x) for x in data["choices"]) or '<p class="empty">Nothing waits on you.</p>'
@@ -1134,6 +1394,17 @@ dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 12px;mar
 .btns{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
 .act{min-height:36px;padding:7px 14px;border-radius:5px;border:1px solid #39474b;background:#152026;font:600 12px var(--mono)}
 .act.accept{color:var(--teal)}.act.reject{color:var(--coral)}.act.defer{color:var(--muted)}.act:hover{border-color:#59766c}
+.act.amend{color:var(--gold)}.act.overtaken{color:#e3c27d;border-style:dotted;border-color:#7a6a3d}
+.act.clarify{color:var(--purple);border-color:#5b4a73}.act.clarify::after{content:" · on record";font-weight:400;color:#a99bbf}
+.offrec{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px;padding-top:8px;border-top:1px dashed #33444a;color:#8ea4a3;font-size:12px}
+.act.inquire{border-style:dashed;background:transparent;color:var(--blue)}.act.inquire::after{content:" · off record";font-weight:400;color:#8ea4a3}
+.onrec-note{color:#a99bbf;font-size:12px;margin:6px 0 0}
+.editor{margin-top:8px}.editor label{display:block;font-size:12px;color:#9fb1b1}
+.editor textarea{display:block;width:100%;min-height:0;height:auto;resize:vertical;box-sizing:border-box;margin:4px 0 6px;background:#0d1519;color:inherit;border:1px solid #39474b;border-radius:5px;padding:8px;font:13px/1.4 var(--sans,inherit)}
+.ask{border-left:3px solid var(--teal);padding:4px 0 4px 10px;margin:10px 0}
+.ask .q{font-size:15px;font-weight:600;margin:4px 0 6px}.ask .effects{margin:0 0 6px;padding-left:18px;font-size:13px}
+.ask .whose.derived{font-style:italic;color:#c9a96e}.ask .dflt{font-size:12px;color:#9fb1b1;margin:2px 0}
+.overtaken-flag{font-size:12px;color:#e3c27d;margin:6px 0}.tag.warn{color:#e3c27d;border-color:#7a6a3d}
 .apply{position:sticky;top:80px;padding:14px;border-color:#5c6b4b}
 textarea,input,select{width:100%;background:#0a1013;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px}
 textarea{min-height:260px;color:var(--teal);font:12px/1.45 var(--mono);resize:vertical}input,select{margin:4px 0 12px}
@@ -1211,7 +1482,7 @@ JS = """
    if(old!==undefined&&v.indexOf(old)>=0){v=v.replace(old,function(){return line})}
    else{v=v.replace(/\\s*$/,'');v=(v?v+'\\n\\n':'')+line+'\\n';if(old!==undefined)msg='your edited line for '+k.split(':')[1]+' is kept above'}
    box.value=v;drawn=null}
-  var c=b.closest('.card');c.classList.remove('picked-accept','picked-reject','picked-defer');c.classList.add('picked-'+a);note.textContent=msg}
+  var c=b.closest('.card');c.classList.remove('picked-accept','picked-reject','picked-defer','picked-amend','picked-overtaken');c.classList.add('picked-'+a);note.textContent=msg}
  function ask(eyebrow,title,body,line,ok,cb){if(!dlg||!dlg.showModal){cb();return}
   d.getElementById('settle-eyebrow').textContent=eyebrow;d.getElementById('settle-title').textContent=title;
   d.getElementById('settle-body').textContent=body;d.getElementById('settle-line').textContent=line||'';
@@ -1219,18 +1490,41 @@ JS = """
  if(dlg)dlg.addEventListener('close',function(){if(dlg.returnValue==='ok'&&pending)pending();pending=null});
  $('button[data-line]').forEach(function(b){b.addEventListener('click',function(){var a=b.getAttribute('data-act');
   if(a==='defer'){pick(b);return}
-  ask('SETTLE THIS CHOICE?',(a==='accept'?'Accept ':'Reject ')+b.getAttribute('data-key').split(':')[1]+'?',
+  ask('SETTLE THIS CHOICE?',({accept:'Accept ',reject:'Reject ',overtaken:'Close as overtaken: '}[a]||'')+b.getAttribute('data-key').split(':')[1]+'?',
    'This adds a line to To apply. Nothing is written until you edit the placeholders, copy it, and run it yourself.',
    b.getAttribute('data-line'),'Add to To apply',function(){pick(b)})})});
  $('.torun').forEach(function(b){b.addEventListener('click',function(){var k=b.getAttribute('data-card');
   ask('MOVE FROM DRIFT TO RUN?',k.split(':')[1]+' is still a proposal.','A commitment needs your explicit authorization and a concrete next action. Nothing moves from here: open its card in Choices and compose the ledger line.',
    '','Open in Choices',function(){go('choices');flash(k)})})});
  function clear(){picks={};draw();note.textContent='';
-  $('.card').forEach(function(c){c.classList.remove('picked-accept','picked-reject','picked-defer')})}
+  $('.card').forEach(function(c){c.classList.remove('picked-accept','picked-reject','picked-defer','picked-amend','picked-overtaken','picked-clarify')})}
  d.getElementById('clear').addEventListener('click',function(){if(box.value===drawn){clear();return}
   var t='Discard your edits?',body='To apply holds text you edited. Clearing removes it; copy it first if you want to keep it.';
   if(!dlg||!dlg.showModal){if(window.confirm(t+' '+body))clear();return}
   ask('CLEAR TO APPLY?',t,body,'','Clear',clear)});
+ // Amend and Clarify: an editor on the card; your text goes into the composed line, nothing is written
+ $('[data-open]').forEach(function(b){b.addEventListener('click',function(){var c=b.closest('.card'),w=b.getAttribute('data-open');
+  c.querySelectorAll('.editor').forEach(function(ed){var on=ed.getAttribute('data-for')===w&&ed.hidden;ed.hidden=!on;
+   var o=c.querySelector('[data-open="'+ed.getAttribute('data-for')+'"]');if(o)o.setAttribute('aria-expanded',on?'true':'false');
+   if(on){var ta=ed.querySelector('textarea');if(ta)ta.focus()}})})});
+ function shq(s){return "'"+String(s).replace(/'/g,"'\\"'\\"'")+"'"}
+ $('.compose').forEach(function(b){b.addEventListener('click',function(){var a=b.getAttribute('data-act'),k=b.getAttribute('data-key'),
+  o=JSON.parse(b.getAttribute('data-template')),f=b.getAttribute('data-field'),v=b.closest('.editor').querySelector('textarea').value.trim();
+  if(v)o[f]=v;var line='relay-kit ledger append --dir governance '+b.getAttribute('data-kind')+' '+shq(JSON.stringify(o));
+  var pk={getAttribute:function(n){return n==='data-key'?(a==='clarify'?k+'|question':k):n==='data-act'?a:n==='data-line'?line:null},
+   closest:function(s){return b.closest(s)}};
+  ask(a==='amend'?'AMEND THIS DECISION?':'ASK ON THE RECORD?',
+   (a==='amend'?'Adopt '+k.split(':')[1]+' with your text?':'Ask about '+k.split(':')[1]+' on the record?'),
+   a==='amend'?'This adds an adopted line that supersedes the proposal, with your edited text. You still fill in decider, basis and locator.'
+    :'This adds an open question (a challenge of kind question). Once you run it, the person it is addressed to owes an answer, and it shows under Questions.',
+   line,'Add to To apply',function(){pick(pk)})})});
+ // Inquire: off the record. Copies a prompt; no line, no record, no obligation
+ $('.inquire').forEach(function(b){b.addEventListener('click',function(){var t=b.getAttribute('data-prompt');
+  function cp(){function done(){note.textContent='prompt copied (off record)'}
+   if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done,function(){note.textContent='select the prompt and copy it'})}else{note.textContent='select the prompt and copy it'}}
+  ask('INQUIRE · OFF RECORD','Ask an assistant about '+b.getAttribute('data-key').split(':')[1]+'?',
+   'Nothing is written and nobody is obliged. Paste the prompt into the coordinator or a lane; its answer is information, not a decision.',
+   t,'Copy prompt',cp)})});
  d.getElementById('copy').addEventListener('click',function(){var t=box.value;function done(){note.textContent='copied'}
   function fb(){box.focus();box.select();try{d.execCommand('copy');done()}catch(e){note.textContent='select and copy by hand'}}
   if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done,fb)}else{fb()}});
@@ -1249,7 +1543,7 @@ JS = """
 
 # ---------------- writing ----------------
 def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None,
-          allow_public_dest=False, brand=None):
+          allow_public_dest=False, brand=None, pr_state=False, pr_lookup=None):
     root, out = pathlib.Path(root), pathlib.Path(out)
     if not root.is_dir():
         raise Refused(f"--root {root} isn't a folder")
@@ -1262,8 +1556,12 @@ def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=N
         if foreign:
             raise Refused(f"--out {o} holds other files ({', '.join(foreign[:5])}); give a new or empty folder, "
                           "or one holding only a previous cockpit")
+    fetched = None
+    if pr_state:   # opt-in, build time only: the page itself never touches the network
+        pr_lookup = pr_lookup or gh_pr_state
+        fetched = iso(dt.datetime.now(dt.timezone.utc))
     data = collect(root, lane=lane, content=content, weekly_tokens=weekly_tokens, drift_days=drift_days,
-                   coordinator=coordinator, brand=brand)
+                   coordinator=coordinator, brand=brand, pr_lookup=pr_lookup if pr_state else None, pr_fetched_at=fetched)
     page = render(data)
     o.mkdir(parents=True, exist_ok=True)
     for name, text in (("cockpit.json", json.dumps(data, ensure_ascii=False, sort_keys=True, indent=1) + "\n"),
@@ -1286,13 +1584,16 @@ def main(argv=None):
     ap.add_argument("--drift-days", type=int, help="flag proposed decisions older than this (default 3, or governance/cockpit.json)")
     ap.add_argument("--coordinator", help="the coordinator lane (default: the lane whose name contains 'coord')")
     ap.add_argument("--brand", help="name shown in the header (default relay-kit, or 'brand' in governance/cockpit.json)")
+    ap.add_argument("--pr-state", action="store_true",
+                    help="look up the pull requests choices name (gh CLI, at build time) to flag ones already merged or "
+                         "closed; the page records when it looked. Off by default: without it nothing touches the network")
     ap.add_argument("--allow-public-dest", action="store_true",
                     help="write even inside a git repository that is public or whose visibility can't be confirmed")
     a = ap.parse_args(argv)
     try:
         d = build(a.root, a.out, lane=a.lane, content=a.content, weekly_tokens=a.weekly_tokens,
                   drift_days=a.drift_days, coordinator=a.coordinator, allow_public_dest=a.allow_public_dest,
-                  brand=a.brand)
+                  brand=a.brand, pr_state=a.pr_state)
     except Refused as err:
         sys.exit(f"refused: {err}")
     c = d["counts"]

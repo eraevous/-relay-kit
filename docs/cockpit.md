@@ -1,18 +1,23 @@
-# Cockpit (`relay-kit/cockpit@1`)
+# Cockpit (`relay-kit/cockpit@2`)
 
 One static page over your records: what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
 records store, read with the same readers as [export](export.md).
 
     relay-kit cockpit --root path/to/records --out ~/cockpit [--lane L] [--content full|metadata]
-                      [--weekly-tokens N] [--drift-days N] [--coordinator LANE] [--brand NAME]
+                      [--weekly-tokens N] [--drift-days N] [--coordinator LANE] [--brand NAME] [--pr-state]
 
 It writes two files into `--out`:
 
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@1"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@2"`).
+
+**@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
+`prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
+`inquire`; at the top level `questions`, `pr_state`, and `counts.questions_open` and
+`counts.possibly_overtaken`. Nothing from @1 was removed or changed in meaning.
 
 The page is deterministic: two runs over the same records give byte-identical files. The only
 date on it is "generated from records as of" the latest timestamp found in the records, and
@@ -29,7 +34,7 @@ header (default `relay-kit`; or `brand` in `governance/cockpit.json`).
 | --- | --- | --- | --- |
 | 01 | Overview | Four dials (choices waiting, 7-day budget, open handoffs, drift flags), the first items waiting on you, the Drift ≠ Run distinction | everything below |
 | 02 | Idea intake | **Not wired to records yet**: a tile saying so and the intake thread link(s), i.e. threads.md lines that mention "intake" | threads.md |
-| 03 | Questions | **Not wired to records yet**, same tile; recorded questions are open challenges and proposed decisions, shown in Choices | threads.md |
+| 03 | Questions | Open questions asked on the record with Clarify: challenges with `"kind": "question"`, with what they're `about`, who they're `addressed_to`, who asked and when. Each leaves Choices, since it waits on whoever must answer, not on you. It stays here until a line `resolves` it | challenges.jsonl |
 | 04 | Choices | Proposed decisions nobody has superseded (id, text, scope, proposer, decider, basis, locator, source line); handoffs that need you (prepared, Authorized not filled, addressed to you, or blocked); open challenges nobody has resolved. Accept / Reject / Defer on each | decisions.jsonl, challenges.jsonl, handoffs/ |
 | 05 | Topology | Two SVG diagrams. **Information**: one row per lane; actors, threads from threads.md, conversation@1 captures; handoff flows sender → receiver with counts. **Authority**: only *recorded* delegation, i.e. an adopted, in-force decision with a `delegates_to` field (a lane name or code, or a list); if none has one, the surface says "No recorded delegation" and draws nothing. A separate, visually distinct **hypothesised authority (inferred)** overlay, closed by default, holds the assumed owner → coordinator → lane lines and the text-matched delegations (decision text mentions delegating or authorizing; target read from its scope). Nothing executable is derived from either graph | handoffs/, threads.md, captures, decisions.jsonl, .ledger.json |
 | 06 | Budget control | Burn over the last 7 days against the weekly allowance, by lane and by actor; an advisory resource policy; a pre-flight estimator ("Should we spend on this question?") that runs in the page and records nothing | governance/budget.jsonl, governance/cockpit.json |
@@ -53,6 +58,60 @@ the placeholders, copy, and run the lines in your records with `RELAYKIT_ACTOR=<
 | proposed decision | `relay-kit ledger append --dir governance decision '{"status":"adopted","supersedes":"DEC-N",...}'` | same with `"status":"rejected"` | `# DEC-N: deferred ...` (nothing to append) |
 | open challenge | `... challenge '{"status":"accepted-risk","resolves":"CH-N",...}'` | `... '{"status":"resolved","resolves":"CH-N",...}'` | comment |
 | handoff | `relay-kit handoff --dir handoffs set HO-... <next>`, after you fill its Authorized section | `... set HO-... cancelled` | comment |
+
+### So what is this asking?
+
+Every choice card opens with a block, above the raw record, that answers what you're being asked:
+
+- **The question**, in one sentence ending in "?".
+- **What each action would do**, as a consequence ("Accept → an adopted line supersedes DEC-N: it is
+  in force…"), and what happens if nobody answers.
+- **What waits on it** (open handoffs, proposed decisions and open challenges that cite it), its
+  **age** in days back from the records' as-of date, the ids it cites, and the pull requests it names.
+- **Whose words these are.** A proposer can write the question with an `ask` field on the proposal
+  (see below), and the block then says "written by <proposer>". Otherwise the page derives one from the
+  record and says so: "derived by this page from the record, not written by the proposer". A derived
+  question is the page's reading, never presented as the proposer's.
+
+Write `ask` when you propose (`check_ledgers.py` checks it when present):
+
+    relay-kit ledger append --dir governance decision '{"status": "proposed", "decision": "...", "scope": "...",
+      "ask": {"question": "Run the survey weekly instead of monthly?",
+              "options": [{"label": "Accept", "effect": "the survey runs every Monday"},
+                          {"label": "Reject", "effect": "it stays monthly"}],
+              "default_if_unanswered": "it stays monthly"}}'
+
+### Possibly overtaken
+
+A card is flagged **possibly overtaken**, with its reasons, when:
+- a later decision or challenge, or a handoff that has finished or been cancelled, cites it (the
+  record dated on or after it, naming its id); or
+- with `--pr-state`, a pull request it names is merged or closed.
+
+It's a prompt to check, not a verdict: citing isn't the same as settling. Such a card offers
+**Close as overtaken**, which composes a closing line (an adopted line that supersedes a decision, or
+a resolved line for a challenge) with `<<REQUIRED>>` space for what overtook it.
+
+`--pr-state` is opt-in and happens at build time only. It runs `gh api` for each pull request named
+in a choice's text: a full `https://github.com/<owner>/<repo>/pull/N` URL, or "<repo> PR #N" where the
+records spell `<repo>` out as `<owner>/<repo>` somewhere (bare "#N" is ignored as ambiguous). The
+owner is the GitHub owner of the records' origin. `cockpit.json` records `pr_state.fetched_at`, the one
+clock time the output can hold, so a page built with it isn't byte-identical between runs. Without
+the flag nothing touches the network, and the page never does.
+
+### Amend, Clarify, Inquire
+
+Beside Accept / Reject / Defer:
+
+| Action | On the record? | What it composes |
+| --- | --- | --- |
+| **Amend** (decisions) | yes: your decision | Opens an editor prefilled with the proposal's text. Your edited text goes into an adopted line that supersedes the proposal (`"amends"` names it), with the usual decider / basis / locator placeholders. |
+| **Clarify** | yes: an obligation for someone | Opens an editor for your question. Composes an open challenge with `"kind": "question"`, `"about"` the item and `"addressed_to"` its proposer (a handoff's sender, for a handoff). Once you run it, it shows under Questions until whoever answers appends a line that resolves it with the answer. Chosen over a handoff note because a question about a decision belongs next to it in the ledger, and the answer closes it the way any challenge closes. |
+| **Inquire** | no | Copies a prompt for you to paste to an assistant ("Explain DEC-N from my records: what is being decided, what has changed since it was proposed, and the consequence of each option. Cite record ids…"). Nothing is written and nobody owes anything; the answer is information, not a decision. |
+
+Clarify and Inquire look different on purpose: Clarify is a solid button marked "on record", and
+Inquire sits apart under a dashed line, marked "off record". All of them, like Accept, write nothing:
+they compose into To apply (Inquire into your clipboard), and you run the line yourself.
 
 The handoff's `<next>` follows handoff.py's rules: prepared → sent, sent → acknowledged, acknowledged
 → in_progress, in_progress → completed (with a reminder to write `handoffs/outputs/HO-....md` first,

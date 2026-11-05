@@ -13,6 +13,11 @@ decisions.jsonl, one object per line:
   basis     the owner's words or the option they chose, quoted; required unless proposed
   locator   where those words are (thread, date, time)
   supersedes / evidence  optional
+  amends    optional: on a line that supersedes a proposal with the owner's edited text (the
+            cockpit's Amend); must equal supersedes
+  ask       optional, on a proposal: what it asks of the owner, in the proposer's words:
+            {"question": "...?", "options": [{"label": "Accept", "effect": "what happens"}, ...],
+             "default_if_unanswered": "what happens if nobody answers"}
 
 challenges.jsonl, one object per line:
   id        CH-NNN, numbered in order
@@ -22,6 +27,10 @@ challenges.jsonl, one object per line:
   raised_by who raised it
   resolution required unless open
   resolves  optional: an earlier CH id this line closes (the earlier line stays as written)
+  ask       optional, as on decisions
+  kind      optional: "question" for a question asked on the record (the cockpit's Clarify); it then
+            needs about (the DEC, CH or HO id it asks about) and addressed_to (who owes the answer).
+            Whoever answers appends a line that resolves it, with the answer as the resolution.
 
 No field of any line may still hold a "<<REQUIRED" placeholder: the cockpit composes lines with
 them where only the owner can supply the words (decider, basis, locator, resolution).
@@ -92,6 +101,30 @@ def check_placeholders(name, rows):
     return out
 
 
+ASK_KEYS = {"question", "options", "default_if_unanswered"}
+REF_RE = re.compile(r"^(?:DEC-\d{3,}|CH-\d{3,}|HO-[A-Z0-9]{1,12}-\d{8}-[0-9A-HJKMNP-TV-Z]{4}|HO-\d{8}-\d{3})$")
+
+
+def check_ask(where, a):
+    """The optional `ask` object: what a proposal asks of the owner, in the proposer's words."""
+    if a is None:
+        return []
+    if not isinstance(a, dict):
+        return [f"{where}: 'ask' must be an object with question, options and default_if_unanswered"]
+    out = [f"{where}: 'ask' has unknown key {k!r}" for k in sorted(set(a) - ASK_KEYS)]
+    q = a.get("question")
+    if not isinstance(q, str) or not q.strip().endswith("?"):
+        out.append(f"{where}: ask.question must be one sentence ending in '?'")
+    opts = a.get("options", [])
+    if not isinstance(opts, list) or not all(isinstance(o, dict) and isinstance(o.get("label"), str) and o["label"].strip()
+                                             and isinstance(o.get("effect"), str) and o["effect"].strip() for o in opts):
+        out.append(f"{where}: ask.options must be a list of {{label, effect}}, both non-empty text")
+    d = a.get("default_if_unanswered")
+    if d is not None and not (isinstance(d, str) and d.strip()):
+        out.append(f"{where}: ask.default_if_unanswered must be text")
+    return out
+
+
 def check_decisions(rows):
     out = check_ids("decisions.jsonl", rows, "DEC") + check_placeholders("decisions.jsonl", rows)
     ids = {r.get("id") for _, r in rows}
@@ -109,6 +142,9 @@ def check_decisions(rows):
         sup = r.get("supersedes")
         if sup and sup not in ids:
             out.append(f"{where}: supersedes unknown {sup}")
+        if "amends" in r and r.get("amends") != sup:
+            out.append(f"{where}: 'amends' must name the decision this line supersedes")
+        out += check_ask(where, r.get("ask"))
     return out
 
 
@@ -121,6 +157,14 @@ def check_challenges(rows):
             out.append(f"challenges.jsonl:{n}: resolves {res!r}, which isn't an earlier challenge")
         seen.add(r.get("id"))
         where = f"challenges.jsonl:{n}"
+        out += check_ask(where, r.get("ask"))
+        if "kind" in r and r.get("kind") != "question":
+            out.append(f"{where}: 'kind' is 'question' or absent")
+        if r.get("kind") == "question":
+            if not REF_RE.match(str(r.get("about", ""))):
+                out.append(f"{where}: a question needs 'about': the DEC, CH or HO id it asks about")
+            if not str(r.get("addressed_to", "")).strip():
+                out.append(f"{where}: a question needs 'addressed_to': who owes the answer")
         if r.get("status") not in CH_STATUS:
             out.append(f"{where}: status must be one of {sorted(CH_STATUS)}")
         for f in ("concern", "raised_by"):

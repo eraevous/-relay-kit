@@ -70,8 +70,8 @@
       ]
     },
     {
-      "id": "relay-kit/cockpit@1",
-      "what": "Read-only static control surface over a records store: DIR/index.html (one self-contained page: Choices, Topology, Budget, Run/Drift and the other v0.4 surfaces) and DIR/cockpit.json (the data it was built from). Choices compose paste-ready ledger_append / handoff set lines and write nothing (DEC-019). Reads decisions, challenges, handoff@1/@2, threads.md and conversation@1 through the export@1 readers, plus governance/budget.jsonl; changes none of them. Deterministic; the only date is the latest record timestamp.",
+      "id": "relay-kit/cockpit@2",
+      "what": "Read-only static control surface over a records store: DIR/index.html (one self-contained page: Choices, Topology, Budget, Run/Drift and the other v0.4 surfaces) and DIR/cockpit.json (the data it was built from). Choices compose paste-ready ledger_append / handoff set lines and write nothing (DEC-019). Reads decisions, challenges, handoff@1/@2, threads.md and conversation@1 through the export@1 readers, plus governance/budget.jsonl; changes none of them. Deterministic; the only date is the latest record timestamp. @2 (HO-RK-20261105-VZH4): each choice says what it asks (the proposer's optional `ask`, else a summary labelled derived), what cites it and waits on it, its age, and whether it may be overtaken (later citations; opt-in build-time PR states); Amend and Clarify compose ledger lines (an amending adopted line; an open question challenge addressed to the proposer); Inquire copies an off-record prompt; Questions lists open questions. Additive: nothing in @1 changed meaning.",
       "spec": "docs/cockpit.md",
       "implementers": [
         "tools/cockpit.py"
@@ -84,7 +84,10 @@
         "cockpit: two runs give byte-identical output and leave the records untouched",
         "cockpit: a composed line pasted unedited is refused by ledger_append (its <<REQUIRED placeholders fail the ledger check)",
         "cockpit: Run commitments count only authorized handoffs in progress; prepared or unauthorized ones are pending",
-        "cockpit: only an adopted decision with delegates_to draws a recorded delegation edge"
+        "cockpit: only an adopted decision with delegates_to draws a recorded delegation edge",
+        "cockpit: every choice says what it asks; the proposer's ask is shown as theirs, anything else is labelled derived",
+        "cockpit: Amend and Clarify compose ledger lines that pass the check once filled in, and are refused while placeholders remain",
+        "cockpit: Inquire is off the record: no command, no ledger line, only a prompt naming the item"
       ]
     },
     {
