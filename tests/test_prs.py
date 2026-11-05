@@ -100,6 +100,11 @@ class PrsTests(unittest.TestCase):
         self.assertEqual(b["author"], "claude:research#SESSA1")
         self.assertEqual(prs.parse_body("## What this changes\nX\n")["sections"], {"what": "X"})
         self.assertEqual(prs.parse_body(None)["missing"], list(prs.SECTIONS))
+        tpl = prs.parse_body((KIT / "tools" / "templates" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8"))
+        self.assertEqual((tpl["author"], tpl["missing"]), (None, list(prs.SECTIONS)))   # the unfilled template
+        self.assertEqual(prs.parse_body("Author: \t\n## What\nx")["author"], None)
+        fenced = prs.parse_body("## How\n```html\n<!-- kept -->\n```\n<!-- hint -->done")["sections"]["how"]
+        self.assertEqual(fenced, "```html\n<!-- kept -->\n```\ndone")
         long = prs.parse_body("## What\n" + "x" * 5000)
         self.assertEqual((len(long["sections"]["what"]), long["truncated"]), (prs.MAX_SECTION, ["what"]))
 
@@ -118,6 +123,39 @@ class PrsTests(unittest.TestCase):
         got = lines(self.root)
         self.assertEqual([(x["kind"], x.get("number"), x.get("state")) for x in got[-2:]], [("pr", 7, "merged"), ("fetch", None, None)])
         self.assertEqual((f["prs_seen"], f["appended"]), (2, 1))
+
+    def test_open_reread(self):
+        """prs: a PR last recorded open is read again however old, so a closed one never stays open"""
+        gh = FakeGitHub({"example/synthetic": [gh_pr(7)]})
+        gh.single = {}
+        orig = gh.__call__
+        def get(path):
+            if path == "repos/example/synthetic/pulls/7":
+                gh.calls.append(path)
+                return gh_pr(7, state="closed", merged=True, updated="2026-10-01T00:00:00Z")
+            return orig(path)
+        prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T12:00:00Z")
+        gh.prs["example/synthetic"] = []        # no longer among the recent ones the list returns
+        prs.run(self.root, get, "test", ["example/synthetic"], ts="2026-12-30T12:00:00Z")
+        last = [x for x in lines(self.root) if x["kind"] == "pr"][-1]
+        self.assertEqual((last["number"], last["state"]), (7, "merged"))
+        self.assertIn("repos/example/synthetic/pulls/7", gh.calls)
+
+    def test_newline(self):
+        """prs: appending to a file without a final newline doesn't join two lines"""
+        path = self.root / prs.OUT
+        path.write_text('{"schema": "relay-kit/prs@1", "kind": "fetch", "ts": "2026-11-01T00:00:00Z", "repos": [], "ok": [], "failed": {}}',
+                        encoding="utf-8")
+        prs.run(self.root, FakeGitHub({"example/synthetic": [gh_pr(7)]}), "test", ["example/synthetic"], ts="2026-11-03T12:00:00Z")
+        self.assertEqual([x["kind"] for x in lines(self.root)], ["fetch", "pr", "fetch"])
+        gov = self.tmp / "elsewhere"
+        gov.mkdir()
+        other = tc.build_root(self.tmp / "sym")
+        shutil.rmtree(other / "governance")
+        (other / "governance").symlink_to(gov)
+        with self.assertRaises(prs.Refused):
+            prs.run(other, FakeGitHub({}), "test", ["example/synthetic"])
+        self.assertEqual(list(gov.iterdir()), [])
 
     def test_failed_repo(self):
         """prs: a failing repository is recorded in the fetch line and the others are still read"""
@@ -147,6 +185,8 @@ class PrsTests(unittest.TestCase):
         gh = FakeGitHub({"example/synthetic": [gh_pr(7, sha="b" * 40), gh_pr(8, sha="c" * 40), gh_pr(9, sha="d" * 40)]},
                         reviews={7: [{"user": {"login": "sam"}, "state": "COMMENTED", "submitted_at": "2026-11-03T11:00:00Z",
                                       "body": "**APPROVED (round 2).**\nReviewer: model-b (other family)"},
+                                     {"user": {"login": "sam"}, "state": "COMMENTED", "submitted_at": "2026-11-03T11:30:00Z",
+                                      "body": "**NOT APPROVED**: not LGTM yet; REQUEST CHANGES"},
                                      {"user": {"login": "x"}, "state": "PENDING", "body": ""}]},
                         runs={"b" * 40: [{"name": "tests", "status": "completed", "conclusion": "failure"}],
                               "c" * 40: [{"name": "tests", "status": "in_progress", "conclusion": None}]})
@@ -156,7 +196,9 @@ class PrsTests(unittest.TestCase):
         self.assertEqual(by[8]["ci"]["state"], "pending")
         self.assertEqual(by[9]["ci"]["state"], "none")
         self.assertEqual(by[7]["reviews"], [{"by": "sam", "verdict": "COMMENTED", "at": "2026-11-03T11:00:00Z",
-                                             "signed": "model-b (other family)", "stated": "APPROVED"}])
+                                             "signed": "model-b (other family)", "stated": "APPROVED"},
+                                            {"by": "sam", "verdict": "COMMENTED", "at": "2026-11-03T11:30:00Z",
+                                             "signed": None, "stated": "REQUEST CHANGES"}])   # negated verdicts are skipped
 
     def test_repos(self):
         """prs: repositories come from .ledger.json repos or --repo; anything not OWNER/NAME is refused"""
@@ -182,7 +224,10 @@ class CockpitPrTests(unittest.TestCase):
             gh_pr(7),
             gh_pr(8, body="Author: sam\n\n## What\nOwner's own change.\n## Why\nBecause.\n## How\nBy hand.\n## Authorized\nn/a\n"),
             gh_pr(9, state="closed", merged=True, body="no sections here"),
-        ]}, reviews={7: [{"user": {"login": "rev-bot"}, "state": "APPROVED", "submitted_at": "2026-11-03T11:00:00Z", "body": ""}]})
+            gh_pr(10, state="closed", merged=True, body="Author: \n", updated="2026-11-03T08:00:00Z"),
+        ]}, reviews={7: [{"user": {"login": "rev-bot"}, "state": "APPROVED", "submitted_at": "2026-11-03T11:00:00Z", "body": ""},
+                         {"user": {"login": "sam"}, "state": "COMMENTED", "submitted_at": "2026-11-03T11:10:00Z",
+                          "body": "Reviewer: SECRETSIGNED reviewer\nlooks fine"}]})
         prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T12:00:00Z")
 
     def tearDown(self):
@@ -198,14 +243,16 @@ class CockpitPrTests(unittest.TestCase):
         """cockpit: Pull requests renders each PR's sections verbatim and escaped, with who wrote it and what is missing"""
         data, page = self.build()
         items = {x["number"]: x for x in data["pull_requests"]["items"]}
-        self.assertEqual([x["number"] for x in data["pull_requests"]["items"]], [7, 8, 9])   # open first, then merged
+        self.assertEqual([x["number"] for x in data["pull_requests"]["items"]], [7, 8, 9, 10])   # open first, then merged
         self.assertEqual(items[7]["sections"]["what"], f"Adds the synthetic report. {HOSTILE}")
         self.assertNotIn("<script>alert(1)", page)
         self.assertIn("&lt;/textarea&gt;&lt;/script&gt;&lt;script&gt;alert(1)", page)
         self.assertIn("sections missing: why, authorized", page)
         self.assertEqual(items[7]["reviews"][0]["family"], None)
         self.assertEqual(data["counts"]["prs_open"], 2)
-        self.assertEqual(page.count('class="card pr '), 3)
+        self.assertEqual(page.count('class="card pr '), 4)
+        self.assertEqual(items[10]["written_by"], "unstated")             # a blank Author: line builds, as unstated
+        self.assertEqual(items[7]["reviewers_counted"], 2)
 
     def test_written_by(self):
         """cockpit: an agent-written PR is tagged as not written by the owner; one with no Author line says so"""
@@ -225,6 +272,11 @@ class CockpitPrTests(unittest.TestCase):
         for word in ("Adds the synthetic report", "Owner's own change", "Synthetic PR", "By hand"):
             self.assertNotIn(word, page)
         self.assertIn("written by an agent, not the owner", page)   # actors stay in metadata; the Author line's text doesn't
+        js = (self.tmp / "out" / "cockpit.json").read_text(encoding="utf-8")
+        for word in ("SECRETSIGNED", "Adds the synthetic report", "Synthetic PR"):
+            self.assertNotIn(word, page)
+            self.assertNotIn(word, js)
+        self.assertIsNone({x["number"]: x for x in data["pull_requests"]["items"]}[7]["author_family"])
         self.assertIn("Sections present: what, how", page)
         self.assertEqual({x["number"]: x["sections"] for x in data["pull_requests"]["items"]}[7], {})
 
@@ -232,24 +284,42 @@ class CockpitPrTests(unittest.TestCase):
         """cockpit: PR states for overtaken checks come from pr-state.jsonl without any network lookup"""
         with open(self.root / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps({"id": "DEC-010", "date": "2026-11-03", "status": "proposed", "scope": "research",
-                                "decision": "Merge https://github.com/example/synthetic/pull/9 after review.",
+                                "decision": "Merge https://github.com/example/synthetic/pull/9 and https://github.com/example/synthetic/pull/7.",
                                 "recorded_by": "claude:research#SESSA1"}) + "\n")
+        saved = ck.gh_pr_state
         def no_net(*a):
             raise AssertionError("network")
-        data, _ = self.build(pr_lookup=no_net)                       # --pr-state off: the file alone
+        ck.gh_pr_state = no_net
+        try:
+            data, _ = self.build()                                   # --pr-state off: the file alone, no gh
+        finally:
+            ck.gh_pr_state = saved
         c = next(x for x in data["choices"] if x["id"] == "DEC-010")
         self.assertIn("example/synthetic#9 is merged", c["possibly_overtaken"])
-        self.assertIn("relay-kit prs", data["pr_state"]["via"])
+        self.assertTrue(all("pr-state.jsonl" in x["source"] for x in c["prs"]))
+        # with --pr-state, gh is asked first: the file's "open" for #7 is older than what gh says now
+        calls = []
+        def fresh(o, r, n):
+            calls.append(n)
+            return "merged"
+        data, _ = self.build("live", pr_state=True, pr_lookup=fresh)
+        c = next(x for x in data["choices"] if x["id"] == "DEC-010")
+        self.assertEqual(sorted(calls), [7, 9])
+        self.assertIn("example/synthetic#7 is merged", c["possibly_overtaken"])
+        self.assertTrue(all(x["source"].startswith("gh at build time") for x in c["prs"]))
 
     def test_theme(self):
         """cockpit: a theme can set only known variables to colours or font lists; anything else is refused"""
         good = self.tmp / "t.json"
         good.write_text(json.dumps({"name": "t", "dark": {"bg": "#000000", "mark": "var(--gold)", "heading": "Georgia, serif"}}))
         data, page = self.build(theme=good)
+        for fine in ('"Source Sans 3", ui-sans-serif, Arial', "'Fira Code', monospace", "Georgia"):
+            self.assertTrue(ck.FONT_VALUE.fullmatch(fine), fine)
         self.assertIn("--bg:#000000", page)
         self.assertEqual(data["query"]["theme"], "t")
         for bad in ({"dark": {"bg": "red;}</style><script>"}}, {"dark": {"nope": "#000"}}, {"dark": {"heading": "x{}"}},
-                    {"dark": {"bg": "url(http://x)"}}, {"light": "x"}, {"dark": {}, "extra": 1}, {"default": "light"}):
+                    {"dark": {"bg": "url(http://x)"}}, {"light": "x"}, {"dark": {}, "extra": 1}, {"default": "light"},
+                    {"dark": {"display": 'Georgia"'}}, {"dark": {"display": "'a, b"}}, {"dark": {"display": ","}}):
             p = self.tmp / "bad.json"
             p.write_text(json.dumps(bad))
             with self.assertRaises(ck.Refused, msg=str(bad)):
@@ -279,6 +349,16 @@ class CockpitPrTests(unittest.TestCase):
         (self.root / "governance" / "cockpit.json").write_text(json.dumps({"landing": "choices"}))
         data, _ = self.build("y")
         self.assertEqual(data["query"]["landing"], "choices")
+
+    def test_recent(self):
+        """cockpit: merged or closed pull requests older than the reader's window are counted, not listed"""
+        with open(self.root / prs.OUT, "a", encoding="utf-8") as f:
+            old = dict(lines(self.root)[0], number=3, state="merged", merged_at="2026-09-01T00:00:00Z", updated_at="2026-09-01T00:00:00Z")
+            f.write(json.dumps(old) + "\n")
+        data, page = self.build()
+        self.assertFalse({x["number"]: x for x in data["pull_requests"]["items"]}[3]["recent"])
+        self.assertIn("1 older merged or closed pull request(s) are in the file but not shown", page)
+        self.assertNotIn("example/synthetic#3", page)
 
     def test_no_file(self):
         """cockpit: without pr-state.jsonl the Pull requests surface says how to fill it and nothing is fetched"""

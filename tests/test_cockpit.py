@@ -531,12 +531,13 @@ class AskTests(unittest.TestCase):
             return "merged"
         data, _ = self.build()
         self.assertEqual((calls, self.item(data, "DEC-007")["prs"], data["pr_state"]),
-                         ([], [{"pr": "example/synthetic#7", "state": None}], {"looked_up": False}))   # named, not looked up
+                         ([], [{"pr": "example/synthetic#7", "state": None, "source": None}], {"looked_up": False}))   # named, not looked up
         self.assertEqual(len(self.item(data, "DEC-007")["possibly_overtaken"]), 1)
         data, _ = self.build("pr", pr_state=True, pr_lookup=fake)
         self.assertEqual(calls, [("example", "synthetic", 7)])
         c = self.item(data, "DEC-007")
-        self.assertEqual(c["prs"], [{"pr": "example/synthetic#7", "state": "merged"}])
+        self.assertEqual([(x["pr"], x["state"], x["source"].split(" (")[0]) for x in c["prs"]],
+                         [("example/synthetic#7", "merged", "gh at build time")])
         self.assertIn("example/synthetic#7 is merged", c["possibly_overtaken"])
         self.assertIn("Close as overtaken", [o["label"] for o in c["effects"]])
         self.assertTrue(data["pr_state"]["looked_up"] and data["pr_state"]["fetched_at"])
@@ -549,7 +550,7 @@ class AskTests(unittest.TestCase):
                                 "ask": {"question": "Merge https://github.com/example/synthetic/pull/9?",
                                         "options": [{"label": "Accept", "effect": "merged"}], "default_if_unanswered": "open"}}) + "\n")
         data, _ = self.build("pr-ask", pr_state=True, pr_lookup=fake)
-        self.assertEqual(self.item(data, "DEC-009")["prs"], [{"pr": "example/synthetic#9", "state": "merged"}])
+        self.assertEqual([(x["pr"], x["state"]) for x in self.item(data, "DEC-009")["prs"]], [("example/synthetic#9", "merged")])
         self.assertEqual(ck.pr_refs("https://github.com/../../pull/1 and telosmith pr #9", "sam", {"telosmith"}), [])
         before = len(calls)
         meta, _ = self.build("pr-meta", content="metadata", pr_state=True, pr_lookup=fake)
