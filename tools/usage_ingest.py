@@ -47,9 +47,12 @@ def find_session(projects, sid):
     return hits[0]
 
 
-def read_usage(path, seen, totals, by_model, stamps):
-    """Add one log file's usage (once per message id) to the running totals."""
+def read_usage(path, seen, totals, by_model, stamps, info=None):
+    """Add one log file's usage (once per response id) to the running totals. A usage line without a
+    response id can't be de-duplicated, so it isn't counted (info["unidentified"]); compaction markers
+    and Claude Code's own cost-state record go into info."""
     n = 0
+    info = info if info is not None else {}
     with open(path, encoding="utf-8", errors="replace") as f:
         for ln in f:
             try:
@@ -61,11 +64,21 @@ def read_usage(path, seen, totals, by_model, stamps):
             ts = o.get("timestamp")
             if isinstance(ts, str) and re.match(r"^\d{4}-\d{2}-\d{2}T", ts):
                 stamps.append(ts)
+            if o.get("type") == "system" and o.get("subtype") == "compact_boundary":
+                info["compactions"] = info.get("compactions", 0) + 1
+                cm = o.get("compactMetadata") if isinstance(o.get("compactMetadata"), dict) else {}
+                if isinstance(cm.get("cumulativeDroppedTokens"), int):
+                    info["dropped_tokens"] = max(info.get("dropped_tokens", 0), cm["cumulativeDroppedTokens"])
+            if o.get("type") == "cost-state" and isinstance(o.get("startTime"), (int, float)):
+                info["session_started"] = dt.datetime.fromtimestamp(o["startTime"] / 1000, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             m = o.get("message")
             if not isinstance(m, dict) or not isinstance(m.get("usage"), dict):
                 continue
-            mid = m.get("id") or o.get("requestId") or o.get("uuid")
-            if not mid or mid in seen:
+            mid = m.get("id") or o.get("requestId")
+            if not mid:
+                info["unidentified"] = info.get("unidentified", 0) + 1
+                continue
+            if mid in seen:
                 continue
             seen.add(mid)
             u = m["usage"]
@@ -84,30 +97,49 @@ def read_usage(path, seen, totals, by_model, stamps):
 
 
 def utc(ts):
+    """An ISO time with a zone, in UTC; a time without a zone isn't guessed at."""
     try:
-        return dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        d = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return d.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if d.tzinfo else None
 
 
 def session_line(main, sid, actor):
-    seen, stamps, by_model = set(), [], {}
+    seen, stamps, by_model, info = set(), [], {}, {}
     totals = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
-    msgs = read_usage(main, seen, totals, by_model, stamps)
+    msgs = read_usage(main, seen, totals, by_model, stamps, info)
     subdir = main.with_suffix("") / "subagents"
-    subs = sorted(p for p in subdir.glob("agent-*.jsonl") if p.is_file() and not p.is_symlink()) if subdir.is_dir() else []
-    sub_msgs = sum(read_usage(p, seen, totals, by_model, stamps) for p in subs)
+    subs = (sorted(p for p in subdir.glob("agent-*.jsonl") if p.is_file() and not p.is_symlink())
+            if subdir.is_dir() and not subdir.is_symlink() and not main.with_suffix("").is_symlink() else [])
+    sub_msgs = sum(read_usage(p, seen, totals, by_model, stamps, info) for p in subs)
     times = sorted(t for t in (utc(s) for s in stamps) if t)
     if not msgs and not sub_msgs:
         raise Refused(f"session {sid}: no usage in its logs")
-    return {"ts": times[-1], "actor": actor, "window": "session", "method": "measured",
+    if not times:
+        raise Refused(f"session {sid}: its logs carry no timestamps with a zone")
+    # a compacted transcript, or one that starts after the session did, misses part of the session:
+    # its sum is a lower bound, which is an estimate, not a measurement (missing is never zero, nor complete)
+    started = info.get("session_started")
+    late = bool(started and times[0] > started and (dt.datetime.fromisoformat(times[0][:-1]) -
+                                                    dt.datetime.fromisoformat(started[:-1])).total_seconds() > 3600)
+    complete = not info.get("compactions") and not late and not info.get("unidentified")
+    return {"ts": times[-1], "actor": actor, "window": "session", "method": "measured" if complete else "estimate",
+            "complete": complete,
+            "log_coverage": {"compactions": info.get("compactions", 0), "dropped_tokens": info.get("dropped_tokens"),
+                             "session_started": started, "first_logged": times[0],
+                             "usage_lines_without_id": info.get("unidentified", 0)},
             "metric_version": BG.SCHEMA.split("/")[1],
             "tokens_in": totals["input"] + totals["cache_write"], "tokens_out": totals["output"],
             "tokens_detail": {**totals, "by_model": by_model},
             "interval_start": times[0], "interval_end": times[-1],
             "includes_children": {"included": True, "ids": []},
             "scope": (f"Claude Code session {sid} on the machine that ran it: main log ({msgs} messages) and "
-                      f"{len(subs)} subagent log(s) ({sub_msgs} messages), as on disk; compacted or deleted parts aren't counted"),
+                      f"{len(subs)} subagent log(s) ({sub_msgs} messages), as on disk"
+                      + ("" if complete else f"; INCOMPLETE ({info.get('compactions', 0)} compaction(s)"
+                         + (", logs start after the session did" if late else "")
+                         + (f", {info.get('unidentified')} usage line(s) without an id" if info.get("unidentified") else "")
+                         + "): a lower bound")),
             "source": "Claude Code local session logs (usage per assistant message; costUSD not used)",
             "agents": len(subs), "note": ""}
 
@@ -130,6 +162,7 @@ def main(argv=None):
         p = a.dir / "budget.jsonl"
         text = p.read_text(encoding="utf-8") if p.exists() else ""
         rows = BG.parse(text)[0]
+        kept, rep = BG.effective(rows)
         known = [(BG.line_id(raw, o), o) for _, raw, o in rows]
         out = []
         for sid in a.session:
@@ -137,11 +170,21 @@ def main(argv=None):
                 raise Refused(f"{sid!r} isn't a session id")
             row = session_line(find_session(a.projects, sid), sid, a.actor.strip())
             base = f"cc-{sid}"
-            chain = [i for i, _ in known if i == base or i.startswith(base + "-r")]
+            if any(d["id"] == base or d["id"].startswith(base + "-r") for d in rep["duplicates"]):
+                raise Refused(f"{base} appears more than once in {p}: reconcile the duplicates before ingesting again")
+            chain = [i for i, _ in known if i == base or re.fullmatch(re.escape(base) + r"-r\d+", i)]
             if chain:      # again for a session already ingested: replace its latest line, never add a second
-                replaced = {o.get("correction_of") for _, o in known if o.get("correction_of")}
-                latest = next((i for i in reversed(chain) if i not in replaced), chain[-1])
-                row["correction_of"], row["id"] = latest, f"{base}-r{len(chain)}"
+                latest = base
+                while latest in rep["replaced"]:
+                    latest = rep["replaced"][latest]
+                prev = dict(known)[latest]
+                shrank = [k for k in ("tokens_in", "tokens_out") if row[k] < (prev.get(k) or 0)]
+                if shrank or (prev.get("interval_start") and row["interval_start"] > prev["interval_start"]):
+                    raise Refused(f"session {sid}: the logs now show less than {latest} recorded ("
+                                  + (", ".join(shrank) or "a later start") + "): compacted or deleted since? "
+                                  f"Keeping {latest}; nothing appended")
+                nums = [int(i.rsplit("-r", 1)[1]) for i in chain if i != base]
+                row["correction_of"], row["id"] = latest, f"{base}-r{max(nums, default=0) + 1}"
             else:
                 row["id"] = base
             bad = BG.problems(row)

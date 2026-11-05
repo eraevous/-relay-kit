@@ -149,7 +149,7 @@
     },
     {
       "id": "relay-kit/budget@2",
-      "what": "governance/budget.jsonl, append-only: @1's ts, actor, window, tokens_in, tokens_out (and optional agents, note) plus @2's id (or a content-hash id for older lines), method (measured | proxy | estimate; required on new lines, 'unlabelled' for older ones), interval_start/end, includes_children {included, ids}, correction_of (an earlier line, same window: the replaced line is never summed with its correction and its use keeps the replaced line's time; two corrections of one line are a reported conflict, the later counting), metric_version, scope and source. Read through tools/budget.py by every reader; written by relay-kit budget-append. tokens_detail {input, output, cache_write, cache_read, by_model} keeps cache reads apart. relay-kit usage-ingest (tools/usage_ingest.py) turns a Claude Code session's local logs into one measured line per session (message ids counted once across main and subagent logs; costUSD unused; re-ingesting appends a correction; no paths in the line).",
+      "what": "governance/budget.jsonl, append-only: @1's ts, actor, window, tokens_in, tokens_out (and optional agents, note) plus @2's id (or a content-hash id for older lines), method (measured | proxy | estimate; required on new lines, 'unlabelled' for older ones), interval_start/end, includes_children {included, ids}, correction_of (an earlier line, same window: the replaced line is never summed with its correction and its use keeps the replaced line's time; two corrections of one line are a reported conflict, the later counting), metric_version, scope and source. Read through tools/budget.py by every reader; written by relay-kit budget-append. tokens_detail {input, output, cache_write, cache_read, by_model} keeps cache reads apart. relay-kit usage-ingest (tools/usage_ingest.py) turns a Claude Code session's local logs into one line per session: measured when the logs are complete, an estimate marked complete:false (a lower bound, with log_coverage) when compacted or late (message ids counted once across main and subagent logs; costUSD unused; re-ingesting appends a correction; no paths in the line).",
       "spec": "docs/budget.md",
       "implementers": [
         "tools/budget.py",
@@ -168,7 +168,9 @@
         "budget: the same reading appended twice gets two ids; duplicate ids in the file are reported and both lines read; a corrected line can't be corrected again",
         "usage: one measured line per session; a message split over several log lines counts once; cache reads stay apart",
         "usage: ingesting a session again appends a correction, so the cockpit counts it once",
-        "usage: the line carries counts and the session id only: no file paths or folder names"
+        "usage: the line carries counts and the session id only: no file paths or folder names",
+        "usage: a compacted log, or one starting well after its session did, gives an estimate marked incomplete, never a measurement",
+        "usage: a re-run that shows less than before is refused; duplicate session lines are refused; unidentified usage lines and zone-less times aren't counted"
       ]
     },
     {
