@@ -39,11 +39,12 @@ SECTIONS = ("what", "why", "how", "authorized")
 MAX_SECTION = 4000      # characters kept per section; longer ones are cut and listed under "truncated"
 REPO = re.compile(r"[A-Za-z0-9][\w.-]*/[\w.-]+")
 HEADING = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
-AUTHOR = re.compile(r"^[ \t]*\**Author\**[ \t]*:[ \t]*\**[ \t]*(.+?)[ \t]*$", re.I)
+AUTHOR = re.compile(r"^[ \t]*\**Author\**[ \t]*:[ \t]*\**[ \t]*(\S.*?)[ \t]*$", re.I)
 SIGNED = re.compile(r"^[ \t]*\**(?:Reviewer|Reviewed by|Review by)\**[ \t]*:[ \t]*\**[ \t]*(.+?)[ \t]*$", re.I)
 COMMENT = re.compile(r"<!--.*?-->", re.S)
 # a verdict written in a review's opening words, for reviews posted as comments ("**APPROVED (round 4)**")
 STATED = re.compile(r"\b(APPROVED|APPROVE|REQUEST(?:ING)? CHANGES|CHANGES REQUESTED|LGTM|BLOCK(?:ING|ED)?)\b")
+NEGATED = re.compile(r"\b(?:not|no|never|isn't|aren't|cannot|can't|won't|un)\W*$", re.I)
 FENCE = re.compile(r"^[ \t]*(```|~~~)")
 FAILED = {"failure", "timed_out", "cancelled", "action_required", "startup_failure", "error"}
 COMPARE_SKIP = {"ts"}
@@ -65,6 +66,29 @@ def section_key(title):
     return w if w in SECTIONS else None
 
 
+def strip_comments(text):
+    """HTML comments removed outside code fences only, so a fenced example stays verbatim."""
+    out, chunk, fenced = [], [], False
+    for ln in text.split("\n"):
+        if FENCE.match(ln):
+            out.append(chunk if fenced else COMMENT.sub("", "\n".join(chunk)).split("\n"))
+            out.append([ln])
+            chunk, fenced = [], not fenced
+            continue
+        chunk.append(ln)
+    out.append(chunk if fenced else COMMENT.sub("", "\n".join(chunk)).split("\n"))
+    return "\n".join(ln for part in out for ln in part)
+
+
+def stated_verdict(body):
+    """A verdict word in a review's opening words, unless negated ("NOT APPROVED", "not LGTM yet")."""
+    head = (body or "")[:160]
+    for m in STATED.finditer(head):
+        if not NEGATED.search(head[max(0, m.start() - 16):m.start()]):
+            return m.group(1)
+    return None
+
+
 def parse_body(body):
     """{sections: {key: text}, author: str|None, missing: [...], truncated: [...]}. Section text is the
     body's own words between the heading and the next heading of the same or a higher level, with HTML
@@ -84,14 +108,14 @@ def parse_body(body):
         if not key or key in sections:
             continue
         end = next((k for k, lv, _ in heads[j + 1:] if lv <= level), len(lines))
-        text = COMMENT.sub("", "\n".join(lines[i + 1:end])).strip()
+        text = strip_comments("\n".join(lines[i + 1:end])).strip()
         if not text:
             continue
         if len(text) > MAX_SECTION:
             text, _ = text[:MAX_SECTION], truncated.append(key)
         sections[key] = text
     author, fenced = None, False
-    for ln in COMMENT.sub("", "\n".join(lines)).split("\n"):
+    for ln in strip_comments("\n".join(lines)).split("\n"):
         if FENCE.match(ln):
             fenced = not fenced
         elif not fenced and (m := AUTHOR.match(ln)):
@@ -160,9 +184,8 @@ def pr_record(get, repo, pr, ts):
         if r.get("state") in (None, "PENDING"):
             continue
         sig = next((m.group(1)[:120] for ln in (r.get("body") or "").split("\n") if (m := SIGNED.match(ln))), None)
-        st = STATED.search((r.get("body") or "")[:160])
         reviews.append({"by": (r.get("user") or {}).get("login"), "verdict": r.get("state"),
-                        "at": r.get("submitted_at"), "signed": sig, "stated": st.group(1) if st else None})
+                        "at": r.get("submitted_at"), "signed": sig, "stated": stated_verdict(r.get("body"))})
     sha = (pr.get("head") or {}).get("sha")
     state = "merged" if pr.get("merged_at") else pr.get("state")
     return {"schema": SCHEMA, "kind": "pr", "ts": ts, "repo": repo, "number": n,
@@ -227,24 +250,39 @@ def run(root, get, via, repos=None, since_days=14, limit=30, ts=None, dry_run=Fa
     if not (root / "governance").is_dir():
         raise Refused(f"{root} has no governance/ folder; is it a records store?")
     path = root / OUT
-    if path.is_symlink():
-        raise Refused(f"{OUT} is a symlink; refusing to append through it")
+    if path.is_symlink() or (root / "governance").is_symlink() or \
+            not path.parent.resolve().is_relative_to(root.resolve()):
+        raise Refused(f"{OUT} or governance/ is a symlink; refusing to append through it")
     repos = repos_of(root, repos)
     ts = ts or now_iso()
     cutoff = (dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ") - dt.timedelta(days=since_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     last = latest_by_pr(read_lines(path))
     new, ok, failed, seen = [], [], {}, 0
     for repo in repos:
+        found = []
         try:
-            prs = get(f"repos/{repo}/pulls?state=all&sort=updated&direction=desc&per_page={max(1, min(limit, 100))}") or []
+            prs = get(f"repos/{repo}/pulls?state=all&sort=updated&direction=desc&per_page={max(1, min(limit, 100))}")
+            if not isinstance(prs, list):
+                raise Refused(f"repos/{repo}/pulls: unexpected response")
+            listed = {pr.get("number") for pr in prs if isinstance(pr, dict)}
+            # a PR last recorded open is re-read whatever its age, so a closed one never stays "open"
+            for (r_, n_), prev in sorted(last.items(), key=lambda kv: kv[0][1]):
+                if r_ == repo and prev.get("state") == "open" and n_ not in listed:
+                    one = get(f"repos/{repo}/pulls/{n_}")
+                    if isinstance(one, dict):
+                        prs.append(one)
             for pr in prs:
-                if pr.get("state") != "open" and (pr.get("updated_at") or "") < cutoff:
+                if not isinstance(pr, dict) or not isinstance(pr.get("number"), int):
+                    raise Refused(f"repos/{repo}/pulls: unexpected response")
+                was_open = (last.get((repo, pr["number"])) or {}).get("state") == "open"
+                if pr.get("state") != "open" and not was_open and (pr.get("updated_at") or "") < cutoff:
                     continue
                 seen += 1
                 rec = pr_record(get, repo, pr, ts)
                 prev = last.get((repo, rec["number"]))
                 if prev is None or not same(prev, rec):
-                    new.append(rec)
+                    found.append(rec)
+            new += found          # a repository that fails part-way contributes nothing
             ok.append(repo)
         except Refused as x:
             failed[repo] = str(x)[:300]
@@ -255,6 +293,12 @@ def run(root, get, via, repos=None, since_days=14, limit=30, ts=None, dry_run=Fa
         for x in lines:
             print(json.dumps(x, ensure_ascii=False, sort_keys=True))
         return fetch
+    with open(path, "a+b") as f:     # a file not ending in a newline gets one first, so no line is joined
+        f.seek(0, os.SEEK_END)
+        if f.tell():
+            f.seek(-1, os.SEEK_END)
+            if f.read(1) != b"\n":
+                f.write(b"\n")
     with open(path, "a", encoding="utf-8", newline="\n") as f:
         for x in lines:
             f.write(json.dumps(x, ensure_ascii=False, sort_keys=True) + "\n")
@@ -265,7 +309,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="relay-kit prs", description=__doc__.split("\n\n")[0])
     ap.add_argument("--root", required=True, type=pathlib.Path, help="the records store")
     ap.add_argument("--repo", action="append", help="OWNER/NAME (repeatable); default: .ledger.json 'repos'")
-    ap.add_argument("--since-days", type=int, default=14, help="closed or merged PRs updated within N days (default 14); open ones always")
+    ap.add_argument("--since-days", type=int, default=14, help="closed or merged PRs updated within N days (default 14); open ones among the --limit read, and any last recorded open")
     ap.add_argument("--limit", type=int, default=30, help="most recently updated PRs read per repository (max 100)")
     ap.add_argument("--via", choices=["gh", "token"], help="gh CLI (default when installed) or a token from the environment")
     ap.add_argument("--token-env", help="environment variable holding the token (default GITHUB_TOKEN, then GH_TOKEN)")

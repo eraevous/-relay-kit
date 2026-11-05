@@ -415,10 +415,11 @@ def read_pr_state(root):
         elif x.get("kind") == "fetch":
             failed = x.get("failed") if isinstance(x.get("failed"), dict) else {}
             for r in x.get("repos") or []:
-                f = fetches.setdefault(r, {"repo": r, "last_ok": None, "last_try": None, "error": None})
+                f = fetches.setdefault(r, {"repo": r, "last_ok": None, "last_try": None, "error": None, "since_days": None})
                 f["last_try"] = x.get("ts")
                 if r in (x.get("ok") or []):
                     f["last_ok"], f["error"] = x.get("ts"), None
+                    f["since_days"] = x.get("since_days") if isinstance(x.get("since_days"), int) else None
                 else:
                     f["error"] = str(failed.get(r) or "failed")[:200]
         else:
@@ -438,26 +439,43 @@ def review_family(name, families):
     return n.split(":", 1)[0] if re.match(r"[a-z][\w.-]*:", n) else None
 
 
+def written_by(line, owners):
+    """'owner' only when the Author: line is the owner's name (or one of owner_names), alone or with a
+    note in brackets; 'agent' for anything else; 'unstated' when there is no line or it is blank."""
+    if not line or not line.strip():
+        return "unstated"
+    l = line.strip().lower()
+    bare = re.split(r"\s*[(\[]", l, maxsplit=1)[0].strip()
+    return "owner" if l in owners or bare in owners else "agent"
+
+
+def iso_minus_days(ts, days):
+    try:
+        return (dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ") - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+
+
 def pr_items(ps, owner, settings, full):
     fams = {str(k).lower(): str(v) for k, v in (settings.get("review_families") or {}).items()} \
         if isinstance(settings.get("review_families"), dict) else {}
     owners = {owner} | {str(x).lower() for x in settings.get("owner_names") or [] if isinstance(x, str)}
+    mapped = lambda name: fams.get(str(name).strip().lower()) if name else None
     items = []
     for (repo, num), x in ps["latest"].items():
-        line = x.get("author_line") if isinstance(x.get("author_line"), str) else None
-        if line is None:
-            written = "unstated"
-        else:
-            written = "owner" if line.strip().lower() in owners or line.strip().lower().split()[0] in owners else "agent"
-        afam = review_family(line or x.get("author"), fams)
-        last = {}
+        line = x.get("author_line") if isinstance(x.get("author_line"), str) and x["author_line"].strip() else None
+        written = written_by(line, owners)
+        # in metadata mode nothing is derived from free text: families come from the mapping by login only
+        afam = review_family(line or x.get("author"), fams) if full else mapped(x.get("author"))
+        reviews, ids = [], set()
         for r in sorted((r for r in x.get("reviews") or [] if isinstance(r, dict)), key=lambda r: str(r.get("at") or "")):
-            who = r.get("signed") or r.get("by") or "?"
-            last[who.lower()] = {"who": who, "login": r.get("by"), "verdict": r.get("verdict"), "at": r.get("at"),
-                                 "stated": r.get("stated") if isinstance(r.get("stated"), str) else None,
-                                 "family": review_family(r.get("signed"), fams) or review_family(r.get("by"), fams)}
-        reviews = sorted(last.values(), key=lambda r: str(r["at"] or ""))
-        counted = [r for r in reviews if r["verdict"] in APPROVING and (r["who"] or "").lower() != (line or "").lower()]
+            signed = r.get("signed") if full and isinstance(r.get("signed"), str) else None
+            fam = (review_family(signed, fams) or review_family(r.get("by"), fams)) if full else mapped(r.get("by"))
+            reviews.append({"who": signed or r.get("by") or "?", "login": r.get("by"), "signed": signed,
+                            "verdict": r.get("verdict"), "at": r.get("at"),
+                            "stated": r.get("stated") if isinstance(r.get("stated"), str) else None, "family": fam})
+        counted = [r for r in reviews if r["verdict"] in APPROVING and not (line and (r["who"] or "").lower() == line.lower())]
+        ids = {(r["who"] or "").lower() for r in counted}
         if not counted:
             other = False
         elif afam and any(r["family"] and r["family"] != afam for r in counted):
@@ -467,20 +485,24 @@ def pr_items(ps, owner, settings, full):
         secs = x.get("body_sections") if isinstance(x.get("body_sections"), dict) else {}
         url = x.get("url") if isinstance(x.get("url"), str) and x["url"].startswith("https://github.com/") else None
         ci = x.get("ci") if isinstance(x.get("ci"), dict) else {}
+        fetch = ps["fetches"].get(repo) or {}
+        since = iso_minus_days(fetch.get("last_ok"), fetch.get("since_days") or 14)
+        when = str(x.get("merged_at") or x.get("closed_at") or x.get("updated_at") or "")
         items.append({
             "repo": repo, "number": num, "url": url, "title": x.get("title") if full else None,
             "state": x.get("state"), "draft": bool(x.get("draft")), "updated_at": x.get("updated_at"),
             "merged_at": x.get("merged_at"), "opened_by": x.get("author"), "author_line": line if full else None,
-            "written_by": written, "author_family": afam, "line_ts": x.get("ts"),
+            "written_by": written, "author_family": afam, "changed_at": x.get("ts"), "read_at": fetch.get("last_ok"),
+            "recent": x.get("state") == "open" or not since or when >= since,
             "sections": {k: secs[k] for k in PR_SECTIONS if isinstance(secs.get(k), str)} if full else {},
             "present": [k for k in PR_SECTIONS if isinstance(secs.get(k), str)],
             "missing": [k for k in PR_SECTIONS if not isinstance(secs.get(k), str)],
             "truncated": list(x.get("truncated") or []),
-            "reviews": reviews, "reviewers_counted": len(counted), "other_family": other,
+            "reviews": reviews, "reviewers_counted": len(ids), "other_family": other,
             "ci": {"state": ci.get("state") or "none", "failing": list(ci.get("failing") or [])}})
-    group = {"open": 0, "merged": 2, "closed": 3}
+    group = {"open": 0, "merged": 2, "closed": 2}
     items.sort(key=lambda i: (i["repo"], i["number"]))
-    items.sort(key=lambda i: str(i["updated_at"] or ""), reverse=True)      # newest first within a group
+    items.sort(key=lambda i: str(i["merged_at"] or i["updated_at"] or ""), reverse=True)   # newest first within a group
     items.sort(key=lambda i: group.get(i["state"], 4) + (1 if i["draft"] and i["state"] == "open" else 0))
     return items
 
@@ -514,12 +536,25 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     if landing not in {k for k, _, _ in SURFACES}:
         raise Refused(f"landing {landing!r} isn't a surface ({', '.join(k for k, _, _ in SURFACES)})")
     ps = read_pr_state(rd.root)
-    # one reader: PR states come from relay-kit prs's file; --pr-state (gh at build time) only fills in
-    # pull requests the file doesn't hold
-    file_states = {f"{r}#{n}".lower(): x.get("state") for (r, n), x in (ps or {"latest": {}})["latest"].items()}
-    gh_lookup = pr_lookup
-    if file_states:
-        pr_lookup = lambda o_, r_, n_: file_states.get(f"{o_}/{r_}#{n_}".lower()) or (gh_lookup(o_, r_, n_) if gh_lookup else None)
+    # one reader: PR states come from relay-kit prs's file. --pr-state (gh at build time) is asked first when
+    # given, since it is newer; the file answers the rest. Each state says where it came from.
+    latest = (ps or {"latest": {}})["latest"]
+    file_states = {f"{r}#{n}".lower(): (x.get("state"), ((ps or {}).get("fetches") or {}).get(r, {}).get("last_ok"))
+                   for (r, n), x in latest.items()}
+    gh_lookup, pr_sources = pr_lookup, {}
+
+    def lookup(o_, r_, n_):
+        k = f"{o_}/{r_}#{n_}".lower()
+        if gh_lookup:
+            st = gh_lookup(o_, r_, n_)
+            if st:
+                pr_sources[k] = f"gh at build time ({pr_fetched_at})" if pr_fetched_at else "gh at build time"
+                return st
+        st, read = file_states.get(k, (None, None))
+        if st:
+            pr_sources[k] = f"{PRS_FILE}, read {read}" if read else PRS_FILE
+        return st
+    pr_lookup = lookup if (file_states or gh_lookup) and full else None
     tpath, threads = ex.parse_threads(rd)
     _, decisions = ex.ledger_records(rd, "decisions.jsonl", "decision")
     _, challenges = ex.ledger_records(rd, "challenges.jsonl", "challenge")
@@ -713,7 +748,8 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
                 key = f"{o_}/{r_}#{n_}".lower()
                 if pr_lookup and key not in pr_states:
                     pr_states[key] = pr_lookup(o_, r_, n_)
-                prs.append({"pr": key, "state": pr_states.get(key) if pr_lookup else None})
+                prs.append({"pr": key, "state": pr_states.get(key) if pr_lookup else None,
+                            "source": pr_sources.get(key) if pr_lookup else None})
         item["prs"] = prs
         sp = ex.span(item.get("date"))
         item["age_days"] = (as_of_dt - sp[0]).days if sp and as_of_dt else None
@@ -987,10 +1023,10 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         "counts": counts,
         "choices": choices,
         "questions": questions,
-        "pr_state": ({"looked_up": True, "states": pr_states,
+        "pr_state": ({"looked_up": True, "states": pr_states, "sources": pr_sources,
                       "fetched_at": pr_fetched_at or max((f["last_ok"] for f in ps["fetches"].values() if f["last_ok"]), default=None) if ps else pr_fetched_at,
-                      "via": " and ".join(v for v in [PRS_FILE + " (relay-kit prs)" if file_states else None,
-                                                      "gh api (build time)" if gh_lookup else None] if v)}
+                      "via": " and ".join(v for v in ["gh api (build time), first" if gh_lookup else None,
+                                                      PRS_FILE + " (relay-kit prs)" if file_states else None] if v)}
                      if pr_lookup else {"looked_up": False}),
         "pull_requests": ({"present": True, "file": PRS_FILE, "items": pr_items(ps, owner, settings, full),
                            "fetches": sorted(ps["fetches"].values(), key=lambda f: f["repo"]), "unreadable": ps["unreadable"]}
@@ -1239,9 +1275,8 @@ def ask_block(c, pr_fetched_at=None):
                   f'not what the buttons do</p><ul class="effects theirs">{li}{d_}</ul>')
     dflt = f'<p class="dflt">If nobody answers: {e(a["default_if_unanswered"])}</p>' if a.get("default_if_unanswered") else ""
     refs = lambda rs: ", ".join(f'{r["kind"]} {r["id"]} ({r["status"]})' for r in rs)
-    prs = ", ".join(f'{x["pr"]}' + (f' {x["state"]}' if x["state"] else "") for x in c.get("prs") or [])
-    if prs and pr_fetched_at:
-        prs += f" (states looked up {pr_fetched_at})"
+    prs = ", ".join(f'{x["pr"]}' + (f' {x["state"]} (from {x["source"]})' if x["state"] and x.get("source")
+                                    else f' {x["state"]}' if x["state"] else "") for x in c.get("prs") or [])
     facts = [("age", f'{c["age_days"]} d' if c.get("age_days") is not None else None),
              ("waiting on it", refs(c.get("waiting_on_it") or [])), ("cited later by", refs(c.get("cited_later_by") or [])),
              ("cites", ", ".join(c.get("refs") or [])), ("pull requests", prs)]
@@ -1273,22 +1308,27 @@ def pr_card(x, full):
     missing = (f'<span class="tag warn">sections missing: {e(", ".join(x["missing"]))}</span>' if x["missing"] else "")
     secs = ""
     if full and x["sections"]:
-        secs = "<dl class=\"pr-secs\">" + "".join(
-            f'<dt>{k.title()}</dt><dd class="txt">{e(x["sections"][k])}{" <i>(cut at 4000 characters)</i>" if k in x["truncated"] else ""}</dd>'
-            for k in PR_SECTIONS if k in x["sections"]) + "</dl>"
+        cut = lambda k: " <i>(cut at 4000 characters)</i>" if k in x["truncated"] else ""
+        first = next(k for k in PR_SECTIONS if k in x["sections"])
+        rest = [k for k in PR_SECTIONS if k in x["sections"] and k != first]
+        secs = (f'<dl class="pr-secs"><dt>{first.title()}</dt><dd class="txt">{e(x["sections"][first])}{cut(first)}</dd></dl>'
+                + (f'<details class="pr-more"><summary>{" · ".join(k.title() for k in rest)}</summary><dl class="pr-secs">'
+                   + "".join(f'<dt>{k.title()}</dt><dd class="txt">{e(x["sections"][k])}{cut(k)}</dd>' for k in rest)
+                   + "</dl></details>" if rest else ""))
     elif not full:
         secs = f'<p class="hint">Sections present: {e(", ".join(x["present"]) or "none")} (text left out: --content metadata)</p>'
     revs = ", ".join(f'{r["who"]} ({VERDICT.get(r["verdict"], str(r["verdict"]).lower())}'
                      + (f', body says “{r["stated"]}”' if r.get("stated") else "")
                      + f'; {r["family"] or "family unknown"})' for r in x["reviews"]) or "none yet"
-    other = ("no reviews yet" if not x["reviewers_counted"] else
+    other = (("no reviews yet" if not x["reviews"] else "no counted reviews (only dismissed)") if not x["reviewers_counted"] else
              {True: "yes", False: "no", None: "can't tell (a family is unknown)"}[x["other_family"]])
     ci = CI_WORD.get(x["ci"]["state"], x["ci"]["state"]) + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] else "")
     return (f'<article class="card pr pr-{e(st)}"><header><span class="badge pr-st">{e(st)}</span>{link}'
             f'<span class="date">updated {e((x["updated_at"] or "?")[:16].replace("T", " "))}</span></header>{title}'
             f'<div class="btns">{by}{missing}</div>{secs}'
             f'<dl><dt>Reviews</dt><dd>{e(revs)}</dd><dt>Other family</dt><dd>{e(other)} · author family '
-            f'{e(x["author_family"] or "unknown")}</dd><dt>CI</dt><dd>{e(ci)}</dd><dt>Read</dt><dd>{e(x["line_ts"] or "?")}</dd></dl></article>')
+            f'{e(x["author_family"] or "unknown")}</dd><dt>CI</dt><dd>{e(ci)}</dd><dt>Read</dt><dd>{e(x["read_at"] or "?")}'
+            f' · last changed {e(x["changed_at"] or "?")}</dd></dl></article>')
 
 
 def table(head, rows, cls=""):
@@ -1553,21 +1593,29 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
                    '--repo OWNER/NAME</code> (or list the repositories under <code>"repos"</code> in handoffs/.ledger.json), then '
                    'rebuild this page. The page itself never fetches.</div>')
     else:
-        fetch_rows = [[f["repo"], (f'<span class="age" data-ts="{e(f["last_ok"])}">{e(f["last_ok"])}</span>' if f["last_ok"] else "never"),
-                       e(f["error"] or "")] for f in prd["fetches"]]
+        fetch_rows = [[e(f["repo"]), (f'<span class="age" data-ts="{e(f["last_ok"])}">{e(f["last_ok"][:16].replace("T", " "))}</span>'
+                                      if f["last_ok"] else "never"),
+                       f'<span title="{e(f["error"])}">{e(trunc(f["error"], 90))}</span>' if f["error"] else ""] for f in prd["fetches"]]
         fetch_tbl = ('<div class="tw"><table><thead><tr><th>repository</th><th>last read</th><th>last error</th></tr></thead><tbody>'
                      + "".join("<tr>" + "".join(f'<td data-h="{h}">{v}</td>' for h, v in zip(("repository", "last read", "last error"), r))
                                + "</tr>" for r in fetch_rows) + "</tbody></table></div>")
+        okd = [f["last_ok"] for f in prd["fetches"] if f["last_ok"]]
+        nfail = sum(1 for f in prd["fetches"] if f["error"])
+        fetch_sum = (f'{len(prd["fetches"])} repositories, last read <span class="age" data-ts="{e(max(okd))}">{e(max(okd)[:16].replace("T", " "))}</span>'
+                     if okd else f'{len(prd["fetches"])} repositories, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "")
+        days = sorted({f["since_days"] for f in prd["fetches"] if f.get("since_days")}) or [14]
+        older = sum(1 for x in prd["items"] if not x["recent"])
         groups = [("Open", [x for x in prd["items"] if x["state"] == "open"]),
-                  ("Merged or closed recently", [x for x in prd["items"] if x["state"] != "open"])]
-        pr_body = (f'<div class="panel pad"><p class="eyebrow dark">WHERE THIS COMES FROM</p><p class="hint">Read from '
+                  (f"Merged or closed in the last {days[-1]} days", [x for x in prd["items"] if x["state"] != "open" and x["recent"]])]
+        pr_body = (f'<details class="panel pad pr-src"><summary>Where this comes from · {fetch_sum}</summary><p class="hint">Read from '
                    f'<code>{e(prd["file"])}</code>, written by <code>relay-kit prs</code> at build time. Sections are the PR body\'s '
                    'own words (## What / ## Why / ## How / ## Authorized); nothing here is summarised. Ages are counted in your '
                    'browser from the read time; the page fetches nothing.'
-                   + (f' {prd["unreadable"]} line(s) of the file were unreadable.' if prd["unreadable"] else "") + f'</p>{fetch_tbl}</div>'
+                   + (f' {prd["unreadable"]} line(s) of the file were unreadable.' if prd["unreadable"] else "") + f'</p>{fetch_tbl}</details>'
                    + "".join(f'<p class="eyebrow dark">{e(g.upper())} · {len(xs)}</p><div class="cards">'
                              + ("".join(pr_card(x, full) for x in xs) or '<p class="empty">None.</p>') + "</div>"
-                             for g, xs in groups))
+                             for g, xs in groups)
+                   + (f'<p class="hint">{older} older merged or closed pull request(s) are in the file but not shown.</p>' if older else ""))
     s_prs = f"""
 <section class="section surface" id="prs">
 {head(10, "PULL REQUESTS", "Pull requests", "What each pull request changes, why, how and on whose authority, in its author's words, with its reviews and CI.", "FROM RECORDS · READ AT BUILD TIME")}
@@ -1592,7 +1640,7 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 <html lang="en"{html_theme}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
-<title>{e(brand.title())} · Cockpit</title><style>{CSS}{theme_css(theme)}</style></head>
+<title>{e(brand.title())} · Cockpit</title><style>{CSS}{theme_css(theme)}</style>{THEME_EARLY if toggle else ""}</head>
 <body data-owner="{e(data["owner"])}" data-asof="{e(data["as_of"] or "")}" data-landing="{e(q["landing"])}"><div class="shell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="19" fill="none" stroke="currentColor"/>
 <circle cx="22" cy="22" r="11" fill="none" stroke="currentColor" opacity=".5"/><circle cx="22" cy="22" r="3" fill="currentColor"/></svg></span>
@@ -1621,7 +1669,8 @@ index.html and cockpit.json; <code>noindex</code> is not access control.</p></fo
 # ---------------- themes (HO-RK-20261105-SWK5) ----------------
 FONT_VARS = {"display", "mono", "heading"}
 THEME_VALUE = re.compile(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?(?:[0-9a-fA-F]{2})?|var\(--[a-z][a-z0-9-]*\)")
-FONT_VALUE = re.compile(r"[\w \t,\"'.-]{1,200}")
+_FONT_ITEM = r"""\s*(?:"[\w .-]+"|'[\w .-]+'|[A-Za-z][\w-]*(?: [A-Za-z][\w-]*)*)\s*"""
+FONT_VALUE = re.compile(rf"(?=.{{1,200}}$){_FONT_ITEM}(?:,{_FONT_ITEM})*")
 # a neutral light palette; a theme's "light" block is laid over it, so a theme may name only what it changes
 LIGHT_DEFAULTS = {
     "bg": "#f3f1ea", "sunk": "#ebe8df", "panel": "#fffdf8", "panel-2": "#f8f5ee", "field": "#f0ede5", "field-hover": "#e6e2d8",
@@ -1673,6 +1722,11 @@ def load_theme(path):
         raise Refused(f"--theme {path}: default must be auto, dark or light (light needs a light block)")
     out["default"] = d
     return out
+
+
+THEME_EARLY = ("<script>try{var t=localStorage.getItem('cockpit-theme');if(t==='light'||t==='dark')"
+               "document.documentElement.setAttribute('data-theme',t);else if(t==='auto')"
+               "document.documentElement.removeAttribute('data-theme')}catch(e){}</script>")
 
 
 def theme_css(t):
@@ -1832,7 +1886,9 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);marg
 .badge.pr-st{color:var(--muted)}.pr-open .badge.pr-st{color:var(--teal);border-color:var(--teal-deep)}.pr-merged .badge.pr-st{color:var(--purple)}
 .pr-draft .badge.pr-st{border-style:dashed}.tag.agent{color:var(--blue);border-color:var(--blue)}.pr-secs dd{margin-bottom:6px}
 .pr-secs dt{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.age.old{color:var(--gold)}
-.cards+.eyebrow{margin-top:18px}
+.cards+.eyebrow{margin-top:18px}.pr-src summary{font:600 12px var(--mono);color:var(--text-2)}.pr-src[open] summary{margin-bottom:10px}
+.pr-src .warn{color:var(--gold)}.pr-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+.card.pr .tag{white-space:normal;overflow-wrap:anywhere}
 @media (max-width:1000px){.choices-grid,.cols,.overview-grid,.budget-top{grid-template-columns:1fr}.apply{position:static;order:-1}
  .apply textarea{min-height:120px}
  .dials,.stats-row,.principles{grid-template-columns:repeat(2,minmax(0,1fr))}}

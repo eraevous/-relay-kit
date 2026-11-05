@@ -94,7 +94,8 @@
         "cockpit: PR states for overtaken checks come from pr-state.jsonl without any network lookup",
         "cockpit: a theme can set only known variables to colours or font lists; anything else is refused",
         "cockpit: a theme with a light block adds a light scheme and a toggle; without --theme the page is unchanged dark",
-        "cockpit: --landing opens the page on the named surface; an unknown surface is refused"
+        "cockpit: --landing opens the page on the named surface; an unknown surface is refused",
+        "cockpit: merged or closed pull requests older than the reader's window are counted, not listed"
       ]
     },
     {
@@ -110,7 +111,9 @@
         "prs: a failing repository is recorded in the fetch line and the others are still read",
         "prs: it writes only governance/pr-state.jsonl and never rewrites a line",
         "prs: CI state from check runs and statuses; reviews keep the verdict stated in their body",
-        "prs: repositories come from .ledger.json repos or --repo; anything not OWNER/NAME is refused"
+        "prs: repositories come from .ledger.json repos or --repo; anything not OWNER/NAME is refused",
+        "prs: a PR last recorded open is read again however old, so a closed one never stays open",
+        "prs: appending to a file without a final newline doesn't join two lines"
       ]
     },
     {

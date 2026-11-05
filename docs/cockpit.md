@@ -24,8 +24,10 @@ It writes two files into `--out`:
 in `cockpit.json`, top-level `pull_requests` and `theme`, `query.landing` and `query.theme`, and
 `counts.prs_open`. PR states for the "possibly overtaken" check now come from
 `governance/pr-state.jsonl` when it holds the pull request; `--pr-state` only looks up the ones it
-doesn't. Nothing from @2 was removed or changed in meaning, and without `--theme` the page looks as
-it did.
+doesn't, and each state says where it came from. With `--pr-state`, gh is asked first (it is newer)
+and the file answers the rest. Nothing from @2 was removed or changed in meaning. Without `--theme`
+the page keeps its dark palette and layout; moving about a hundred literal colours onto thirty-odd
+variables merged near-identical shades, so some text and borders differ slightly in tone.
 
 The page is deterministic: two runs over the same records give byte-identical files. The only
 date on it is "generated from records as of" the latest timestamp found in the records, and
@@ -65,11 +67,18 @@ A review can name its reviewer with a `Reviewer: <name>` line in its body; that 
 reviewers post from one account. "Other family" is yes when a review that approved, commented or
 asked for changes comes from a known family different from the author's; "can't tell" when a family
 is unknown. The page states the facts; any rule about how many reviews are needed is yours.
-`owner_names` in the same file lists other names that mean the owner in an `Author:` line.
+`owner_names` in the same file lists other names that mean the owner in an `Author:` line. A line
+counts as the owner's only when it is the owner's name alone, or with a note in brackets
+("sam (from a call)"); "sam via claude:x" is an agent's.
 
-**Freshness.** The page never fetches. Each card shows when its line was read; the repository
-table shows each repository's last successful read, and the page counts its age in your browser
-(over a day is marked). Rebuild after `relay-kit prs` for newer state.
+**Freshness.** The page never fetches. Each card shows when its repository was last read and when
+the pull request last changed; the source summary counts the last read's age in your browser (over a
+day is marked). Rebuild after `relay-kit prs` for newer state. Merged or closed pull requests older
+than the reader's `--since-days` window are counted, not listed.
+
+**In `--content metadata`** the cards keep repository, number, state, which sections exist, review
+logins, verdicts and CI. Titles, section text, the Author line, `Reviewer:` signatures, and any family
+not taken from `review_families` by login are left out.
 
 ## Themes and landing
 
