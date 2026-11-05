@@ -251,7 +251,7 @@ async function fill(els = null) {
     const buttons = [...page.matchAll(/<button type="button" class="act (\w+)" data-key="([^"]*)" data-act="\w+" data-line="([^"]*)"([^>]*)>/g)]
       .map(([, act, key, line, rest]) => {
         const a = { 'data-act': act, 'data-key': unesc(key), 'data-line': unesc(line) };
-        if (attr(rest, 'data-template')) { a['data-template'] = attr(rest, 'data-template'); a['data-kind'] = attr(rest, 'data-kind'); }
+        if (attr(rest, 'data-template')) { a['data-template'] = attr(rest, 'data-template'); a['data-kind'] = attr(rest, 'data-kind'); if (attr(rest, 'data-expect')) a['data-expect'] = attr(rest, 'data-expect'); }
         return Object.assign(el(a), { closest: () => card });
       });
     const nav = el({ 'data-goto': 'overview', 'data-name': 'Overview' });
@@ -300,6 +300,7 @@ async function fill(els = null) {
       const filledLine = lineOf(A, 'accept');
       const obj = JSON.parse(filledLine.slice(filledLine.indexOf("'") + 1, filledLine.lastIndexOf("'")).replace(/'"'"'/g, "'"));
       check('cockpit words: the basis in a composed line is the owner\'s words, never a default', obj.basis === 'Owner words, quoted.' && obj.supersedes === 'DEC-002', obj);
+      check('cockpit words: a composed line keeps the page\'s --expect for the item', /^relay-kit ledger append --dir governance --expect DEC-002=open@[0-9a-f]{12} decision '/.test(filledLine), filledLine.slice(0, 120));
       words.value = '  ';
       dlg.open = false; btn(A, 'accept').fire('click');
       check('cockpit words: settling without your words composes nothing and says why', dlg.open !== true && /Write your words first/.test(note.textContent), { open: dlg.open, note: note.textContent });

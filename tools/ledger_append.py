@@ -13,6 +13,11 @@ command takes the id instead of you:
   3. appends the line, then runs check_ledgers.py on the result (with --git);
   4. on any problem, takes the line back out and exits non-zero. Its exit code is the check's:
      don't pipe it into `tail`, which hides a failure.
+With --expect ID=STATE[@HASH] (repeatable; the cockpit, relay-kit/cockpit@4, adds it to every line it composes), it first
+checks that the item is still in the state the page showed (relay-kit/lifecycle@1: a decision `open`,
+`settled` or its applicability; a challenge `open` or `closed`) and that its line hasn't changed
+(the first 12 hex digits of its sha256). If not, it refuses and lists the lines since that mention
+the item, so you see what changed before deciding again.
 It prints the new id. If the shared copy can't be read (no remote, fetch failed), it refuses
 rather than guess; --offline overrides that when you know you're the only writer. A branch
 whose ledger is behind the shared one is refused too: an id must be new on the shared
@@ -22,7 +27,7 @@ What it can't close: another session taking the same id between this append and 
 push. Push (or open the pull request) right away; the records check on main catches what
 slips through.
 """
-import argparse, datetime as dt, json, os, pathlib, re, subprocess, sys
+import argparse, datetime as dt, hashlib, importlib.util, json, os, pathlib, re, subprocess, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 KINDS = {"decision": ("decisions.jsonl", "DEC"), "challenge": ("challenges.jsonl", "CH")}
@@ -39,6 +44,63 @@ def handoff_module():
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
+
+
+def lifecycle():
+    spec = importlib.util.spec_from_file_location("relaykit_lifecycle", HERE / "lifecycle.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+EXPECT = re.compile(r"^((?:DEC|CH)-\d{3,})=([a-z][a-z ,()-]*?)(?:@([0-9a-f]{6,64}))?$")
+
+
+def check_expect(d, expects):
+    """None if every expectation holds, else the refusal text with what changed."""
+    rows = {}
+    for name in ("decisions.jsonl", "challenges.jsonl"):
+        p = d / name
+        rows[name] = []
+        if p.exists():
+            for ln in p.read_text(encoding="utf-8").splitlines():
+                try:
+                    obj = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict):
+                    rows[name].append((ln, obj))
+    res = lifecycle().resolve([o for _, o in rows["decisions.jsonl"]], [o for _, o in rows["challenges.jsonl"]])
+    out = []
+    for e in expects:
+        m = EXPECT.match(e)
+        if not m:
+            return f"refused: --expect {e!r} isn't ID=STATE or ID=STATE@HASH"
+        rid, want, h = m.groups()
+        name = "decisions.jsonl" if rid.startswith("DEC-") else "challenges.jsonl"
+        line = next((ln for ln, o in rows[name] if o.get("id") == rid), None)
+        r = (res["decisions"] if name == "decisions.jsonl" else res["challenges"]).get(rid)
+        if line is None or r is None:
+            out.append(f"{rid} isn't in {name} any more")
+            continue
+        now = r["applicability"] if name == "decisions.jsonl" else ("open" if r["open"] else "closed")
+        if now == "adopted, no structured supersession found":
+            now = "standing"
+        changed = []
+        if want != now:
+            changed.append(f"{rid} is now {now}, not {want}")
+        if h and not hashlib.sha256(line.encode("utf-8")).hexdigest().startswith(h):
+            changed.append(f"{rid}'s own line has changed since the page was built")
+        if changed:
+            pat = re.compile(rf"\b{re.escape(rid)}\b")
+            later = [f"  {o.get('id')} ({o.get('status')}, {o.get('date')})"
+                     for nm in ("decisions.jsonl", "challenges.jsonl") for ln, o in rows[nm]
+                     if o.get("id") != rid and pat.search(ln)]
+            out.append("; ".join(changed) + (":\n" + "\n".join(later) if later else ""))
+    if out:
+        return ("refused: the records changed since the page you are applying from was built:\n" + "\n".join(out)
+                + "\nNothing was appended. Rebuild the page, or look at those lines, and decide again.")
+    return None
 
 
 def git(d, *args):
@@ -97,6 +159,8 @@ def main():
     ap.add_argument("kind", choices=sorted(KINDS))
     ap.add_argument("json", help="the line's fields as a JSON object; id, date and recorded_by are filled if missing")
     ap.add_argument("--offline", action="store_true", help="allow appending without reading the shared copy")
+    ap.add_argument("--expect", action="append", default=[], metavar="ID=STATE[@HASH]",
+                    help="refuse unless the item is still in this state (and its line unchanged); the cockpit adds it")
     a = ap.parse_args()
     if a.dir is None:
         # ./governance as before; else next to the handoffs folder handoff.py finds. Either way the
@@ -161,6 +225,10 @@ def append(a, path, prefix, row, theirs):
                     f"(up to {prefix}-{max_id(theirs, prefix):03d}); merge or pull the shared branch first, so the new id is new there too")
         return ("refused: this copy and the shared copy have different lines under the same ids "
                 "(someone appended the same id elsewhere); reconcile them before appending")
+    if a.expect:
+        why = check_expect(a.dir, a.expect)
+        if why:
+            return why
     new_id = f"{prefix}-{max(max_id(mine, prefix), max_id(theirs, prefix)) + 1:03d}"
     row = {"id": new_id, **row}
     row.setdefault("date", dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d"))

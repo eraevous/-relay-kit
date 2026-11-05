@@ -52,7 +52,7 @@ Read-only (annotated `readOnlyHint: true`):
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `status` | none | `status.py`'s summary as structure: proposed decisions waiting on the owner, handoffs nobody is authorized to start, open handoffs with their holder, open challenges, counts, unreadable files. In full content also `status.py --no-fetch --no-ci`'s text. |
+| `status` | none | `status.py`'s summary as structure, with closure resolved by [`relay-kit/lifecycle@1`](lifecycle.md): proposed decisions waiting on the owner, handoffs nobody is authorized to start, open handoffs with their holder, open challenges, counts, unreadable files. In full content also `status.py --no-fetch --no-ci`'s text. |
 | `list_decisions` | `status`, `since`, `lane`, `text`, `limit` | decision-ledger lines in ledger order, as export@1 records (`evidence_class` `decision` or `proposal`, `in_force`), with `referenced_by_later` |
 | `get_decision` | `id` | one line and any later line that supersedes it |
 | `list_challenges` | `status`, `since`, `lane`, `text`, `limit` | challenge-ledger lines in ledger order |

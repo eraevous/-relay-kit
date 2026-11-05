@@ -48,10 +48,12 @@ TEXT_FIELDS = {
     "decision": ["decision", "scope", "basis", "locator", "evidence", "note", "not_covered", "(any other string field)"],
     "challenge": ["concern", "resolution", "check", "fix", "scope", "evidence", "(any other string field)"],
 }
-LEDGER_STRUCTURAL = {"id", "date", "status", "decider", "recorded_by", "raised_by", "proposed_by", "supersedes", "resolves"}
+LEDGER_STRUCTURAL = {"id", "date", "status", "decider", "recorded_by", "raised_by", "proposed_by", "supersedes", "resolves",
+                     "revokes", "amends", "effective_from", "effective_until"}
 KNOWN_FIELDS = {
     "decision": {"id", "date", "status", "decision", "scope", "decider", "basis", "locator", "evidence",
-                 "proposed_by", "note", "recorded_by", "not_covered", "supersedes", "ask", "amends"},
+                 "proposed_by", "note", "recorded_by", "not_covered", "supersedes", "ask", "amends",
+                 "revokes", "effective_from", "effective_until"},
     "challenge": {"id", "date", "status", "concern", "raised_by", "resolution", "check", "fix", "resolves",
                   "scope", "evidence", "recorded_by", "ask", "kind", "about", "addressed_to"},
     # conversation@1 as chat-capture's renderer writes it, plus the optional actor/lane this export reads
@@ -86,6 +88,13 @@ URL = re.compile(r"https://(?:chatgpt\.com|chat\.openai\.com|claude\.ai)/[^\s)>\
 OUT_FILES = {"manifest.json", "records.jsonl", "records.json"}
 
 HERE = pathlib.Path(__file__).resolve().parent
+
+
+def load_lifecycle():
+    spec = importlib.util.spec_from_file_location("relaykit_lifecycle", HERE / "lifecycle.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
 SKILLS = HERE.parent / "skills" if (HERE.parent / "skills" / "handoff-ledger").is_dir() else HERE / "skills"
 LEDGER = SKILLS / "handoff-ledger" / "scripts" / "handoff.py"
 try:
@@ -673,7 +682,14 @@ def ledger_records(rd, name, kind):
     p, rows = got
     fh = rd.files[rd.rel(p)]["sha256"]
     recs, seen = [], {}
-    superseded = {r.get("supersedes") for _, _, r in rows if r.get("supersedes") and r.get("status") == "adopted"}
+    lc = load_lifecycle()
+    dated = sorted(str(r.get("date")) for _, _, r in rows if re.match(r"^\d{4}-\d{2}-\d{2}$", str(r.get("date") or "")))
+    as_of = dated[-1] + "T23:59:59Z" if dated else None   # the ledger's own latest date, never the clock
+    res = lc.resolve([r for _, _, r in rows], [], as_of) if kind == "decision" else lc.resolve([], [r for _, _, r in rows])
+    table = res["decisions"] if kind == "decision" else res["challenges"]
+    own = {}
+    for pr in res["problems"]:
+        own.setdefault(pr["id"], []).append(pr["message"])
     for n, line, row in rows:
         rid = f"{kind}:{row.get('id') or 'line' + str(n)}"
         seen[rid] = seen.get(rid, 0) + 1
@@ -690,8 +706,18 @@ def ledger_records(rd, name, kind):
                "ts": row.get("date"), "source_path": rd.rel(p), "source_hash": sha(line), "source_file_hash": fh,
                "lane": lanes[0] if len(lanes) == 1 else None, "lanes": lanes,
                "actor": actors[0] if len(actors) == 1 else None, "actors": actors, "evidence_class": ev}
-        if kind == "decision":   # explicitly adopted and not superseded by a later adopted line
-            rec["in_force"] = st == "adopted" and row.get("id") not in superseded
+        r_ = table.get(row.get("id")) or {}
+        if kind == "decision":   # relay-kit/lifecycle@1: adopted, and no effective later line ends it
+            rec["in_force"] = bool(r_.get("in_force"))
+            rec["applicability"] = r_.get("applicability")
+            rec["proposed_replacements"] = r_.get("proposed_replacements") or []
+            rec["amended_by"] = [a["id"] for a in r_.get("amended_by") or []]
+        else:
+            rec["open"] = bool(r_.get("open"))
+        rec["closed_by"] = [c["id"] for c in r_.get("closed_by") or []]
+        rec["conflict"] = bool(r_.get("conflict"))
+        if own.get(row.get("id")):
+            rec["transition_problems"] = own[row.get("id")]
         if kind == "decision" and ev == "decision" and not str(row.get("basis", "")).strip():
             rec["authority_basis_missing"] = True
         recs.append(rec)

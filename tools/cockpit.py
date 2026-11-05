@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@3.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@4.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
@@ -24,7 +24,7 @@ using the export's guard. Output is deterministic: the only date on the page is 
 timestamp found in the records. Spec: docs/cockpit.md. Standard library only."""
 import argparse, datetime as dt, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@3"
+SCHEMA = "relay-kit/cockpit@4"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -152,8 +152,16 @@ REQ = {"decider": "<<REQUIRED: your name>>", "basis": "<<REQUIRED: your words, q
        "locator": "<<REQUIRED: where you said it (thread, date, time)>>"}
 
 
-def ledger_cmd(kind, obj):
-    return f"relay-kit ledger append --dir governance {kind} {shlex.quote(dumps(obj))}"
+def ledger_cmd(kind, obj, expect=None):
+    """expect: 'DEC-N=open@hash'. ledger_append refuses the line if the item changed since this page (lifecycle@1)."""
+    ex_ = f" --expect {shlex.quote(expect)}" if expect else ""
+    return f"relay-kit ledger append --dir governance{ex_} {kind} {shlex.quote(dumps(obj))}"
+
+
+def expect_of(rec, state="open"):
+    rid = (rec.get("fields") or {}).get("id")
+    h = str(rec.get("source_hash") or "")[:12]
+    return f"{rid}={state}" + (f"@{h}" if h else "") if rid else None
 
 
 def compose_decision(rec, owner, as_of, full):
@@ -166,7 +174,7 @@ def compose_decision(rec, owner, as_of, full):
         obj = {"status": status, "supersedes": did, "decision": text or f"As proposed in {did}.",
                "scope": scope or f"As in {did}.", "decider": REQ["decider"],
                "basis": REQ["basis"], "locator": REQ["locator"]}   # recorded_by: ledger_append fills it from $RELAYKIT_ACTOR
-        out[action] = {"command": ledger_cmd("decision", obj), "json": obj}
+        out[action] = {"command": ledger_cmd("decision", obj, expect_of(rec)), "json": obj}
     out["defer"] = {"command": f"# {did}: deferred. Nothing to append; it stays proposed and stays on this page.",
                     "json": None}
     return out
@@ -181,7 +189,7 @@ def compose_challenge(rec, owner, full):
                                 ("reject", "resolved", "<<REQUIRED: why it is dismissed, or how it was fixed, in your words>>")):
         obj = {"status": status, "resolves": cid, "concern": concern or f"As raised in {cid}.",
                "raised_by": f.get("raised_by") or owner, "resolution": why}
-        out[action] = {"command": ledger_cmd("challenge", obj), "json": obj}
+        out[action] = {"command": ledger_cmd("challenge", obj, expect_of(rec)), "json": obj}
     out["defer"] = {"command": f"# {cid}: deferred. Nothing to append; it stays open and stays on this page.",
                     "json": None}
     return out
@@ -354,7 +362,7 @@ def records_github_owner(root):
     return m.group(1) if m else None
 
 
-def compose_extra(kind, cid, owner, proposer, full, text, scope):
+def compose_extra(kind, cid, owner, proposer, full, text, scope, expect=None):
     """Amend (decisions), Close as overtaken, Clarify and Inquire. All compose; none writes.
     Close as overtaken is a 'superseded' line: it closes the proposal without adopting anything.
     Clarify is a record: an open challenge with kind 'question', about the item and addressed to its
@@ -365,15 +373,15 @@ def compose_extra(kind, cid, owner, proposer, full, text, scope):
         amend = {"status": "adopted", "supersedes": cid, "decision": text if full and text else f"<<REQUIRED: your text for {cid}>>",
                  "scope": scope if full and scope else f"As in {cid}.", "amends": cid,
                  "decider": REQ["decider"], "basis": REQ["basis"], "locator": REQ["locator"]}
-        out["amend"] = {"json": amend, "command": ledger_cmd("decision", amend), "edit_field": "decision"}
+        out["amend"] = {"json": amend, "command": ledger_cmd("decision", amend, expect), "edit_field": "decision"}
         over = {"status": "superseded", "supersedes": cid, "decision": f"{cid} is closed as overtaken, not adopted: <<REQUIRED: what overtook it (a merged PR, a later decision)>>",
                 "scope": scope if full and scope else f"As in {cid}.",
                 "decider": REQ["decider"], "basis": REQ["basis"], "locator": REQ["locator"]}
-        out["overtaken"] = {"json": over, "command": ledger_cmd("decision", over), "edit_field": "decision"}
+        out["overtaken"] = {"json": over, "command": ledger_cmd("decision", over, expect), "edit_field": "decision"}
     elif kind == "challenge":
         over = {"status": "resolved", "resolves": cid, "concern": f"As raised in {cid}.",
                 "raised_by": proposer or owner, "resolution": f"Overtaken: <<REQUIRED: what made {cid} moot, in your words>>"}
-        out["overtaken"] = {"json": over, "command": ledger_cmd("challenge", over)}
+        out["overtaken"] = {"json": over, "command": ledger_cmd("challenge", over, expect)}
     clar = {"status": "open", "kind": "question", "about": cid, "addressed_to": proposer or "<<REQUIRED: who should answer>>",
             "concern": "<<REQUIRED: your question>>", "raised_by": owner}
     out["clarify"] = {"json": clar, "command": ledger_cmd("challenge", clar), "edit_field": "concern"}
@@ -507,6 +515,28 @@ def pr_items(ps, owner, settings, full):
     return items
 
 
+def snapshot_of(root, as_of):
+    """Which revision of the records this page was built from, and when that revision was committed:
+    fixed for a given revision, so the page stays deterministic, while the browser counts its age.
+    Separate from the newest record's time (CH-035 finding 5)."""
+    import subprocess
+    def g(*args):
+        try:
+            p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=20,
+                               env={**os.environ, "TZ": "UTC"})
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return p.stdout.strip() if p.returncode == 0 else None
+    rev = g("rev-parse", "HEAD")
+    if not rev or g("rev-parse", "--show-toplevel") is None or \
+            pathlib.Path(g("rev-parse", "--show-toplevel")).resolve() != pathlib.Path(root).resolve():
+        return {"revision": None, "committed_at": None, "uncommitted": None, "newest_record": as_of,
+                "note": "the records folder isn't the top of a git repository: no revision to show"}
+    when = g("log", "-1", "--date=format-local:%Y-%m-%dT%H:%M:%SZ", "--format=%cd")
+    dirty = g("status", "--porcelain", "--", "governance", "handoffs", "threads.md")
+    return {"revision": rev[:12], "committed_at": when, "uncommitted": bool(dirty), "newest_record": as_of}
+
+
 # ---------------- collecting ----------------
 def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None, brand=None,
             pr_lookup=None, pr_fetched_at=None, landing=None):
@@ -569,8 +599,10 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
 
     # settled ids come from the complete ledgers: a line in another lane (or by the owner, in none)
     # that supersedes a proposal or resolves a challenge still settles it under --lane
-    superseded = {d["fields"].get("supersedes") for d in decisions if d["fields"].get("supersedes")}
-    closed = {c["fields"].get("resolves") for c in challenges if c["fields"].get("resolves")}
+    # relay-kit/lifecycle@1 (resolved by the export readers): only an effective transition settles anything;
+    # a proposed replacement leaves its target open, and invalid transitions close nothing
+    superseded = {d["fields"].get("id") for d in decisions if d.get("closed_by")}
+    closed = {c["fields"].get("id") for c in challenges if c.get("closed_by")}
     decisions_all, challenges_all, handoffs_all = list(decisions), list(challenges), list(handoffs)
     decisions = [d for d in decisions if lane_ok(d)]
     challenges = [c for c in challenges if lane_ok(c)]
@@ -592,9 +624,10 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     choices = []
     for d in decisions:
         f = d["fields"]
-        if d["status"] != "proposed" or f.get("id") in superseded:
+        if d.get("applicability") != "open":
             continue
         item = {"kind": "decision", "id": f.get("id"), "status": "proposed", "date": f.get("date"),
+                "proposed_replacements": d.get("proposed_replacements") or [],
                 "proposed_by": f.get("proposed_by") or f.get("recorded_by"), "decider": f.get("decider"),
                 "source": f"{d['source_path']}:{d['line']}", "compose": compose_decision(d, owner, as_of, full)}
         if full:
@@ -764,7 +797,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         item["effects"] = item["effects"] + extra
         if kind != "handoff":
             proposer = f.get("proposed_by") or f.get("recorded_by") if kind == "decision" else f.get("raised_by")
-            item["compose"].update(compose_extra(kind, cid, owner, proposer, full, body, f.get("scope")))
+            item["compose"].update(compose_extra(kind, cid, owner, proposer, full, body, f.get("scope"), expect_of(rec)))
         else:
             # a handoff's question goes to its sender, who wrote what it asks for
             item["compose"].update({k: v for k, v in compose_extra(kind, cid, owner, (rec or {}).get("from"), full, "", None).items()
@@ -1038,6 +1071,12 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         "intake_links": intake,
         "unreadable": sorted(rd.unreadable, key=lambda x: str(x["path"])),
         "limits": LIMITS,
+        "snapshot": snapshot_of(rd.root, as_of),
+        "transitions": {"lifecycle": "relay-kit/lifecycle@1",
+                        "problems": sorted(({"id": r["fields"].get("id"), "message": m} for r in decisions_all + challenges_all
+                                            for m in r.get("transition_problems") or []), key=lambda x: str(x["id"])),
+                        "conflicts": sorted(({"id": r["fields"].get("id"), "closed_by": r.get("closed_by")}
+                                             for r in decisions_all + challenges_all if r.get("conflict")), key=lambda x: str(x["id"]))},
     }
 
 
@@ -1194,7 +1233,9 @@ def choice_card(c, pr_fetched_at=None):
     if c["kind"] == "decision":
         body = (f'<p class="txt">{e(c.get("text"))}</p>' if c.get("text") else "") + dl(
             [("scope", c.get("scope")), ("proposed by", c.get("proposed_by")), ("decider", c.get("decider")),
-             ("basis", c.get("basis")), ("locator", c.get("locator")), ("source", c["source"])])
+             ("basis", c.get("basis")), ("locator", c.get("locator")), ("source", c["source"]),
+             ("proposed replacement", (", ".join(c["proposed_replacements"]) + " (proposed, so this is still open)")
+              if c.get("proposed_replacements") else None)])
         hint = "Accept appends an adopted line that supersedes it; Reject a rejected one. You fill in decider, basis and locator."
     elif c["kind"] == "handoff":
         body = (f'<p class="txt">{e(c.get("title"))}</p>' if c.get("title") else "") + dl(
@@ -1210,9 +1251,13 @@ def choice_card(c, pr_fetched_at=None):
     comp = c["compose"]
     ledger_kind = {"decision": "decision", "challenge": "challenge"}.get(c["kind"])
 
+    def expect_attr(a):
+        m = re.search(r" --expect ([\w=@.-]+) ", str(comp.get(a, {}).get("command") or ""))
+        return f' data-expect="{e(m.group(1))}"' if m else ""
+
     def tmpl(a):
         x = comp[a]
-        return (f' data-template="{e(dumps(x["json"]))}" data-kind="{ledger_kind}"' if x.get("json") and ledger_kind else "")
+        return (f' data-template="{e(dumps(x["json"]))}" data-kind="{ledger_kind}"{expect_attr(a)}' if x.get("json") and ledger_kind else "")
     btns = "".join(f'<button type="button" class="act {a}" data-key="{e(key)}" data-act="{a}" '
                    f'data-line="{e(comp[a]["command"])}"{tmpl(a)}>{a.title()}</button>' for a in ("accept", "reject", "defer"))
     if "overtaken" in comp and c.get("possibly_overtaken") and c["kind"] == "challenge":   # its resolution is your words
@@ -1243,7 +1288,7 @@ def choice_card(c, pr_fetched_at=None):
         edits += (f'<div class="editor" data-for="{a}" hidden><label>{e(what)}<textarea rows="{4 if a == "amend" else 3}">{e(pre)}</textarea></label>'
                   f'<button type="button" class="primary small compose" data-key="{e(key)}" data-act="{a}" '
                   f'data-kind="{"challenge" if a == "clarify" else "decision"}" data-field="{e(x["edit_field"])}" '
-                  f'data-template="{e(dumps(x["json"]))}">Add to To apply</button></div>')
+                  f'data-template="{e(dumps(x["json"]))}"{expect_attr(a)}>Add to To apply</button></div>')
     off = ""
     if "inquire" in comp:
         off = (f'<div class="offrec"><button type="button" class="act inquire" data-key="{e(key)}" '
@@ -1578,6 +1623,7 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 {table(["id", "status", "raised by"] + (["concern"] if full else []), [[x["id"], ("open" if x["open"] else x["status"]), x["raised_by"]] + ([trunc(x.get("text"), 160)] if full else []) for x in dr["challenges_mentioning_drift"]])}</div></div>
 </section>"""
 
+    tr = data.get("transitions") or {"problems": [], "conflicts": []}
     s_review = f"""
 <section class="section surface" id="review">
 {head(9, "REVIEW", "Review", "The recent decision timeline and the challenges still open.", "LEDGER IS THE SOURCE OF TRUTH")}
@@ -1585,6 +1631,12 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 {table(["id", "date", "status", "supersedes"] + (["decision"] if full else []), [[x["id"], x["date"], x["status"], x["supersedes"] or ""] + ([trunc(x.get("text"), 200)] if full else []) for x in run["decisions_recent"]], "timeline")}</div>
 <div class="panel pad"><p class="eyebrow dark">OPEN CHALLENGES</p>
 {table(["id", "date", "raised by"] + (["concern"] if full else []), [[x["id"], x["date"], x["raised_by"]] + ([trunc(x.get("text"), 160)] if full else []) for x in run["challenges_open"]])}</div>
+<div class="panel pad"><p class="eyebrow dark">LEDGER TRANSITIONS THAT TAKE NO EFFECT, AND CONFLICTS (relay-kit/lifecycle@1)</p>
+<p class="hint">A <code>supersedes</code> counts only from a settled line, a <code>resolves</code> only from a resolved or
+accepted-risk one, and only toward an earlier record. Lines that break this are listed here and close nothing; a record closed by
+more than one line is shown with all of them.</p>
+{table(["id", "what"], [[x["id"], x["message"]] for x in tr["problems"]] + [[x["id"], "closed by more than one line: " + ", ".join(x["closed_by"] or [])] for x in tr["conflicts"]])
+ if tr["problems"] or tr["conflicts"] else '<p class="empty">None.</p>'}</div>
 </section>"""
 
     prd = data.get("pull_requests") or {"present": False, "items": [], "fetches": [], "unreadable": 0, "file": PRS_FILE}
@@ -1631,6 +1683,10 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 <dialog id="settle" aria-labelledby="settle-title" aria-describedby="settle-body"><form method="dialog"><p class="eyebrow dark" id="settle-eyebrow">SETTLE THIS CHOICE?</p><h2 id="settle-title"></h2>
 <p class="hint" id="settle-body"></p><pre id="settle-line"></pre><div class="btns"><button value="ok" class="primary small" id="settle-ok">Add to To apply</button>
 <button value="cancel" class="secondary small">Cancel</button></div></form></dialog>"""
+    sn = data.get("snapshot") or {}
+    snap_label = ((f'records rev <code>{e(sn["revision"])}</code>, committed <span class="age" data-ts="{e(sn["committed_at"] or "")}">'
+                   f'{e(sn["committed_at"] or "?")}</span>' + (' <b class="warn">+ uncommitted changes</b>' if sn.get("uncommitted") else "")
+                   + " · ") if sn.get("revision") else "")
     theme = data.get("theme")
     dflt = (theme or {}).get("default", "auto")
     html_theme = f' data-theme="{dflt}"' if theme and dflt != "auto" else ""
@@ -1653,7 +1709,7 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 <div class="version"><span>{e(SCHEMA)}</span><span>v{e(data["generator"]["kit_version"])}</span></div></aside>
 <div class="content-shell"><header class="topbar"><div class="breadcrumb"><span>{e(brand.upper())} COCKPIT</span><span class="slash">/</span>
 <span id="crumb">OVERVIEW</span></div><div class="topbar-right"><span class="offline-tag"><span class="light light-warn"></span>LOCAL-FIRST PREVIEW</span>
-<span class="date-label">generated from records as of {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
+<span class="date-label">{snap_label}newest record {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
 {toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
 <main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}</main>
 <footer class="section"><p class="mini-label">WHAT THIS PAGE CAN'T TELL YOU</p><ul>{limits}</ul>{unread}
@@ -1960,8 +2016,9 @@ JS = """
     if(!v){miss=miss||f;return}obj[f]=obj[f].replace(RQ,function(){return v})});RQ.lastIndex=0;
    if(miss)return say(card,'Fill in the '+miss+' first (it is empty).',miss==='decider'?dec:loc);return obj}
   return w}
+ function xp(b){var x=b.getAttribute('data-expect');return x&&/^[\\w=@.-]+$/.test(x)?'--expect '+x+' ':''}
  function lineFor(b){var card=b.closest('.card'),t=b.getAttribute('data-template');
-  if(t){var o=filled(b,card,JSON.parse(t));return o&&('relay-kit ledger append --dir governance '+b.getAttribute('data-kind')+' '+shq(JSON.stringify(o)))}
+  if(t){var o=filled(b,card,JSON.parse(t));return o&&('relay-kit ledger append --dir governance '+xp(b)+b.getAttribute('data-kind')+' '+shq(JSON.stringify(o)))}
   var raw=b.getAttribute('data-line');if(!/--note '/.test(raw))return raw;   // a comment line: nothing to fill
   var w=filled(b,card,null);if(w===null)return null;
   w=w.split(/\\s*\\n\\s*/).join(' / ');   // handoff.py takes a one-line note
@@ -1995,7 +2052,7 @@ JS = """
   if(a==='amend'&&RQ.test(o[f])){RQ.lastIndex=0;return say(b.closest('.card'),'Write the decision text for your amendment first.',ed)}
   if(a==='amend'&&(!v||v===ed.defaultValue.trim()))return say(b.closest('.card'),'Your text is the same as the proposal: use Accept instead, or change it.',ed);
   if(a==='amend'||a==='overtaken'){o=filled(b,b.closest('.card'),o);if(!o)return}
-  var line='relay-kit ledger append --dir governance '+b.getAttribute('data-kind')+' '+shq(JSON.stringify(o));
+  var line='relay-kit ledger append --dir governance '+xp(b)+b.getAttribute('data-kind')+' '+shq(JSON.stringify(o));
   var pk={getAttribute:function(n){return n==='data-key'?(a==='clarify'?k+'|question':k):n==='data-act'?a:n==='data-line'?line:null},
    closest:function(s){return b.closest(s)}};
   ask(a==='amend'?'AMEND THIS DECISION?':a==='overtaken'?'CLOSE AS OVERTAKEN?':'ASK ON THE RECORD?',
