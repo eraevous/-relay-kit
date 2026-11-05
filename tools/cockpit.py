@@ -75,6 +75,9 @@ Refused = ex.Refused
 _bspec = importlib.util.spec_from_file_location("relaykit_budget_for_cockpit", HERE / "budget.py")
 BG = importlib.util.module_from_spec(_bspec)
 _bspec.loader.exec_module(BG)
+_tspec = importlib.util.spec_from_file_location("relaykit_telemetry_for_cockpit", HERE / "telemetry.py")
+TEL = importlib.util.module_from_spec(_tspec)
+_tspec.loader.exec_module(TEL)
 
 
 def dumps(x):
@@ -1136,6 +1139,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         "unreadable": sorted(rd.unreadable, key=lambda x: str(x["path"])),
         "limits": LIMITS,
         "snapshot": snapshot_of(rd.root, as_of),
+        "telemetry": TEL.derive(rd.root),
         "transitions": {"lifecycle": "relay-kit/lifecycle@1",
                         "problems": sorted(({"id": r["fields"].get("id"), "message": m} for r in decisions_all + challenges_all
                                             for m in r.get("transition_problems") or []), key=lambda x: str(x["id"])),
@@ -1701,6 +1705,38 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 </section>"""
 
     tr = data.get("transitions") or {"problems": [], "conflicts": []}
+    tel = data.get("telemetry") or {"metrics": [], "notes": []}
+
+    def tel_value(m):
+        k = m["metric"]
+        d = lambda x: f'median {x["median"]}, p90 {x["p90"]}, n {x["n"]}' if x and x.get("n") else "unknown"
+        if k == "compute_consumption":
+            v = "; ".join(f"{mm}: {fmt_n(n)}" for mm, n in m["tokens_by_method"].items()) or "unknown"
+            return f'{v} tokens over {m["active_days"]} active day(s), {m["lines"]} line(s)'
+        if k == "delivery_throughput":
+            weeks = "; ".join(f'{w}: {sum(r.values())}' for w, r in m["merged_per_week"].items())
+            return f'{m["merged"]} merged ({weeks or "none"}); {m["abandoned"]} abandoned'
+        if k == "lead_time":
+            return d(m["hours"]) + " (hours)"
+        if k == "review_burden":
+            return d(m["rounds"]) + " change-request rounds per merged PR"
+        if k == "post_merge_remediation":
+            return "; ".join(f'{w}: ' + (f'{v["remediated"]} of {v["cohort"]}' if v["cohort"] else (v["unknown"] or "unknown"))
+                             for w, v in m["windows"].items())
+        if k == "surviving_changes":
+            return f'{m["count"]} of {m["cohort"]}' if m.get("count") is not None else (m.get("unknown") or "unknown")
+        if k == "human_intervention":
+            return f'{m["minutes_reported"]} min from {m["lines"]} line(s)' if m.get("minutes_reported") is not None else "unknown"
+        if k == "measurement_coverage":
+            return (f'{m["with_measured_budget_line"]} of {m["agent_sessions_in_handoffs"]} agent sessions measured; '
+                    f'budget lines {", ".join(f"{a}: {b}" for a, b in m["budget_lines_by_method"].items()) or "none"}; '
+                    f'{len(m["repositories_read"])} repositories read')
+        if k == "coordination_loss":
+            return (f'{len(m["stale_handoffs"])} stale handoff(s), {len(m["cancelled_handoffs"])} cancelled, '
+                    f'{len(m["overlapping_claims"])} overlapping claim(s), {len(m["ledger_conflicts"])} ledger conflict(s); '
+                    f'reconciliation time unknown')
+        return ""
+    tel_rows = [[m["metric"], m["label"], tel_value(m), m["definition"]] for m in tel["metrics"]]
     s_review = f"""
 <section class="section surface" id="review">
 {head(9, "REVIEW", "Review", "The recent decision timeline and the challenges still open.", "LEDGER IS THE SOURCE OF TRUTH")}
@@ -1714,6 +1750,10 @@ accepted-risk one, and only toward an earlier record. Lines that break this are 
 more than one line is shown with all of them.</p>
 {table(["id", "what"], [[x["id"], x["message"]] for x in tr["problems"]] + [[x["id"], "closed by more than one line: " + ", ".join(x["closed_by"] or [])] for x in tr["conflicts"]])
  if tr["problems"] or tr["conflicts"] else '<p class="empty">None.</p>'}</div>
+<div class="panel pad"><p class="eyebrow dark">TELEMETRY (relay-kit/telemetry@1, DERIVED, AS OF {e(tel.get("as_of") or "unknown")})</p>
+<p class="hint">Rebuilt from the records on every build: budget lines, pull-request state, handoffs and ledgers. Each figure says how it
+was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for n in tel.get("notes", [])[1:])}</p>
+{table(["metric", "label", "value", "definition"], tel_rows) if tel_rows else '<p class="empty">No telemetry.</p>'}</div>
 </section>"""
 
     prd = data.get("pull_requests") or {"present": False, "items": [], "fetches": [], "unreadable": 0, "file": PRS_FILE}

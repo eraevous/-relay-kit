@@ -39,6 +39,7 @@ SCRIPTS = {
     "prs": HERE / "prs.py",
     "budget-append": HERE / "budget_append.py",
     "usage-ingest": HERE / "usage_ingest.py",
+    "telemetry": HERE / "telemetry.py",
     "mcp": HERE / "mcp_server.py",
     "zips": HERE / "extract.py",
 }
