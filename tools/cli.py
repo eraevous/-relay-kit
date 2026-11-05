@@ -7,6 +7,8 @@
     relay-kit ledger append [--dir governance] decision|challenge '<json>'   tools/ledger_append.py
     relay-kit new-id --prefix C --lane AEC [...]      tools/new_id.py
     relay-kit export --root RECORDS --out DIR [--lane L] [--actor A] [...]   tools/export.py (read-only)
+    relay-kit cockpit --root RECORDS --out DIR [--lane L] [--content full|metadata] [...]   tools/cockpit.py (read-only)
+    relay-kit budget-append --window session|weekly --tokens-in N --tokens-out N [...]   tools/budget_append.py
     relay-kit zips [--out DIR] [--owner NAME --records OWNER/REPO]   one zip per skill (default ./relay-kit-upload)
     relay-kit --version
 
@@ -30,6 +32,8 @@ SCRIPTS = {
     "ledger append": HERE / "ledger_append.py",
     "new-id": HERE / "new_id.py",
     "export": HERE / "export.py",
+    "cockpit": HERE / "cockpit.py",
+    "budget-append": HERE / "budget_append.py",
     "zips": HERE / "extract.py",
 }
 KIT_REPO = "eraevous/relay-kit"

@@ -36,6 +36,7 @@ Registry: [governance/contracts.json](governance/contracts.json).
 | `relay-kit/paste-markers@1` | `FROM:` … `END FROM` and `>"""` | [docs/paste-markers.md](docs/paste-markers.md) |
 | `relay-kit/relay-result@1` | relay statuses: done / unconfirmed / pending | [chat-relay](skills/chat-relay/SKILL.md) |
 | `relay-kit/export@1` | read-only export: records file and coverage manifest | [docs/export.md](docs/export.md) |
+| `relay-kit/cockpit@1` | static control surface: index.html and the cockpit.json it was built from | [docs/cockpit.md](docs/cockpit.md) |
 
 **How a contract changes:** only by a new version. The spec, every implementer and the
 tests change in the same commit, and the owner records the change in the decision ledger.
@@ -75,6 +76,13 @@ don't hold. Each exported item says whether it is a verbatim source, a relay, a 
 proposal or an adopted decision, using the ledger's status rather than inferring one, and the
 manifest lists what the records refer to but don't contain (uncaptured threads and sessions,
 missing outputs, hidden steps) so that missing is never read as empty.
+
+**The cockpit** ([tools/cockpit.py](tools/cockpit.py), `relay-kit/cockpit@1`) is a third reader on
+the same export readers: it renders the records into one static page (Choices, Topology, Budget,
+Run/Drift and the other surfaces of Kate's v0.4 design) plus the `cockpit.json` it was built from.
+It keeps DEC-019 by construction: its buttons only compose lines for the owner to paste, so the
+ledger still changes only through a human-run `ledger_append` or `handoff set`. Its one new record
+is `governance/budget.jsonl`, append-only, written by `relay-kit budget-append`, never by the page.
 
 Claims in records keep one of four labels where it matters: **stated preference**,
 **belief to test**, **proposal**, **result** (with the artifact that shows it). A result
