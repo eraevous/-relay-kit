@@ -36,6 +36,7 @@ Registry: [governance/contracts.json](governance/contracts.json).
 | `relay-kit/paste-markers@1` | `FROM:` … `END FROM` and `>"""` | [docs/paste-markers.md](docs/paste-markers.md) |
 | `relay-kit/relay-result@1` | relay statuses: done / unconfirmed / pending | [chat-relay](skills/chat-relay/SKILL.md) |
 | `relay-kit/export@1` | read-only export: records file and coverage manifest | [docs/export.md](docs/export.md) |
+| `relay-kit/mcp@1` | read-only MCP server over the records; proposal-only writes | [docs/mcp.md](docs/mcp.md) |
 
 **How a contract changes:** only by a new version. The spec, every implementer and the
 tests change in the same commit, and the owner records the change in the decision ledger.
@@ -53,6 +54,7 @@ can't pass.
 | Record store | a private git repository, made with `relay-kit init` | Other stores need the five operations in [docs/storage.md](docs/storage.md); none built yet |
 | Delivery of the kit | `relay-kit` package (pin a tag or commit), skill zips | Telosmith pins a tagged release (DEC-045) |
 | Starting back up | `tools/status.py` over the record store | Read-only; it reads the records, so it's only as current as they are |
+| Reading the records from an MCP client | `relay-kit mcp` (stdio) | Local clients only; ChatGPT web would need a hosted server |
 
 Nothing in this layer is mandated. Add a context, a role or a tool only when removing it
 would make a result the owner cares about worse.
@@ -75,6 +77,15 @@ don't hold. Each exported item says whether it is a verbatim source, a relay, a 
 proposal or an adopted decision, using the ledger's status rather than inferring one, and the
 manifest lists what the records refer to but don't contain (uncaptured threads and sessions,
 missing outputs, hidden steps) so that missing is never read as empty.
+
+**The MCP server** ([tools/mcp_server.py](tools/mcp_server.py), `relay-kit/mcp@1`) is the same kind
+of reader, reached over the Model Context Protocol on stdio instead of the command line. It reuses
+export@1's readers, so every result carries the same evidence classes, plus a provenance line with
+the hash of what it read. It encodes DEC-019 (information crosses freely, authority never crosses
+implicitly): reads are open; the only writes, off by default, append a `proposed` decision or an
+`open` challenge through `ledger_append.py`, and refuse every status and authority field, so no MCP
+call can adopt, accept, resolve or complete anything. Record text is returned as data; no tool acts
+on it. It is a delivery route (layer 3), not an orchestration layer.
 
 Claims in records keep one of four labels where it matters: **stated preference**,
 **belief to test**, **proposal**, **result** (with the artifact that shows it). A result

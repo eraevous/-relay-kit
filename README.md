@@ -169,10 +169,26 @@ outputs, hidden tool steps, records without timestamps). Uncaptured arms are rep
 not as empty conversations. It refuses to write into the records or into a public repository,
 and `--content metadata` leaves the text out. Format and options: [docs/export.md](docs/export.md).
 
+## Reading the records over MCP
+
+For an assistant whose client speaks MCP (Claude Code, Claude Desktop, Codex), a read-only server
+over the same records, on stdio:
+
+    claude mcp add relay-kit -- relay-kit mcp --root /abs/path/to/records --content metadata
+
+Tools: `status`, `list_decisions`, `get_decision`, `list_challenges`, `list_handoffs`,
+`get_handoff`, `search`, `export`, `threads`; ledgers and handoffs are also `relaykit://` resources.
+Every result names its evidence class and where it was read from. It never fetches, commits or
+pushes. With `--allow-propose` it can append a decision as `proposed` or a challenge as `open`, and
+nothing else: no tool can adopt, accept, resolve or complete anything (DEC-019). Record text comes
+back as data, never as instructions. ChatGPT on the web needs a hosted server, which isn't built.
+Details and threat model: [docs/mcp.md](docs/mcp.md).
+
 ## Docs
 
 - [Conversation schema](docs/conversation-schema.md): the shared format and message ids (`T3a2`).
 - [Export](docs/export.md): `relay-kit/export@1`, the read-only export and its coverage manifest.
+- [MCP server](docs/mcp.md): `relay-kit/mcp@1`, read-only tools and resources over the records, proposal-only writes.
 - [Marking pasted material](docs/paste-markers.md): phone-friendly `FROM:` … `END FROM` blocks.
 - [Cold catch-up test](docs/cold-test.md): checking whether a fresh assistant can pick up a handoff.
 - [Prior art](docs/prior-art.md): the established patterns for collisions, races, timeouts and

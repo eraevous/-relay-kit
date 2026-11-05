@@ -377,7 +377,7 @@ def schema_tests():
 
 def governance_tests():
     """The architecture's own rules: contracts, invariants, ledgers."""
-    test_src = "".join((KIT / "tests" / f).read_text(encoding="utf-8") for f in ("run_tests.py", "browser_tests.cjs", "test_export.py"))
+    test_src = "".join((KIT / "tests" / f).read_text(encoding="utf-8") for f in ("run_tests.py", "browser_tests.cjs", "test_export.py", "test_mcp.py"))
     def test_exists(name):
         tail = name.split(": ", 1)[-1]
         return tail.replace('\\"', '"') in test_src.replace('\\"', '"')
@@ -1353,10 +1353,10 @@ def output_name_tests():
     case("ledger: check --base catches every rewrite or removal, whichever copy holds it: " + ", ".join(caught),
          all(r[0] != 0 for r in caught.values()), str({k: v for k, v in caught.items() if v[0] == 0}))
 
-def export_tests():
-    """relay-kit/export@1: the unittest cases in tests/test_export.py, each reported by its docstring."""
+def export_tests(module="test_export"):
+    """relay-kit/export@1 and relay-kit/mcp@1: the unittest cases in tests/<module>.py, each reported by its docstring."""
     import unittest
-    mod = load("test_export", KIT / "tests" / "test_export.py")
+    mod = load(module, KIT / "tests" / f"{module}.py")
     for t in unittest.defaultTestLoader.loadTestsFromModule(mod):
         for one in t:
             r = unittest.TestResult()
@@ -1384,6 +1384,7 @@ if __name__ == "__main__":
     telemetry_tests()
     evidence_tests()
     export_tests()
+    export_tests("test_mcp")
     failed = [r for r in RESULTS if not r[1]]
     print(f"\n{len(RESULTS) - len(failed)} passed, {len(failed)} failed  (scratch: {TMP})")
     sys.exit(1 if failed else 0)

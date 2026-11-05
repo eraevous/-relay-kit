@@ -68,6 +68,22 @@
         "export: missing captures, hidden steps, absent timestamps and missing outputs are reported in the manifest",
         "export: a destination inside a public or unconfirmed GitHub repository is refused"
       ]
+    },
+    {
+      "id": "relay-kit/mcp@1",
+      "what": "Read-only MCP server over a records store, JSON-RPC 2.0 over stdio: the tool names and arguments, relaykit:// resource URIs, the result envelope (schema, evidence_class as in export@1, provenance 'read from <path> at records sha256:<hash>', content_level, notice), the --content metadata policy, and proposal-only writes (propose_decision always 'proposed', raise_challenge always 'open'; no authority field accepted: DEC-019).",
+      "spec": "docs/mcp.md",
+      "implementers": [
+        "tools/mcp_server.py"
+      ],
+      "tests": [
+        "mcp: initialize handshake, tools/list and ping over stdio; the version is negotiated leniently",
+        "mcp: every read tool answers with evidence_class and a provenance line naming the records hash",
+        "mcp: with --content metadata no tool or resource returns record text, and text filters are refused",
+        "mcp: a proposal tool refuses status, adopted, accepted, completed and every other authority field",
+        "mcp: propose_decision appends one 'proposed' line through ledger_append.py, with the shared id rule",
+        "mcp: malformed JSON-RPC gets a proper error and the server keeps serving"
+      ]
     }
   ]
 }
