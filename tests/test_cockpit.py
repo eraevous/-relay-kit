@@ -512,7 +512,9 @@ class AskTests(unittest.TestCase):
         """cockpit: a later record that cites a choice flags it possibly overtaken, with the reason; an open one is listed as waiting on it"""
         data, page = self.build()
         c = self.item(data, "DEC-007")
-        self.assertEqual(c["possibly_overtaken"], ["decision DEC-008 (adopted) says it closed, replaced or carried it out"])
+        self.assertEqual(len(c["possibly_overtaken"]), 1)
+        self.assertTrue(c["possibly_overtaken"][0].startswith("decision DEC-008 (adopted): “"), c["possibly_overtaken"])
+        self.assertIn("carried out", c["possibly_overtaken"][0])   # the words that triggered it are shown
         self.assertIn("POSSIBLY OVERTAKEN", page)
         self.assertIn("Close as overtaken", page)
         self.assertEqual(self.item(data, "DEC-006")["possibly_overtaken"], [])
@@ -530,18 +532,28 @@ class AskTests(unittest.TestCase):
         data, _ = self.build()
         self.assertEqual((calls, self.item(data, "DEC-007")["prs"], data["pr_state"]),
                          ([], [{"pr": "example/synthetic#7", "state": None}], {"looked_up": False}))   # named, not looked up
-        self.assertEqual(self.item(data, "DEC-007")["possibly_overtaken"], ["decision DEC-008 (adopted) says it closed, replaced or carried it out"])
+        self.assertEqual(len(self.item(data, "DEC-007")["possibly_overtaken"]), 1)
         data, _ = self.build("pr", pr_state=True, pr_lookup=fake)
         self.assertEqual(calls, [("example", "synthetic", 7)])
         c = self.item(data, "DEC-007")
         self.assertEqual(c["prs"], [{"pr": "example/synthetic#7", "state": "merged"}])
         self.assertIn("example/synthetic#7 is merged", c["possibly_overtaken"])
+        self.assertIn("Close as overtaken", [o["label"] for o in c["effects"]])
         self.assertTrue(data["pr_state"]["looked_up"] and data["pr_state"]["fetched_at"])
         # a bare "<repo> PR #N" counts only for a repository the records spell out as owner/repo
         self.assertEqual(ck.pr_refs("see library PR #71 and Telosmith PR #5", "sam", {"telosmith"}), [("sam", "Telosmith", 5)])
+        # a PR named only in the proposer's ask (or the scope) is found too
+        with open(self.root / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": "DEC-009", "date": "2026-11-05", "status": "proposed", "decision": "Ship it.", "scope": "release",
+                                "recorded_by": "claude:research#SESSA1",
+                                "ask": {"question": "Merge https://github.com/example/synthetic/pull/9?",
+                                        "options": [{"label": "Accept", "effect": "merged"}], "default_if_unanswered": "open"}}) + "\n")
+        data, _ = self.build("pr-ask", pr_state=True, pr_lookup=fake)
+        self.assertEqual(self.item(data, "DEC-009")["prs"], [{"pr": "example/synthetic#9", "state": "merged"}])
         self.assertEqual(ck.pr_refs("https://github.com/../../pull/1 and telosmith pr #9", "sam", {"telosmith"}), [])
+        before = len(calls)
         meta, _ = self.build("pr-meta", content="metadata", pr_state=True, pr_lookup=fake)
-        self.assertEqual((meta["pr_state"], len(calls)), ({"looked_up": False}, 1))   # metadata reads no text, looks nothing up
+        self.assertEqual((meta["pr_state"], len(calls)), ({"looked_up": False}, before))   # metadata reads no text, looks nothing up
 
     def test_amend_clarify_lines(self):
         """cockpit: Amend and Clarify compose ledger lines that pass the check once filled in, and are refused while placeholders remain"""
@@ -580,6 +592,33 @@ class AskTests(unittest.TestCase):
         self.assertEqual(data["questions"], [])
         # the answer names DEC-002, but answering a question doesn't overtake what it was about
         self.assertEqual(self.item(data, "DEC-002")["possibly_overtaken"], [])
+
+    def test_overtaken_needs_unnegated_words_in_text(self):
+        """cockpit: closure words count only in record text, not negated, and 'amended' counts; an open question about it is waiting"""
+        lines = [
+            {"id": "DEC-009", "date": "2026-11-04", "status": "adopted", "decision": "Keep DEC-006 open; it is not done yet.",
+             "scope": "research", "decider": "sam", "basis": "\"wait\"", "locator": "synthetic chat", "recorded_by": "sam"},
+            {"id": "DEC-010", "date": "2026-11-04", "status": "rejected", "supersedes": "DEC-002", "decision": "Unrelated; see DEC-001 for context.",
+             "scope": "research", "decider": "sam", "basis": "\"no\"", "locator": "synthetic chat", "recorded_by": "sam"},
+        ]
+        with open(self.root / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
+            for d in lines:
+                f.write(json.dumps(d) + "\n")
+        q = {"id": "CH-004", "date": "2026-11-05", "status": "open", "kind": "question", "about": "DEC-006",
+             "addressed_to": "claude:research#SESSA1", "concern": "Which day?", "raised_by": "sam", "recorded_by": "sam"}
+        with open(self.root / "governance" / "challenges.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(q) + "\n")
+        data, _ = self.build()
+        c = self.item(data, "DEC-006")
+        self.assertEqual(c["possibly_overtaken"], [])   # "not done yet" / "keep ... open" are negations
+        self.assertEqual([w["id"] for w in c["waiting_on_it"]], ["CH-004"])   # the open question about it
+        with open(self.root / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": "DEC-011", "date": "2026-11-05", "status": "adopted", "decision": "DEC-006 amended: fortnightly.",
+                                "scope": "research", "decider": "sam", "basis": "\"ok\"", "locator": "synthetic chat",
+                                "recorded_by": "sam"}) + "\n")
+        data, _ = self.build("again")
+        self.assertEqual(len(self.item(data, "DEC-006")["possibly_overtaken"]), 1)
+        self.assertIn("amended", self.item(data, "DEC-006")["possibly_overtaken"][0])
 
     def test_settled_records_dont_wait(self):
         """cockpit: a superseded decision or resolved challenge that cites a choice is neither waiting on it nor evidence about it"""

@@ -229,7 +229,34 @@ ASK_FIELDS = "ask: {question, options: [{label, effect}], default_if_unanswered}
 
 
 OVERTAKE_WORDS = re.compile(r"overtak|supersed|\bclos(?:e|es|ed|ing)\b|replac|\bdone\b|execut|\bmerged\b|\bmoot\b|"
-                            r"\balready\b|no longer|instead of|carried out|implemented", re.I)
+                            r"\balready\b|instead of|carried out|implemented|amend", re.I)
+NEGATION = re.compile(r"\b(?:not|no|never|nor|without|isn't|wasn't|aren't|don't|doesn't|didn't|won't|shouldn't|"
+                      r"cannot|can't|keep|keeps|kept|leave|leaves|open|until|yet)\b[^.;]{0,30}$", re.I)
+
+
+SEP = "\n\u00b6\n"   # between a record's fields in its searchable text
+
+
+def closure_phrase(text, start, end):
+    """The phrase near an id (same text, within 160 characters) saying something closed, replaced,
+    amended or carried it out, unless a negation shortly before it says otherwise ('not done',
+    'keep it open'). Searched in record text only, never in field names. None if there is none."""
+    seg_lo = text.rfind(SEP, 0, start)
+    seg_hi = text.find(SEP, end)
+    seg_lo = 0 if seg_lo < 0 else seg_lo + len(SEP)   # stay within the field that names the id
+    seg_hi = len(text) if seg_hi < 0 else seg_hi
+    lo, hi = max(seg_lo, start - 160), min(seg_hi, end + 160)
+    for m in OVERTAKE_WORDS.finditer(text, lo, hi):
+        if NEGATION.search(text[max(0, m.start() - 40): m.start()]):
+            continue
+        s, e_ = max(lo, m.start() - 40), min(hi, m.end() + 40)
+        return " ".join(text[s:e_].split())
+    return None
+
+
+def record_text(fields):
+    """A ledger line's searchable text: its string values only, so a field name ('supersedes') never matches."""
+    return SEP.join(str(v) for k, v in sorted(fields.items()) if isinstance(v, str))
 
 
 def ledger_num(i):
@@ -490,16 +517,16 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     owner_hint = records_github_owner(rd.root)   # a local git read; no network
     texts = {}   # every record's searchable text, by (kind, id)
     for d in decisions_all:
-        texts[("decision", d["fields"].get("id"))] = (d, dumps(d["fields"]))
+        texts[("decision", d["fields"].get("id"))] = (d, record_text(d["fields"]))
     for c in challenges_all:
-        texts[("challenge", c["fields"].get("id"))] = (c, dumps(c["fields"]))
+        texts[("challenge", c["fields"].get("id"))] = (c, record_text(c["fields"]))
     for h in handoffs_all:
         texts[("handoff", h["handoff_id"])] = (h, h.get("text") or "")
     pr_states = {}
     # Clarify questions and the lines that answer them talk about an item without settling it
     q_ids = {c["fields"].get("id") for c in challenges_all if c["fields"].get("kind") == "question"}
-    qa_ids = {("challenge", i) for i in q_ids} | {("challenge", c["fields"].get("id")) for c in challenges_all
-                                                  if c["fields"].get("resolves") in q_ids}
+    answer_ids = {("challenge", c["fields"].get("id")) for c in challenges_all if c["fields"].get("resolves") in q_ids}
+    question_ids = {("challenge", i) for i in q_ids}
     known_repos = set()
     if owner_hint:
         own_re = re.compile(rf"\b{re.escape(owner_hint)}/([\w.-]+)", re.I)
@@ -533,7 +560,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         day = str(item.get("date") or "")[:10]
         for (k2, i2), (r2, txt) in texts.items():
             m = pat.search(txt)
-            if i2 == cid or not m or (k2, i2) in qa_ids:   # a Clarify question or its answer isn't evidence
+            if i2 == cid or not m or (k2, i2) in answer_ids:   # answering a question about it settles nothing about it
                 continue
             if (k2 == "decision" and i2 in superseded) or (k2 == "challenge" and i2 in closed):
                 continue   # settled since: neither waiting on it nor news about it
@@ -552,15 +579,18 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             if not later:
                 continue
             cited.append(ref)
-            # strong: a settled later record that, near the id, says it closed, replaced or carried it out
-            near = txt[max(0, m.start() - 160): m.end() + 160]
-            if OVERTAKE_WORDS.search(near):
-                strong.append(ref)
+            # strong: a settled later record that, near the id, says it closed, replaced, amended or carried it
+            # out (not a question about it: those are open and listed as waiting above)
+            phrase = closure_phrase(txt, m.start(), m.end()) if (k2, i2) not in question_ids else None
+            if phrase:
+                strong.append(dict(ref, phrase=phrase))
         item["waiting_on_it"] = sorted(waiting, key=lambda r: str(r["id"]))
         item["cited_later_by"] = sorted(cited, key=lambda r: str(r["id"]))
         prs = []
         if full:   # references always; their state only with --pr-state (build time)
-            for o_, r_, n_ in pr_refs(body + " " + str(f.get("evidence") or ""), owner_hint, known_repos):
+            named_in = " ".join([body, str(f.get("evidence") or ""), str(f.get("scope") or ""),
+                                 json.dumps(f.get("ask"), ensure_ascii=False) if isinstance(f.get("ask"), dict) else ""])
+            for o_, r_, n_ in pr_refs(named_in, owner_hint, known_repos):
                 key = f"{o_}/{r_}#{n_}".lower()
                 if pr_lookup and key not in pr_states:
                     pr_states[key] = pr_lookup(o_, r_, n_)
@@ -568,9 +598,15 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         item["prs"] = prs
         sp = ex.span(item.get("date"))
         item["age_days"] = (as_of_dt - sp[0]).days if sp and as_of_dt else None
-        reasons = [f"{r['kind']} {r['id']} ({r['status']}) says it closed, replaced or carried it out" for r in sorted(strong, key=lambda r: str(r["id"]))]
+        reasons = [f"{r['kind']} {r['id']} ({r['status']}): “…{r['phrase']}…”" for r in sorted(strong, key=lambda r: str(r["id"]))]
         reasons += [f"{x['pr']} is {x['state']}" for x in prs if x["state"] in ("merged", "closed")]
         item["possibly_overtaken"] = reasons
+        extra = []
+        if reasons and kind != "handoff":
+            extra.append({"label": "Close as overtaken", "effect": f"a line closes {cid} without adopting anything; you say what overtook it"})
+        extra += [{"label": "Clarify", "effect": "an open question about it goes on the record, addressed to whoever proposed it; nothing is delivered"},
+                  {"label": "Inquire", "effect": "a prompt is copied for you to ask an assistant; nothing is recorded"}]
+        item["effects"] = item["effects"] + extra
         if kind != "handoff":
             proposer = f.get("proposed_by") or f.get("recorded_by") if kind == "decision" else f.get("raised_by")
             item["compose"].update(compose_extra(kind, cid, owner, proposer, full, body, f.get("scope")))
@@ -1010,11 +1046,28 @@ def choice_card(c, pr_fetched_at=None):
              ("source", c["source"])])
         hint = "Accept records accepted-risk; Reject records resolved (dismissed or fixed). You write the resolution."
     comp = c["compose"]
+    ledger_kind = {"decision": "decision", "challenge": "challenge"}.get(c["kind"])
+
+    def tmpl(a):
+        x = comp[a]
+        return (f' data-template="{e(dumps(x["json"]))}" data-kind="{ledger_kind}"' if x.get("json") and ledger_kind else "")
     btns = "".join(f'<button type="button" class="act {a}" data-key="{e(key)}" data-act="{a}" '
-                   f'data-line="{e(comp[a]["command"])}">{a.title()}</button>' for a in ("accept", "reject", "defer"))
+                   f'data-line="{e(comp[a]["command"])}"{tmpl(a)}>{a.title()}</button>' for a in ("accept", "reject", "defer"))
     if "overtaken" in comp and c.get("possibly_overtaken"):
         btns += (f'<button type="button" class="act overtaken" data-key="{e(key)}" data-act="overtaken" '
-                 f'data-line="{e(comp["overtaken"]["command"])}">Close as overtaken</button>')
+                 f'data-line="{e(comp["overtaken"]["command"])}"{tmpl("overtaken")}>Close as overtaken</button>')
+    # Your words, decider and locator (DEC-113 part 3): the page fills them into the line when you click.
+    # The basis has no default (CH-020); decider and locator start from your saved defaults.
+    words_label = {"decision": "Your words: the basis, quoted", "challenge": "Your words: the resolution",
+                   "handoff": "Your words: the note"}[c["kind"]]
+    who = ""
+    if c["kind"] == "decision":
+        who = ('<div class="who"><label>Decider<input type="text" class="in-decider" autocomplete="off"></label>'
+               '<label>Locator<input type="text" class="in-locator" autocomplete="off"></label></div>')
+    words = (f'<div class="words">{who}<label>{e(words_label)} <span class="req">required to settle; no default</span>'
+             f'<textarea class="in-words" rows="2" placeholder="Write it yourself: the page never fills this in."></textarea></label>'
+             f'<button type="button" class="secondary small same-last">Same as last</button>'
+             f'<span class="words-note" role="status"></span></div>')
     edits = ""
     for a, label, what in (("amend", "Amend", "Your text for the decision (it replaces the proposal's in the adopted line):"),
                            ("clarify", "Clarify", "Your question to " + (str(comp.get("clarify", {}).get("json", {}).get("addressed_to")) if comp.get("clarify") else "the proposer") + ":")):
@@ -1037,7 +1090,7 @@ def choice_card(c, pr_fetched_at=None):
              f'{e(comp["clarify"]["json"]["addressed_to"])}, listed under Questions until a line resolves it. '
              'Recording it doesn\'t deliver it: tell them, or send a handoff, if you need the answer.</p>') if "clarify" in comp else ""
     return (f'<article class="card choice" data-key="{e(key)}">{head}{ask_block(c, pr_fetched_at)}{body}<p class="hint">{e(hint)}</p>'
-            f'<div class="btns">{btns}</div>{edits}{onrec}{off}</article>')
+            f'{words}<div class="btns">{btns}</div>{edits}{onrec}{off}</article>')
 
 
 def ask_block(c, pr_fetched_at=None):
@@ -1344,7 +1397,7 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 <meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
 <title>{e(brand.title())} · Cockpit</title><style>{CSS}</style></head>
-<body><div class="shell">
+<body data-owner="{e(data["owner"])}" data-asof="{e(data["as_of"] or "")}"><div class="shell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="19" fill="none" stroke="currentColor"/>
 <circle cx="22" cy="22" r="11" fill="none" stroke="currentColor" opacity=".5"/><circle cx="22" cy="22" r="3" fill="currentColor"/></svg></span>
 <span class="brand-word"><b>{e(brand)}</b><small>COCKPIT / {e(SCHEMA.split("/")[1])}</small></span></div>
@@ -1456,6 +1509,10 @@ dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 12px;mar
 .offrec{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px;padding-top:8px;border-top:1px dashed #33444a;color:#8ea4a3;font-size:12px}
 .act.inquire{border-style:dashed;background:transparent;color:var(--blue)}.act.inquire::after{content:" · off record";font-weight:400;color:#8ea4a3}
 .onrec-note{color:#a99bbf;font-size:12px;margin:6px 0 0}
+.words{margin:8px 0 0;padding:8px 0 0;border-top:1px solid #26353a}.words label{display:block;font-size:12px;color:#9fb1b1}
+.words .who{display:flex;flex-wrap:wrap;gap:8px}.words .who label{flex:1 1 180px}
+.words input,.words textarea{display:block;width:100%;box-sizing:border-box;margin:3px 0 6px;min-height:0;height:auto;background:#0d1519;color:inherit;border:1px solid #39474b;border-radius:5px;padding:6px 8px;font:13px/1.4 var(--sans,inherit)}
+.words .req{color:#e3c27d;font-size:11px}.words-note{color:#e3c27d;font-size:12px;margin-left:8px}
 .editor{margin-top:8px}.editor label{display:block;font-size:12px;color:#9fb1b1}
 .editor textarea{display:block;width:100%;min-height:0;height:auto;resize:vertical;box-sizing:border-box;margin:4px 0 6px;background:#0d1519;color:inherit;border:1px solid #39474b;border-radius:5px;padding:8px;font:13px/1.4 var(--sans,inherit)}
 .ask{border-left:3px solid var(--teal);padding:4px 0 4px 10px;margin:10px 0}
@@ -1545,11 +1602,33 @@ JS = """
   d.getElementById('settle-body').textContent=body;d.getElementById('settle-line').textContent=line||'';
   d.getElementById('settle-line').hidden=!line;d.getElementById('settle-ok').textContent=ok;pending=cb;dlg.returnValue='';dlg.showModal()}
  if(dlg)dlg.addEventListener('close',function(){if(dlg.returnValue==='ok'&&pending)pending();pending=null});
+ function shq(s){return "'"+String(s).replace(/'/g,"'\\"'\\"'")+"'"}
+ // Your words, decider and locator. Defaults live in this browser only (localStorage; never required).
+ function ls(k,v){try{if(v===undefined)return localStorage.getItem('relaykit.cockpit.'+k);localStorage.setItem('relaykit.cockpit.'+k,v)}catch(e){return null}}
+ var B=d.body,owner=(B&&B.getAttribute&&B.getAttribute('data-owner'))||'',asof=(B&&B.getAttribute&&B.getAttribute('data-asof'))||'';
+ function now(){var t=new Date(),z=function(n){return(n<10?'0':'')+n};return t.getFullYear()+'-'+z(t.getMonth()+1)+'-'+z(t.getDate())+' '+z(t.getHours())+':'+z(t.getMinutes())}
+ $('.in-decider').forEach(function(i){i.value=ls('decider')||owner;i.addEventListener('change',function(){ls('decider',i.value)})});
+ $('.in-locator').forEach(function(i){i.value=ls('locator')||('Cockpit Choices, records as of '+asof+', '+now());i.addEventListener('change',function(){ls('locator',i.value)})});
+ $('.same-last').forEach(function(b){b.addEventListener('click',function(){var w=b.closest('.words'),v=ls('words');
+  w.querySelector('.words-note').textContent=v?'':'no earlier words in this browser';if(v){w.querySelector('.in-words').value=v}})});
+ var RQ=/<<REQUIRED[^>]*>>/g;
+ function filled(b,card,obj){var w=(card.querySelector('.in-words')||{}).value||'',dec=card.querySelector('.in-decider'),loc=card.querySelector('.in-locator');
+  w=w.trim();if(!w){var n=card.querySelector('.words-note');if(n)n.textContent='Write your words first: a settled line carries them, and the page never invents them.';
+   var ta=card.querySelector('.in-words');if(ta)ta.focus();return null}
+  if(obj){Object.keys(obj).forEach(function(f){if(typeof obj[f]!=='string')return;
+    var v=f==='decider'?(dec&&dec.value.trim()):f==='locator'?(loc&&loc.value.trim()):w;if(v)obj[f]=obj[f].replace(RQ,function(){return v})});return obj}
+  return w}
+ function lineFor(b){var card=b.closest('.card'),t=b.getAttribute('data-template');
+  if(t){var o=filled(b,card,JSON.parse(t));return o&&('relay-kit ledger append --dir governance '+b.getAttribute('data-kind')+' '+shq(JSON.stringify(o)))}
+  var w=filled(b,card,null);if(w===null)return null;return b.getAttribute('data-line').replace(/--note '[^']*'/,function(){return '--note '+shq(w)})}
+ function remember(card){var w=card.querySelector('.in-words');if(w&&w.value.trim())ls('words',w.value.trim())}
  $('button[data-line]').forEach(function(b){b.addEventListener('click',function(){var a=b.getAttribute('data-act');
   if(a==='defer'){pick(b);return}
+  var line=lineFor(b);if(line===null)return;var card=b.closest('.card');
+  var pk={getAttribute:function(n){return n==='data-line'?line:b.getAttribute(n)},closest:function(s){return b.closest(s)}};
   ask('SETTLE THIS CHOICE?',({accept:'Accept ',reject:'Reject ',overtaken:'Close as overtaken: '}[a]||'')+b.getAttribute('data-key').split(':')[1]+'?',
-   'This adds a line to To apply. Nothing is written until you edit the placeholders, copy it, and run it yourself.',
-   b.getAttribute('data-line'),'Add to To apply',function(){pick(b)})})});
+   'This adds a line to To apply with your words in it. Nothing is written until you copy it and run it yourself.',
+   line,'Add to To apply',function(){remember(card);pick(pk)})})});
  $('.torun').forEach(function(b){b.addEventListener('click',function(){var k=b.getAttribute('data-card');
   ask('MOVE FROM DRIFT TO RUN?',k.split(':')[1]+' is still a proposal.','A commitment needs your explicit authorization and a concrete next action. Nothing moves from here: open its card in Choices and compose the ledger line.',
    '','Open in Choices',function(){go('choices');flash(k)})})});
@@ -1564,10 +1643,10 @@ JS = """
   c.querySelectorAll('.editor').forEach(function(ed){var on=ed.getAttribute('data-for')===w&&ed.hidden;ed.hidden=!on;
    var o=c.querySelector('[data-open="'+ed.getAttribute('data-for')+'"]');if(o)o.setAttribute('aria-expanded',on?'true':'false');
    if(on){var ta=ed.querySelector('textarea');if(ta)ta.focus()}})})});
- function shq(s){return "'"+String(s).replace(/'/g,"'\\"'\\"'")+"'"}
  $('.compose').forEach(function(b){b.addEventListener('click',function(){var a=b.getAttribute('data-act'),k=b.getAttribute('data-key'),
   o=JSON.parse(b.getAttribute('data-template')),f=b.getAttribute('data-field'),v=b.closest('.editor').querySelector('textarea').value.trim();
-  if(v)o[f]=v;var line='relay-kit ledger append --dir governance '+b.getAttribute('data-kind')+' '+shq(JSON.stringify(o));
+  if(v)o[f]=v;if(a==='amend'){o=filled(b,b.closest('.card'),o);if(!o)return}
+  var line='relay-kit ledger append --dir governance '+b.getAttribute('data-kind')+' '+shq(JSON.stringify(o));
   var pk={getAttribute:function(n){return n==='data-key'?(a==='clarify'?k+'|question':k):n==='data-act'?a:n==='data-line'?line:null},
    closest:function(s){return b.closest(s)}};
   ask(a==='amend'?'AMEND THIS DECISION?':'ASK ON THE RECORD?',
@@ -1619,6 +1698,8 @@ def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=N
         fetched = iso(dt.datetime.now(dt.timezone.utc))
         if content != "full":   # no text is read for references in metadata mode, so nothing is looked up
             pr_state, pr_lookup, fetched = False, None, None
+            print("note: --pr-state is ignored with --content metadata (no text is read, so no references are found)",
+                  file=sys.stderr)
     data = collect(root, lane=lane, content=content, weekly_tokens=weekly_tokens, drift_days=drift_days,
                    coordinator=coordinator, brand=brand, pr_lookup=pr_lookup if pr_state else None, pr_fetched_at=fetched)
     page = render(data)

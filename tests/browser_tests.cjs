@@ -242,9 +242,18 @@ async function fill(els = null) {
     const dlg = byId('settle');
     dlg.showModal = () => { dlg.open = true; };
     const close = (v) => { dlg.open = false; dlg.returnValue = v; dlg.fire('close'); };
+    // a card holding the owner's words (DEC-113 part 3); without them a settling line is refused
+    const words = el({}), note = el({});
+    words.value = 'Owner words, quoted.';
     const card = el();
-    const buttons = [...page.matchAll(/<button type="button" class="act (\w+)" data-key="([^"]*)" data-act="\w+" data-line="([^"]*)">/g)]
-      .map(([, act, key, line]) => Object.assign(el({ 'data-act': act, 'data-key': unesc(key), 'data-line': unesc(line) }), { closest: () => card }));
+    card.querySelector = (s) => (s === '.in-words' ? words : s === '.words-note' ? note : null);
+    const attr = (rest, name) => { const m = rest.match(new RegExp(name + '="([^"]*)"')); return m ? unesc(m[1]) : undefined; };
+    const buttons = [...page.matchAll(/<button type="button" class="act (\w+)" data-key="([^"]*)" data-act="\w+" data-line="([^"]*)"([^>]*)>/g)]
+      .map(([, act, key, line, rest]) => {
+        const a = { 'data-act': act, 'data-key': unesc(key), 'data-line': unesc(line) };
+        if (attr(rest, 'data-template')) { a['data-template'] = attr(rest, 'data-template'); a['data-kind'] = attr(rest, 'data-kind'); }
+        return Object.assign(el(a), { closest: () => card });
+      });
     const nav = el({ 'data-goto': 'overview', 'data-name': 'Overview' });
     const document = { documentElement: el(), getElementById: (id) => (id === 'pf-go' ? null : byId(id)), querySelector: () => null,
       querySelectorAll: (sel) => (sel === '.nav-link' ? [nav] : sel === 'button[data-line]' ? buttons : []), execCommand: () => true };
@@ -256,7 +265,11 @@ async function fill(els = null) {
     const box = byId('apply');
     const btn = (key, act) => buttons.find((b) => b.attrs['data-key'] === key && b.attrs['data-act'] === act);
     const choose = (key, act) => { btn(key, act).fire('click'); if (act !== 'defer') close('ok'); };
-    const lineOf = (key, act) => btn(key, act).attrs['data-line'];
+    // the line a choice composes, as the page shows it in the dialog (with the owner's words filled in)
+    const lineOf = (key, act) => {
+      if (act === 'defer') return btn(key, act).attrs['data-line'];
+      btn(key, act).fire('click'); const l = byId('settle-line').textContent; close('cancel'); return l;
+    };
     const [A, B] = ['decision:DEC-002', 'challenge:CH-001'];
     check('cockpit page script: runs against the built page', !err && buttons.length === 9 && btn(A, 'accept') && btn(B, 'accept'), { err, n: buttons.length });
     if (!err && btn(A, 'accept') && btn(B, 'accept')) {
@@ -283,6 +296,14 @@ async function fill(els = null) {
       byId('clear').fire('click');
       close('ok');
       check('cockpit To apply: Clear asks before discarding edits', asked && kept && box.value === '', { asked, kept, after: box.value });
+      // your words go into the line; without them nothing is composed
+      const filledLine = lineOf(A, 'accept');
+      const obj = JSON.parse(filledLine.slice(filledLine.indexOf("'") + 1, filledLine.lastIndexOf("'")).replace(/'"'"'/g, "'"));
+      check('cockpit words: the basis in a composed line is the owner\'s words, never a default', obj.basis === 'Owner words, quoted.' && obj.supersedes === 'DEC-002', obj);
+      words.value = '  ';
+      dlg.open = false; btn(A, 'accept').fire('click');
+      check('cockpit words: settling without your words composes nothing and says why', dlg.open !== true && /Write your words first/.test(note.textContent), { open: dlg.open, note: note.textContent });
+      words.value = 'Owner words, quoted.';
       check('cockpit dialog: named and described by its title and body',
         /<dialog id="settle" aria-labelledby="settle-title" aria-describedby="settle-body">/.test(page));
     }

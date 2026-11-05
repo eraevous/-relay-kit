@@ -88,15 +88,18 @@ in "?", at least one `{label, effect}` option, and `default_if_unanswered`.
 ### Possibly overtaken
 
 A card is flagged **possibly overtaken**, with its reasons, only on strong evidence:
-- a later, settled record that cites it says, near its id, that it closed, replaced or carried it out
-  ("overtaken", "supersedes", "closes", "merged", "already", "executed", "carried out" and similar). A
-  settled record is a decision that isn't proposed, a challenge that isn't open, or a handoff that has
-  finished or been cancelled. "Later" means a higher id in the same ledger, otherwise a later day.
+- a later, settled record that cites it says, near its id, that it closed, replaced, amended or carried
+  it out ("overtaken", "supersedes", "closes", "amended", "merged", "already", "executed", "carried
+  out" and similar). Only that record's text is searched, within the field that names the id: never
+  field names, and not when a negation comes just before ("not done", "keep it open"). The flag
+  quotes the words it found, so you can judge it. A settled record is a decision that isn't
+  proposed, a challenge that isn't open, or a handoff that has finished or been cancelled. "Later"
+  means a higher id in the same ledger, otherwise a later day.
 - with `--pr-state`, a pull request it names is merged or closed.
 
 Weaker evidence is listed but not flagged: other later citations ("cited later by"), and open records
-that cite it ("waiting on it"). Records settled since don't appear in either list. Clarify questions
-and their answers aren't evidence of anything: answering a question about DEC-N doesn't overtake DEC-N.
+that cite it ("waiting on it"), including an open Clarify question about it. Records settled since
+don't appear in either list. Answering a question about DEC-N doesn't overtake DEC-N.
 The flag is a prompt to check, not a verdict.
 
 A flagged card offers **Close as overtaken**. It composes a closing line that adopts nothing: a
