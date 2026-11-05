@@ -40,47 +40,69 @@ def main(argv=None):
     ap.add_argument("--scope", help="what the numbers cover, in words")
     ap.add_argument("--source", help="where the numbers came from")
     ap.add_argument("--agents", type=int)
+    ap.add_argument("--human-minutes", type=int, help="self-reported active owner minutes")
+    ap.add_argument("--merges", type=int, help="pull requests merged in the window")
     ap.add_argument("--note", default="")
     ap.add_argument("--actor", default=os.environ.get("RELAYKIT_ACTOR", ""))
     ap.add_argument("--ts")
     a = ap.parse_args(argv)
-    if a.tokens_in < 0 or a.tokens_out < 0 or (a.agents is not None and a.agents < 0):
-        sys.exit("refused: token and agent counts must be >= 0")
+    if a.tokens_in < 0 or a.tokens_out < 0 or any(v is not None and v < 0 for v in (a.agents, a.human_minutes, a.merges)):
+        sys.exit("refused: token, agent, minute and merge counts must be >= 0")
     if not a.actor.strip():
         sys.exit("refused: --actor (or RELAYKIT_ACTOR) is required: who used these tokens")
     if "\n" in a.note or "\n" in a.actor:
         sys.exit("refused: --note and --actor must be one line")
-    ts = a.ts or dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try:
-        dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except ValueError:
-        sys.exit(f"refused: --ts {ts!r} isn't an ISO time (2026-11-05T14:00:00Z)")
     if a.dir.is_symlink():
         sys.exit(f"refused: {a.dir} is a symlink")
-    a.dir.mkdir(parents=True, exist_ok=True)
     p = a.dir / "budget.jsonl"
     if p.is_symlink():
         sys.exit(f"refused: {p} is a symlink")
+    text = p.read_text(encoding="utf-8") if p.exists() else ""
+    rows = BG.parse(text)[0]
+    lines = {BG.line_id(raw, o): o for _, raw, o in rows if not BG.problems(o)}   # what readers count
+    kept, rep = BG.effective(rows)
+    target = None
+    if a.correction_of:
+        if a.correction_of not in lines:
+            sys.exit(f"refused: --correction-of {a.correction_of} isn't the id of a valid line in {p}")
+        if a.correction_of in rep["replaced"]:
+            last = a.correction_of
+            while last in rep["replaced"]:
+                last = rep["replaced"][last]
+            sys.exit(f"refused: {a.correction_of} is already corrected; correct the latest line in its chain, {last}")
+        target = lines[a.correction_of]
+        if target.get("window") != a.window:
+            sys.exit(f"refused: {a.correction_of} has window {target.get('window')!r}; a correction keeps the window")
+    for c in a.child_id:
+        if c not in lines:
+            sys.exit(f"refused: --child-id {c} isn't the id of a valid line in {p}")
+    if a.child_id and a.includes_children != "yes":
+        sys.exit("refused: --child-id needs --includes-children yes")
+    # a correction is recorded at the time of the line it replaces unless --ts says otherwise, so
+    # relabelling an old reading never moves it into today's window
+    ts = a.ts or (target.get("ts") if target else dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    if not BG.when(ts):
+        sys.exit(f"refused: --ts {ts!r} isn't an ISO time with a zone (2026-11-05T14:00:00Z)")
+    a.dir.mkdir(parents=True, exist_ok=True)
     row = {"ts": ts, "actor": a.actor.strip(), "window": a.window, "tokens_in": a.tokens_in,
            "tokens_out": a.tokens_out, "method": a.method, "metric_version": BG.SCHEMA.split("/")[1],
            "agents": a.agents, "note": a.note}
-    for f, v in (("interval_start", a.interval_start), ("interval_end", a.interval_end),
-                 ("correction_of", a.correction_of), ("scope", a.scope), ("source", a.source)):
+    for f, v in (("interval_start", a.interval_start), ("interval_end", a.interval_end), ("correction_of", a.correction_of),
+                 ("scope", a.scope), ("source", a.source), ("human_minutes", a.human_minutes), ("merges", a.merges)):
         if v is not None:
             row[f] = v
     if a.includes_children:
         row["includes_children"] = {"included": a.includes_children == "yes", "ids": a.child_id}
-    elif a.child_id:
-        sys.exit("refused: --child-id needs --includes-children yes")
-    if a.correction_of:
-        text = p.read_text(encoding="utf-8") if p.exists() else ""
-        known = {BG.line_id(raw, o) for _, raw, o in BG.parse(text)[0]}
-        if a.correction_of not in known:
-            sys.exit(f"refused: --correction-of {a.correction_of} isn't the id of a line in {p}")
+    elif target and isinstance(target.get("includes_children"), dict):
+        row["includes_children"] = target["includes_children"]      # a correction keeps the parent's inclusion
     bad = BG.problems(row)
     if bad:
         sys.exit("refused: " + "; ".join(bad))
-    row["id"] = "bud-" + hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest()[:10]
+    base = "bud-" + hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest()[:10]
+    taken = {BG.line_id(raw, o) for _, raw, o in rows}
+    row["id"], k = base, 2
+    while row["id"] in taken:        # the same reading twice still gets two ids
+        row["id"], k = f"{base}-{k}", k + 1
     line = json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
     prefix = ""
     if p.exists() and p.stat().st_size:

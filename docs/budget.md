@@ -22,12 +22,39 @@ today, the telemetry view next), and written with `relay-kit budget-append`.
 | `scope` | @2 | what the numbers cover, in words ("Kairos threads only") |
 | `source` | @2 | where the numbers came from (a log location, a capture id, a status file) |
 
-**Corrections.** A chain resolves to its last line. Two lines correcting the same line are a
-**conflict**: both are counted and the conflict is reported, rather than one being dropped silently.
-A correction naming no known line is reported, and `budget-append` refuses to write one.
+**Corrections.**
+- A correction must name an **earlier** line with the **same window**. Anything else (itself, a later
+  line, an unknown id, another window) is reported, and the line counts as a plain reading.
+- A chain resolves to its last line.
+- Two corrections of the same line are a **conflict**: the later one counts, the earlier one doesn't,
+  and both are reported.
+- A counted line is counted **at the time of the line it replaces**, so relabelling an old reading
+  never moves its use into the current week. `budget-append --correction-of` also defaults `--ts` to
+  the target's time, and refuses to correct a line that has already been corrected, naming the
+  latest line in its chain.
+
+**Children.** A parent's `includes_children` follows each child through its corrections. A correction
+that doesn't say otherwise keeps its target's inclusion. A child is dropped only where its parent is
+counted in the same window. A line that includes itself, and two lines that include each other, are
+reported and ignored.
+
+**Ids.** `budget-append` never gives two lines the same id; the same reading appended twice gets
+`-2`. Two lines with the same id in the file are both read, and the duplicate is reported.
+
+**Old readers.** A reader from before @2 adds a correction to the line it replaces. Append
+corrections only once every reader in use understands @2.
 
 **Missing is not zero.** A reader that has no line for an actor or a period says so; it never fills
 in a 0.
+
+## Definitions
+
+- **Unit:** tokens (`tokens_in + tokens_out`); `tokens_detail` gives the split. There are no dollars:
+  no token price is recorded.
+- **Provenance:** each line names its `actor` and, from @2, its `method` and `source`. A line is an
+  observation by whoever appended it. Only `measured` lines come from a meter.
+- **Aggregation:** sums are over counted `session` lines (corrections and children applied). A
+  `weekly` line is a separate reference, never added. Every total says which methods it mixes.
 
 ## Writing
 
