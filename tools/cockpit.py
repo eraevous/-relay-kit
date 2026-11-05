@@ -31,7 +31,10 @@ BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
 BUDGET_FIELDS = {"ts": "ISO time (UTC) the line covers up to", "actor": "assistant:lane#session or the owner",
                  "window": "weekly | session", "tokens_in": "integer >= 0", "tokens_out": "integer >= 0",
-                 "agents": "integer >= 0: agents running in that window", "note": "free text"}
+                 "agents": "integer >= 0: agents running in that window", "note": "free text",
+                 "method": "measured | proxy | estimate (relay-kit/budget@2; older lines: unlabelled)",
+                 "id / correction_of / includes_children / interval_start / interval_end / scope / source / tokens_detail":
+                     "relay-kit/budget@2: see docs/budget.md"}
 POLICY_KEYS = ["default_effort", "spawn_route", "weekly_tokens_soft", "max_delegations_per_question",
                "chatgpt_standing_thread_cap", "claude_build_context_cap", "codex_repo_context_cap",
                "human_interruptions_per_day"]
@@ -128,9 +131,9 @@ def read_budget(root, rd):
             continue
         rows.append((n, sp[0], r))
     kept, report = BG.effective([(n, raws[n], r) for n, _, r in rows])
-    keep = {n for n, _, _ in kept}
-    ids = {n: i for n, i, _ in kept}
-    return {"rows": rows, "bad": bad, "counted": keep, "ids": ids, "corrections": report}, bad
+    at = {n: (ex.span(a)[0] if ex.span(a) else None) for n, _, _, a in kept}   # counted at the replaced line's time
+    ids = {n: i for n, i, _, _ in kept}
+    return {"rows": rows, "bad": bad, "counted": at, "ids": ids, "corrections": report}, bad
 
 
 def captures(rd, threads):
@@ -978,8 +981,13 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
          "weekly_allowance": weekly_tokens, "status_file_costs_parsed": False}
     if budget is not None:
         start = (as_of_dt - dt.timedelta(days=7)) if as_of_dt else None
-        # relay-kit/budget@2: a corrected line and a child line its parent includes are never counted again
-        recent = [(n, t, r) for n, t, r in budget["rows"] if (start is None or t > start) and n in budget["counted"]]
+        # relay-kit/budget@2: a corrected line is replaced (and counted at the time of the line it replaces);
+        # a child is dropped only where its parent is counted in the same window
+        recent = [(n, budget["counted"][n] or t, r) for n, t, r in budget["rows"]
+                  if n in budget["counted"] and (start is None or (budget["counted"][n] or t) > start)]
+        in_window = {budget["ids"][n] for n, _, _ in recent}
+        kids = budget["corrections"]["children"]
+        recent = [(n, t, r) for n, t, r in recent if not (budget["ids"][n] in kids and kids[budget["ids"][n]] in in_window)]
         sess = [r for _, _, r in recent if r["window"] == "session"]
         weekly = sorted([(t, n, r) for n, t, r in recent if r["window"] == "weekly"], key=lambda x: (x[0], x[1]))
         by_actor, by_lane = {}, {}
@@ -1003,9 +1011,11 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
                                                    if (r.get("method") if r.get("method") in BG.METHODS else "unlabelled") == m)
                                             for m in sorted({(r.get("method") if r.get("method") in BG.METHODS else "unlabelled") for r in sess})},
             "corrections": {"budget_schema": BG.SCHEMA, "replaced": budget["corrections"]["replaced"],
-                            "children_included": budget["corrections"]["children_included"],
+                            "children_included": budget["corrections"]["children"],
                             "conflicts": budget["corrections"]["conflicts"],
-                            "unknown_targets": budget["corrections"]["unknown_targets"]},
+                            "invalid": budget["corrections"]["invalid"],
+                            "duplicate_ids": budget["corrections"]["duplicates"]},
+            "burn_label": "+".join(sorted({(r.get("method") if r.get("method") in BG.METHODS else "unlabelled") for r in sess})) or None,
             "weekly_reference": ({"ts": latest_weekly["ts"], "tokens": latest_weekly["tokens_in"] + latest_weekly["tokens_out"],
                                   "actor": latest_weekly.get("actor"),
                                   "note": "a separately reported weekly reading; reference only, never added to or substituted for the session sum"}
@@ -1597,13 +1607,17 @@ its scope names. These are readings, not delegations. Layout is automatic.{"" if
     wref = b.get("weekly_reference")
     if b["present"]:
         bud = f"""
-<div class="panel pad">{dl([("window", f'{b["window"]["from"]} → {b["window"]["to"]}'), ("burn", f'{fmt_n(burn)} tokens ({b["burn_source"]})'),
+<div class="panel pad">{dl([("window", f'{b["window"]["from"]} → {b["window"]["to"]}'), ("burn", f'{fmt_n(burn)} tokens, {b.get("burn_label") or "unlabelled"} ({b["burn_source"]})'),
   ("session lines, 7 d", f'{fmt_n(b["session_tokens_7d"])} ({fmt_n(b["session_in_7d"])} in, {fmt_n(b["session_out_7d"])} out)'),
   ("by how it was measured", "; ".join(f'{m}: {fmt_n(v)}' for m, v in (b.get("session_tokens_7d_by_method") or {}).items()) or None),
   ("corrections applied", (", ".join(f'{k} replaced by {v}' for k, v in b["corrections"]["replaced"].items())
-                           + ("; conflicting corrections: " + ", ".join(c["id"] for c in b["corrections"]["conflicts"]) if b["corrections"]["conflicts"] else "")
-                           + ("; corrections of unknown lines: " + ", ".join(str(c["line"]) for c in b["corrections"]["unknown_targets"]) if b["corrections"]["unknown_targets"] else ""))
-                          if b.get("corrections") and (b["corrections"]["replaced"] or b["corrections"]["unknown_targets"]) else None),
+                           + ("; conflicting corrections (the later one counts): " + ", ".join(c["id"] for c in b["corrections"]["conflicts"]) if b["corrections"]["conflicts"] else ""))
+                          if b.get("corrections") and b["corrections"]["replaced"] else None),
+  ("children inside a parent's numbers", ", ".join(f'{c} in {p}' for c, p in b["corrections"]["children_included"].items()) or None
+   if b.get("corrections") else None),
+  ("budget lines that take no effect as written", "; ".join(f'{x.get("id")}: {x["why"]}' for x in b["corrections"]["invalid"])
+   + ("; duplicate ids: " + ", ".join(d["id"] for d in b["corrections"]["duplicate_ids"]) if b["corrections"]["duplicate_ids"] else "") or None
+   if b.get("corrections") else None),
   ("weekly reading (reference only)", f'{fmt_n(wref["tokens"])} tokens at {wref["ts"]}, reported by {wref["actor"]}; not added to the gauge' if wref else None),
   ("most agents at once", fmt_n(b["max_agents_7d"])), ("records", b["records"]),
   ("invalid lines", ", ".join(f'{x["line"]}: {x["reason"]}' for x in b["invalid_lines"]) or "none")])}

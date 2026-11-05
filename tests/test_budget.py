@@ -32,9 +32,9 @@ class BudgetTests(unittest.TestCase):
     def write(self, *rows):
         (self.root / "governance" / "budget.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
-    def append(self, *args):
+    def append(self, *args, ts="2026-11-03T10:00:00Z"):
         return subprocess.run([sys.executable, "-I", str(KIT / "tools" / "budget_append.py"), "--dir", str(self.root / "governance"),
-                               "--window", "session", "--actor", "sam", "--ts", "2026-11-03T10:00:00Z", *args],
+                               "--window", "session", "--actor", "sam", *(["--ts", ts] if ts else []), *args],
                               capture_output=True, text=True)
 
     def test_correction(self):
@@ -84,8 +84,54 @@ class BudgetTests(unittest.TestCase):
                    line(id="c", tokens_in=70, tokens_out=0, correction_of="a"), line(id="d", tokens_in=1, tokens_out=0, correction_of="zz"))
         b = CK.collect(self.root)["budget"]
         self.assertEqual(b["corrections"]["conflicts"], [{"id": "a", "corrected_by": ["b", "c"]}])
-        self.assertEqual(b["corrections"]["unknown_targets"][0]["correction_of"], "zz")
-        self.assertEqual(b["burn_7d"], 50 + 70 + 1)    # b and c are both kept: the conflict is shown, not resolved by dropping one
+        self.assertEqual([x["why"] for x in b["corrections"]["invalid"]], ["no such line"])
+        self.assertEqual(b["burn_7d"], 70 + 1)       # c replaces a; b, the earlier correction, doesn't count; d stands alone
+
+    def test_corrections_keep_their_time(self):
+        """budget: a correction is counted at the time of the line it replaces, so relabelling never moves use into this week"""
+        self.write(line(id="old", ts="2026-10-20T09:00:00Z", tokens_in=500, tokens_out=0), line(id="now", tokens_in=7, tokens_out=0, method="measured"))
+        p = self.append("--tokens-in", "500", "--tokens-out", "0", "--method", "estimate", "--correction-of", "old", ts=None)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads(p.stdout)["ts"], "2026-10-20T09:00:00Z")      # the CLI keeps the target's time
+        self.write(line(id="old", ts="2026-10-20T09:00:00Z", tokens_in=500, tokens_out=0), line(id="now", tokens_in=7, tokens_out=0, method="measured"),
+                   line(id="fix", ts="2026-11-03T09:30:00Z", tokens_in=500, tokens_out=0, method="estimate", correction_of="old"))
+        b = CK.collect(self.root)["budget"]
+        self.assertEqual(b["burn_7d"], 7)            # even a correction written today counts at its target's time
+
+    def test_chains_and_cycles(self):
+        """budget: children are followed through corrections, inclusion is inherited, and self, later, cross-window and cyclic references are reported and ignored"""
+        self.write(line(id="c", tokens_in=40, tokens_out=0), line(id="c2", tokens_in=45, tokens_out=0, correction_of="c"),
+                   line(id="p", tokens_in=100, tokens_out=0, includes_children={"included": True, "ids": ["c"]}),
+                   line(id="p2", tokens_in=110, tokens_out=0, method="measured", correction_of="p"))
+        b = CK.collect(self.root)["budget"]
+        self.assertEqual(b["burn_7d"], 110)          # p2 inherits p's inclusion; c's chain ends at c2, which is inside it
+        self.write(line(id="x", tokens_in=1, tokens_out=0, correction_of="x"), line(id="y", tokens_in=2, tokens_out=0, correction_of="z"),
+                   line(id="z", tokens_in=3, tokens_out=0), line(id="w", window="weekly", tokens_in=4, tokens_out=0),
+                   line(id="v", tokens_in=5, tokens_out=0, correction_of="w"),
+                   line(id="m", tokens_in=6, tokens_out=0, includes_children={"included": True, "ids": ["n"]}),
+                   line(id="n", tokens_in=7, tokens_out=0, includes_children={"included": True, "ids": ["m"]}))
+        b = CK.collect(self.root)["budget"]
+        whys = sorted(x["why"] for x in b["corrections"]["invalid"])
+        self.assertEqual(whys, ["inclusion cycle", "it corrects itself", "the line it corrects comes after it", "the line it corrects has another window"])
+        self.assertEqual(b["burn_7d"], 1 + 2 + 3 + 5 + 6 + 7)
+
+    def test_ids(self):
+        """budget: the same reading appended twice gets two ids; duplicate ids in the file are reported and both lines read; a corrected line can't be corrected again"""
+        args = ("--tokens-in", "3", "--tokens-out", "1", "--method", "measured")
+        a, b = self.append(*args), self.append(*args)
+        self.assertNotEqual(json.loads(a.stdout)["id"], json.loads(b.stdout)["id"])
+        first = json.loads(a.stdout)["id"]
+        self.assertEqual(self.append("--tokens-in", "3", "--tokens-out", "1", "--method", "estimate", "--correction-of", first).returncode, 0)
+        p = self.append("--tokens-in", "3", "--tokens-out", "1", "--method", "estimate", "--correction-of", first)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("already corrected", p.stderr)
+        p = self.append("--tokens-in", "1", "--tokens-out", "1", "--method", "measured", "--includes-children", "yes", "--child-id", "nope")
+        self.assertNotEqual(p.returncode, 0)
+        p = self.append("--tokens-in", "1", "--tokens-out", "1", "--method", "proxy", "--human-minutes", "51", "--merges", "9")
+        self.assertEqual((json.loads(p.stdout)["human_minutes"], json.loads(p.stdout)["merges"]), (51, 9))
+        self.write(line(id="d", tokens_in=1, tokens_out=0), line(id="d", tokens_in=2, tokens_out=0))
+        b = CK.collect(self.root)["budget"]
+        self.assertEqual((b["burn_7d"], [x["id"] for x in b["corrections"]["duplicate_ids"]]), (3, ["d"]))
 
     def test_unlabelled(self):
         """budget: older lines without a method count as 'unlabelled', never as measured"""
