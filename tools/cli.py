@@ -6,6 +6,7 @@
     relay-kit ledger check [--dir governance] [...]   tools/check_ledgers.py
     relay-kit ledger append [--dir governance] decision|challenge '<json>'   tools/ledger_append.py
     relay-kit new-id --prefix C --lane AEC [...]      tools/new_id.py
+    relay-kit export --root RECORDS --out DIR [--lane L] [--actor A] [...]   tools/export.py (read-only)
     relay-kit zips [--out DIR] [--owner NAME --records OWNER/REPO]   one zip per skill (default ./relay-kit-upload)
     relay-kit --version
 
@@ -28,6 +29,7 @@ SCRIPTS = {
     "ledger check": HERE / "check_ledgers.py",
     "ledger append": HERE / "ledger_append.py",
     "new-id": HERE / "new_id.py",
+    "export": HERE / "export.py",
     "zips": HERE / "extract.py",
 }
 KIT_REPO = "eraevous/relay-kit"

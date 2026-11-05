@@ -54,6 +54,20 @@
         "relay: text that stops changing without a signal is never \"done\"",
         "relay: explicit ChatGPT completion -> done"
       ]
+    },
+    {
+      "id": "relay-kit/export@1",
+      "what": "Read-only export of a records store: manifest.json (queried sources, counts, time bounds, hashes, filters, redaction policy, exclusions, coverage gaps) and records.jsonl (one record per item, with kind, rid, source_path, source_hash, lane, actor, ts/ts_missing and evidence_class). Reads conversation@1 and handoff@1/@2; changes neither.",
+      "spec": "docs/export.md",
+      "implementers": [
+        "tools/export.py"
+      ],
+      "tests": [
+        "export: message round trip from a conversation@1 capture preserves text, ids and order",
+        "export: a relayed message is marked relay with its origin, distinct from original speech",
+        "export: missing captures, hidden steps, absent timestamps and missing outputs are reported in the manifest",
+        "export: a destination inside a public or unconfirmed GitHub repository is refused"
+      ]
     }
   ]
 }

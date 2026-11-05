@@ -155,9 +155,24 @@ back out if the ledger check fails.
 For ids in shared lists other than handoffs (candidates, notes), `tools/new_id.py --prefix C
 --lane AEC` makes one that two sessions can't both pick.
 
+## Exporting a lane
+
+To study a lane later (what was said, relayed, decided and filed), export it, read-only:
+
+    relay-kit export --root path/to/records --out ~/exports/aec --lane AEC --since 2026-11-01
+
+It writes `records.jsonl` (one line per message, handoff, output, decision or challenge, each with
+its source path and hash, lane, actor, timestamp and an evidence class that keeps relays, proposals
+and adopted decisions apart) and `manifest.json` (what was queried, counts, hashes, filters, and the
+**coverage gaps**: threads and actors the records name but nobody captured, handoffs without
+outputs, hidden tool steps, records without timestamps). Uncaptured arms are reported as gaps,
+not as empty conversations. It refuses to write into the records or into a public repository,
+and `--content metadata` leaves the text out. Format and options: [docs/export.md](docs/export.md).
+
 ## Docs
 
 - [Conversation schema](docs/conversation-schema.md): the shared format and message ids (`T3a2`).
+- [Export](docs/export.md): `relay-kit/export@1`, the read-only export and its coverage manifest.
 - [Marking pasted material](docs/paste-markers.md): phone-friendly `FROM:` … `END FROM` blocks.
 - [Cold catch-up test](docs/cold-test.md): checking whether a fresh assistant can pick up a handoff.
 - [Prior art](docs/prior-art.md): the established patterns for collisions, races, timeouts and
