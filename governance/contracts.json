@@ -120,10 +120,12 @@
       ]
     },
     {
-      "id": "relay-kit/prs@1",
-      "what": "governance/pr-state.jsonl, append-only, written by relay-kit prs at build time from GitHub (gh CLI or a token): a 'pr' line when a pull request's state changed since its last line (repo, number, url, title, state open|closed|merged, draft, author, author_line from the body's Author: line, times, base, head, reviews [{by, verdict, at, signed, stated}], ci {state success|failure|pending|none, failing}, body_sections {what, why, how, authorized} verbatim with HTML comments removed, missing, truncated) and a 'fetch' line per run (ts, via, repos, ok, failed, since_days, prs_seen, appended). Repositories from handoffs/.ledger.json 'repos' or --repo. The one GitHub reader for pull requests: the Cockpit and other readers read the file.",
+      "id": "relay-kit/prs@2",
+      "what": "governance/pr-state.jsonl, append-only, written by relay-kit prs at build time from GitHub (gh CLI or a token): a 'pr' line when a pull request's state changed since its last line (repo, number, url, title, state open|closed|merged, draft, author, author_line from the body's Author: line, times, base, head, reviews [{by, verdict, at, signed, stated}], ci {state success|failure|pending|none, failing}, body_sections {what, why, how, authorized} verbatim with HTML comments removed, missing, truncated) and a 'fetch' line per run (ts, via, repos, ok, failed, since_days, prs_seen, appended). Repositories from handoffs/.ledger.json 'repos' or --repo. The one GitHub reader for pull requests: the Cockpit and other readers read the file. @2 (HO-RK-20261105-TXRM step 1): GitHub is read through tools/github.py, the kit's one read-only client (GET only; pagination; retries with backoff; rate-limit waits or refusal with the reset time; one fetch per path per run; optional ETag cache). A pr line gains `unread` (reviews or ci that couldn't be read: missing is not zero; ci state 'unknown'); the fetch line gains `coverage` per repository (what was asked, listed, more_available, re-read open PRs, PRs read, partial reads), `revisions` (default branch and pushed_at) and `client` (requests, retries, waits, cache hits, rate limit left, first/last request time). @1 lines stay readable.",
       "spec": "docs/prs.md",
       "implementers": [
+        "tools/cockpit.py",
+        "tools/github.py",
         "tools/prs.py"
       ],
       "tests": [
@@ -134,7 +136,13 @@
         "prs: CI state from check runs and statuses; reviews keep the verdict stated in their body",
         "prs: repositories come from .ledger.json repos or --repo; anything not OWNER/NAME is refused",
         "prs: a PR last recorded open is read again however old, so a closed one never stays open",
-        "prs: appending to a file without a final newline doesn't join two lines"
+        "prs: appending to a file without a final newline doesn't join two lines",
+        "github: pages walks pages until the limit or a short page, and says whether more were available",
+        "github: network errors and 5xx are retried with backoff; other errors and exhausted retries are refused with the status",
+        "github: a rate limit waits for the reset when it is short, and is refused with the reset time when it isn't",
+        "github: a path is fetched once per run; with a cache folder an unchanged resource is revalidated by its ETag",
+        "github: the gh transport only ever sends GET, and parses status and headers from its output",
+        "prs: what was asked for and what came back is recorded per repository; unreadable reviews or CI are unread, not none"
       ]
     },
     {

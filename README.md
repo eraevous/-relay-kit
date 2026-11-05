@@ -209,7 +209,7 @@ Details and threat model: [docs/mcp.md](docs/mcp.md).
 - [Export](docs/export.md): `relay-kit/export@1`, the read-only export and its coverage manifest.
 - [Ledger lifecycle](docs/lifecycle.md): `relay-kit/lifecycle@1`, one resolver for what is open, settled and in force.
 - [Cockpit](docs/cockpit.md): `relay-kit/cockpit@4`, the static control surface over the records.
-- [Pull-request reader](docs/prs.md): `relay-kit/prs@1`, build-time GitHub PR state into `governance/pr-state.jsonl`.
+- [Pull-request reader](docs/prs.md): `relay-kit/prs@2`, build-time GitHub PR state into `governance/pr-state.jsonl`.
 - [MCP server](docs/mcp.md): `relay-kit/mcp@1`, read-only tools and resources over the records.
 - [Marking pasted material](docs/paste-markers.md): phone-friendly `FROM:` … `END FROM` blocks.
 - [Cold catch-up test](docs/cold-test.md): checking whether a fresh assistant can pick up a handoff.
