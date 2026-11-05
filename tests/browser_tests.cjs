@@ -217,6 +217,77 @@ async function fill(els = null) {
   const d = await scrape([['user', 'Hi', 'id1'], ['user', 'Hi', 'id1'], ['assistant', 'Hello', 'id2']]);
   check('scrape: the same message id twice is kept once', d.length === 2, d);
 
+  {
+    // cockpit: the page's own script, from a page built over the synthetic records in tests/test_cockpit.py
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'relaykit-cockpit-js-'));
+    process.on('exit', () => fs.rmSync(out, { recursive: true, force: true }));
+    require('node:child_process').execFileSync('python3', ['-I', '-B', '-c', [
+      'import importlib.util, sys, pathlib',
+      's = importlib.util.spec_from_file_location("tc", sys.argv[1]); t = importlib.util.module_from_spec(s); s.loader.exec_module(t)',
+      'o = pathlib.Path(sys.argv[2]); t.ck.ex.repo_visibility = lambda r: "unknown"',
+      't.ck.build(t.build_root(o), o / "site")'].join('\n'), path.join(KIT, 'tests', 'test_cockpit.py'), out], { stdio: ['ignore', 'ignore', 'inherit'] });
+    const page = fs.readFileSync(path.join(out, 'site', 'index.html'), 'utf8');
+    const unesc = (s) => s.replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+    const el = (attrs = {}) => {
+      const ls = {}, cls = new Set();
+      return { attrs, value: '', textContent: '', hidden: false, returnValue: '', ls,
+        classList: { add: (...c) => c.forEach((x) => cls.add(x)), remove: (...c) => c.forEach((x) => cls.delete(x)),
+                     toggle: (c, on) => (on ? cls.add(c) : cls.delete(c)), contains: (c) => cls.has(c) },
+        getAttribute: (a) => (a in attrs ? attrs[a] : null), setAttribute: (a, v) => { attrs[a] = v; },
+        addEventListener: (ev, f) => { (ls[ev] = ls[ev] || []).push(f); },
+        fire(ev) { (ls[ev] || []).forEach((f) => f({ preventDefault() {} })); },
+        focus() {}, select() {}, scrollIntoView() {} };
+    };
+    const ids = {}, byId = (id) => (ids[id] = ids[id] || el({ id }));
+    const dlg = byId('settle');
+    dlg.showModal = () => { dlg.open = true; };
+    const close = (v) => { dlg.open = false; dlg.returnValue = v; dlg.fire('close'); };
+    const card = el();
+    const buttons = [...page.matchAll(/<button type="button" class="act (\w+)" data-key="([^"]*)" data-act="\w+" data-line="([^"]*)">/g)]
+      .map(([, act, key, line]) => Object.assign(el({ 'data-act': act, 'data-key': unesc(key), 'data-line': unesc(line) }), { closest: () => card }));
+    const nav = el({ 'data-goto': 'overview', 'data-name': 'Overview' });
+    const document = { documentElement: el(), getElementById: (id) => (id === 'pf-go' ? null : byId(id)), querySelector: () => null,
+      querySelectorAll: (sel) => (sel === '.nav-link' ? [nav] : sel === 'button[data-line]' ? buttons : []), execCommand: () => true };
+    const context = { document, location: { hash: '' }, history: { replaceState() {} }, navigator: {}, setTimeout: () => {} };
+    context.window = Object.assign(context, { scrollTo() {}, confirm: () => false });
+    const m2 = page.match(/<script>([\s\S]*)<\/script>/);
+    let err = null;
+    try { vm.runInNewContext(m2[1], context, { timeout: 2000 }); } catch (e) { err = String(e.message || e); }
+    const box = byId('apply');
+    const btn = (key, act) => buttons.find((b) => b.attrs['data-key'] === key && b.attrs['data-act'] === act);
+    const choose = (key, act) => { btn(key, act).fire('click'); if (act !== 'defer') close('ok'); };
+    const lineOf = (key, act) => btn(key, act).attrs['data-line'];
+    const [A, B] = ['decision:DEC-002', 'challenge:CH-001'];
+    check('cockpit page script: runs against the built page', !err && buttons.length === 9 && btn(A, 'accept') && btn(B, 'accept'), { err, n: buttons.length });
+    if (!err && btn(A, 'accept') && btn(B, 'accept')) {
+      choose(A, 'accept');
+      choose(A, 'reject');   // unedited: a new pick for the same item replaces its line
+      check('cockpit To apply: an unedited box is rebuilt from the picks', box.value === lineOf(A, 'reject') + '\n', box.value);
+      box.value = box.value.replace('<<REQUIRED: your name>>', 'OWNER-EDIT');
+      box.fire('input');
+      const edited = box.value;
+      choose(B, 'accept');
+      check('cockpit To apply: selecting another item keeps the owner\'s edits',
+        box.value.startsWith(edited.trimEnd()) && box.value.includes(lineOf(B, 'accept')) && box.value.includes('OWNER-EDIT'), box.value);
+      choose(B, 'defer');   // its line was not edited: replaced in place
+      check('cockpit To apply: an unedited line in an edited box is replaced in place',
+        box.value.includes('OWNER-EDIT') && !box.value.includes(lineOf(B, 'accept')) && box.value.includes(lineOf(B, 'defer')), box.value);
+      choose(A, 'defer');   // its line was edited: kept, and the new one added
+      check('cockpit To apply: an edited line is never overwritten by a later pick',
+        box.value.includes('OWNER-EDIT') && box.value.includes(lineOf(A, 'defer')), box.value);
+      const before = box.value;
+      byId('clear').fire('click');
+      const asked = dlg.open && box.value === before;
+      close('cancel');
+      const kept = box.value === before;
+      byId('clear').fire('click');
+      close('ok');
+      check('cockpit To apply: Clear asks before discarding edits', asked && kept && box.value === '', { asked, kept, after: box.value });
+      check('cockpit dialog: named and described by its title and body',
+        /<dialog id="settle" aria-labelledby="settle-title" aria-describedby="settle-body">/.test(page));
+    }
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exitCode = failed ? 1 : 0;
 })().catch((e) => { console.error(e.stack); process.exitCode = 1; });
