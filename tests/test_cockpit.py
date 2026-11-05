@@ -450,7 +450,7 @@ ASKED = {"id": "DEC-006", "date": "2026-11-03", "status": "proposed", "decision"
                  "default_if_unanswered": "it stays monthly"}}
 CITED = {"id": "DEC-007", "date": "2026-11-03", "status": "proposed", "decision": "Merge https://github.com/example/synthetic/pull/7 first.",
          "scope": "research", "recorded_by": "claude:research#SESSA1"}
-CITER = {"id": "DEC-008", "date": "2026-11-04", "status": "adopted", "decision": "The merge order in DEC-007 was followed.",
+CITER = {"id": "DEC-008", "date": "2026-11-04", "status": "adopted", "decision": "The merge order in DEC-007 was carried out.",
          "scope": "research", "decider": "sam", "basis": "\"done\"", "locator": "synthetic chat", "recorded_by": "sam"}
 
 
@@ -488,29 +488,36 @@ class AskTests(unittest.TestCase):
         data, page = self.build()
         a = self.item(data, "DEC-006")["ask"]
         self.assertEqual((a["source"], a["question"], a["by"]), ("proposer", "Run the survey weekly instead of monthly?", "claude:research#SESSA1"))
-        self.assertEqual([o["label"] for o in a["options"]], ["Accept", "Reject"])
+        self.assertEqual([o["label"] for o in a["proposer_options"]], ["Accept", "Reject"])
+        # what the buttons do is the page's own description, whatever the proposer wrote
+        self.assertIn("supersedes DEC-006", next(o["effect"] for o in self.item(data, "DEC-006")["effects"] if o["label"] == "Accept"))
+        self.assertIn("THE PROPOSER'S EXPLANATION", page)
         d = self.item(data, "DEC-002")["ask"]
         self.assertEqual(d["source"], "derived")
         self.assertTrue(d["question"].endswith("?"))
-        self.assertIn("Amend", [o["label"] for o in d["options"]])
+        self.assertIn("Amend", [o["label"] for o in self.item(data, "DEC-002")["effects"]])
         for c in data["choices"]:
             self.assertTrue(c["ask"]["question"].endswith("?"), c["id"])
         self.assertIn("not written by the proposer", page)
         self.assertIn("written by claude:research#SESSA1", page)
         meta, mpage = self.build("meta", content="metadata")
         self.assertEqual(self.item(meta, "DEC-002")["ask"]["question"], "Should DEC-002 be adopted?")
-        self.assertNotIn("Use the weekly survey.", mpage)
+        mjson = (self.tmp / "meta" / "cockpit.json").read_text(encoding="utf-8")
+        for secret in ("Use the weekly survey.", "Run the survey weekly", "the survey runs every Monday", "it stays monthly"):
+            self.assertNotIn(secret, mpage)   # the proposer's ask is free text: left out in metadata mode
+            self.assertNotIn(secret, mjson)
+        self.assertEqual(self.item(meta, "DEC-006")["ask"]["source"], "derived")
 
     def test_overtaken_by_later_citation(self):
         """cockpit: a later record that cites a choice flags it possibly overtaken, with the reason; an open one is listed as waiting on it"""
         data, page = self.build()
         c = self.item(data, "DEC-007")
-        self.assertEqual(c["possibly_overtaken"], ["cited later by decision DEC-008 (adopted)"])
+        self.assertEqual(c["possibly_overtaken"], ["decision DEC-008 (adopted) says it closed, replaced or carried it out"])
         self.assertIn("POSSIBLY OVERTAKEN", page)
         self.assertIn("Close as overtaken", page)
         self.assertEqual(self.item(data, "DEC-006")["possibly_overtaken"], [])
         over = json.loads(shlex.split(c["compose"]["overtaken"]["command"])[-1])
-        self.assertEqual((over["status"], over["supersedes"]), ("adopted", "DEC-007"))
+        self.assertEqual((over["status"], over["supersedes"]), ("superseded", "DEC-007"))   # closes it; adopts nothing
         self.assertIn("<<REQUIRED", over["decision"])   # the owner says what overtook it
         self.assertEqual(data["counts"]["possibly_overtaken"], 1)
 
@@ -521,7 +528,9 @@ class AskTests(unittest.TestCase):
             calls.append((owner, repo, n))
             return "merged"
         data, _ = self.build()
-        self.assertEqual((calls, self.item(data, "DEC-007")["prs"], data["pr_state"]), ([], [], {"looked_up": False}))
+        self.assertEqual((calls, self.item(data, "DEC-007")["prs"], data["pr_state"]),
+                         ([], [{"pr": "example/synthetic#7", "state": None}], {"looked_up": False}))   # named, not looked up
+        self.assertEqual(self.item(data, "DEC-007")["possibly_overtaken"], ["decision DEC-008 (adopted) says it closed, replaced or carried it out"])
         data, _ = self.build("pr", pr_state=True, pr_lookup=fake)
         self.assertEqual(calls, [("example", "synthetic", 7)])
         c = self.item(data, "DEC-007")
@@ -530,6 +539,9 @@ class AskTests(unittest.TestCase):
         self.assertTrue(data["pr_state"]["looked_up"] and data["pr_state"]["fetched_at"])
         # a bare "<repo> PR #N" counts only for a repository the records spell out as owner/repo
         self.assertEqual(ck.pr_refs("see library PR #71 and Telosmith PR #5", "sam", {"telosmith"}), [("sam", "Telosmith", 5)])
+        self.assertEqual(ck.pr_refs("https://github.com/../../pull/1 and telosmith pr #9", "sam", {"telosmith"}), [])
+        meta, _ = self.build("pr-meta", content="metadata", pr_state=True, pr_lookup=fake)
+        self.assertEqual((meta["pr_state"], len(calls)), ({"looked_up": False}, 1))   # metadata reads no text, looks nothing up
 
     def test_amend_clarify_lines(self):
         """cockpit: Amend and Clarify compose ledger lines that pass the check once filled in, and are refused while placeholders remain"""
@@ -566,6 +578,23 @@ class AskTests(unittest.TestCase):
                                 "raised_by": "sam", "resolution": "Sites A and B.", "recorded_by": "claude:research#SESSA1"}) + "\n")
         data, _ = self.build("again")
         self.assertEqual(data["questions"], [])
+        # the answer names DEC-002, but answering a question doesn't overtake what it was about
+        self.assertEqual(self.item(data, "DEC-002")["possibly_overtaken"], [])
+
+    def test_settled_records_dont_wait(self):
+        """cockpit: a superseded decision or resolved challenge that cites a choice is neither waiting on it nor evidence about it"""
+        later = {"id": "DEC-009", "date": "2026-11-05", "status": "proposed", "decision": "Follow DEC-006 next month.",
+                 "scope": "research", "recorded_by": "claude:research#SESSA1"}
+        settle = {"id": "DEC-010", "date": "2026-11-05", "status": "rejected", "supersedes": "DEC-009", "decision": "No.",
+                  "scope": "research", "decider": "sam", "basis": "\"no\"", "locator": "synthetic chat", "recorded_by": "sam"}
+        with open(self.root / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(later) + "\n")
+        data, _ = self.build()
+        self.assertEqual([w["id"] for w in self.item(data, "DEC-006")["waiting_on_it"]], ["DEC-009"])
+        with open(self.root / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(settle) + "\n")
+        data, _ = self.build("again")
+        self.assertEqual(self.item(data, "DEC-006")["waiting_on_it"], [])
 
     def test_inquire_writes_nothing(self):
         """cockpit: Inquire is off the record: no command, no ledger line, only a prompt naming the item"""
@@ -584,15 +613,21 @@ class AskTests(unittest.TestCase):
             ([dict(ASKED, id="DEC-009", ask={"question": "No question mark", "options": []})], [], "ending in '?'"),
             ([dict(ASKED, id="DEC-009", ask={"question": "Ok?", "options": [{"label": "Accept"}]})], [], "label, effect"),
             ([dict(ASKED, id="DEC-009", ask={"question": "Ok?", "surprise": 1})], [], "unknown key"),
-            ([dict(CITER, id="DEC-009", supersedes="DEC-007", amends="DEC-006")], [], "'amends' must name"),
-            ([], [{"id": "CH-004", "date": "2026-11-05", "status": "open", "kind": "query", "concern": "x", "raised_by": "sam"}], "'kind' is 'question'"),
+            ([dict(ASKED, id="DEC-009", ask={"question": "Ok?", "options": [], "default_if_unanswered": "x"})], [], "non-empty list"),
+            ([dict(ASKED, id="DEC-009", ask={"question": "Ok?", "options": [{"label": "A", "effect": "b"}]})], [], "if nobody answers"),
             ([], [{"id": "CH-004", "date": "2026-11-05", "status": "open", "kind": "question", "concern": "x", "raised_by": "sam"}], "needs 'about'"),
+            ([], [{"id": "CH-004", "date": "2026-11-05", "status": "open", "kind": "question", "about": "DEC-001",
+                   "addressed_to": None, "concern": "x", "raised_by": "sam"}], "needs 'addressed_to'"),
         ]
         for decs, chs, msg in bad:
             r = self.check(decs, chs)
             self.assertNotEqual(r.returncode, 0, msg)
             self.assertIn(msg, r.stdout, msg)
         self.assertEqual(self.check([]).returncode, 0)
+        # lines that were valid before stay valid: other kinds, a non-object ask, amends on its own
+        ok = self.check([dict(ASKED, id="DEC-009", ask="Should we?"), dict(CITER, id="DEC-010", amends="DEC-006")],
+                        [{"id": "CH-004", "date": "2026-11-05", "status": "open", "kind": "risk", "concern": "x", "raised_by": "sam"}])
+        self.assertEqual(ok.returncode, 0, ok.stdout)
 
 if __name__ == "__main__":
     unittest.main()

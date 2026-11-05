@@ -224,8 +224,17 @@ def compose_handoff(h, owner, unauthorized, nxt, output_exists):
 # ---------------- what a choice is asking (HO-RK-20261105-VZH4) ----------------
 ID_REF = re.compile(r"\b(?:DEC|CH)-\d{3,}\b|\bHO-[A-Z0-9]{1,12}-\d{8}-[0-9A-HJKMNP-TV-Z]{4}\b|\bHO-\d{8}-\d{3}\b")
 # a pull request named in prose: a full URL, or "<repo> PR #N" / "<repo> pull request #N" (bare "#N" is too ambiguous)
-PR_REF = re.compile(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)|\b([A-Za-z][\w.-]*)\s+(?:PR|pull request)\s*#(\d+)", re.I)
+PR_REF = re.compile(r"https://github\.com/([\w-][\w.-]*)/([\w-][\w.-]*)/pull/(\d+)|\b([A-Za-z][\w.-]*)\s+(?:PR|[Pp]ull request)\s*#(\d+)")
 ASK_FIELDS = "ask: {question, options: [{label, effect}], default_if_unanswered}"
+
+
+OVERTAKE_WORDS = re.compile(r"overtak|supersed|\bclos(?:e|es|ed|ing)\b|replac|\bdone\b|execut|\bmerged\b|\bmoot\b|"
+                            r"\balready\b|no longer|instead of|carried out|implemented", re.I)
+
+
+def ledger_num(i):
+    m = re.search(r"-(\d+)$", str(i))
+    return int(m.group(1)) if m else -1
 
 
 def first_sentence(s, n=220):
@@ -238,10 +247,12 @@ def first_sentence(s, n=220):
 def written_ask(a):
     """The proposer's own `ask` object, normalised; None when it's absent or unusable (then the
     card shows a derived summary, labelled as such)."""
-    if not isinstance(a, dict) or not isinstance(a.get("question"), str) or not a["question"].strip():
-        return None
-    opts = [{"label": str(o.get("label")).strip(), "effect": str(o.get("effect") or "").strip()}
-            for o in (a.get("options") or []) if isinstance(o, dict) and str(o.get("label") or "").strip()]
+    if not isinstance(a, dict) or not isinstance(a.get("question"), str) or not a["question"].strip().endswith("?") \
+            or len(a["question"].strip()) < 3:
+        return None   # the ledger check flags it; the card falls back to the derived question
+    opts = [{"label": o["label"].strip(), "effect": o["effect"].strip()} for o in (a.get("options") or [])
+            if isinstance(o, dict) and isinstance(o.get("label"), str) and isinstance(o.get("effect"), str)
+            and o["label"].strip() and o["effect"].strip()]
     d = a.get("default_if_unanswered")
     return {"source": "proposer", "question": a["question"].strip(), "options": opts,
             "default_if_unanswered": d.strip() if isinstance(d, str) and d.strip() else None}
@@ -315,15 +326,17 @@ def records_github_owner(root):
 
 def compose_extra(kind, cid, owner, proposer, full, text, scope):
     """Amend (decisions), Close as overtaken, Clarify and Inquire. All compose; none writes.
-    Clarify is a record: an open challenge with kind 'question', addressed to the proposer, about the
-    item; whoever answers resolves it. Inquire is not a record: a prompt for you to paste to an assistant."""
+    Close as overtaken is a 'superseded' line: it closes the proposal without adopting anything.
+    Clarify is a record: an open challenge with kind 'question', about the item and addressed to its
+    proposer; whoever answers resolves it. Recording it delivers nothing: the owner still has to tell
+    them. Inquire is not a record: a prompt for the owner to paste to an assistant."""
     out = {}
     if kind == "decision":
         amend = {"status": "adopted", "supersedes": cid, "decision": text if full and text else f"<<REQUIRED: your text for {cid}>>",
                  "scope": scope if full and scope else f"As in {cid}.", "amends": cid,
                  "decider": REQ["decider"], "basis": REQ["basis"], "locator": REQ["locator"]}
         out["amend"] = {"json": amend, "command": ledger_cmd("decision", amend), "edit_field": "decision"}
-        over = {"status": "adopted", "supersedes": cid, "decision": f"{cid} is closed as overtaken: <<REQUIRED: what overtook it (a merged PR, a later decision)>>",
+        over = {"status": "superseded", "supersedes": cid, "decision": f"{cid} is closed as overtaken, not adopted: <<REQUIRED: what overtook it (a merged PR, a later decision)>>",
                 "scope": scope if full and scope else f"As in {cid}.",
                 "decider": REQ["decider"], "basis": REQ["basis"], "locator": REQ["locator"]}
         out["overtaken"] = {"json": over, "command": ledger_cmd("decision", over)}
@@ -474,7 +487,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     questions.sort(key=lambda q: str(q["id"]))
 
     # ---- what each choice is asking, what cites it, and whether it may be overtaken ----
-    owner_hint = records_github_owner(rd.root) if pr_lookup else None
+    owner_hint = records_github_owner(rd.root)   # a local git read; no network
     texts = {}   # every record's searchable text, by (kind, id)
     for d in decisions_all:
         texts[("decision", d["fields"].get("id"))] = (d, dumps(d["fields"]))
@@ -483,51 +496,79 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     for h in handoffs_all:
         texts[("handoff", h["handoff_id"])] = (h, h.get("text") or "")
     pr_states = {}
+    # Clarify questions and the lines that answer them talk about an item without settling it
+    q_ids = {c["fields"].get("id") for c in challenges_all if c["fields"].get("kind") == "question"}
+    qa_ids = {("challenge", i) for i in q_ids} | {("challenge", c["fields"].get("id")) for c in challenges_all
+                                                  if c["fields"].get("resolves") in q_ids}
     known_repos = set()
-    if pr_lookup and owner_hint:
+    if owner_hint:
         own_re = re.compile(rf"\b{re.escape(owner_hint)}/([\w.-]+)", re.I)
         for _, txt in list(texts.values()) + [(None, threads_text)]:
-            known_repos |= {x.lower().removesuffix(".git") for x in own_re.findall(txt)}
+            known_repos |= {x.lower().rstrip(".").removesuffix(".git") for x in own_re.findall(txt)}
     for item in choices:
         cid, kind = item["id"], item["kind"]
         rec, own = texts.get((kind, cid), (None, ""))
         f = (rec or {}).get("fields") or {}
         body = f.get("decision") or f.get("concern") or (rec or {}).get("text") or ""
-        ask = written_ask(f.get("ask")) if kind != "handoff" else None
-        if ask:
-            ask["by"] = f.get("proposed_by") or f.get("raised_by") or f.get("recorded_by")
+        canon = derived_ask(kind, cid, (rec or {}).get("title") if kind == "handoff" else body, full,
+                            nxt=item["compose"]["accept"].get("state") if kind == "handoff" else None,
+                            why=item.get("why", ()))
+        # What each action does comes from this page, always: it describes the composed lines. The
+        # proposer's `ask` can word the question and explain the options, shown apart as theirs, but
+        # can't redefine what Accept does. In metadata mode their text is free text, so it's left out.
+        item["effects"] = canon["options"]
+        w = written_ask(f.get("ask")) if kind != "handoff" and full else None
+        if w:
+            ask = {"source": "proposer", "by": f.get("proposed_by") or f.get("raised_by") or f.get("recorded_by"),
+                   "question": w["question"], "proposer_options": w["options"],
+                   "proposer_default": w["default_if_unanswered"]}
         else:
-            ask = derived_ask(kind, cid, (rec or {}).get("title") if kind == "handoff" else body, full,
-                              nxt=item["compose"]["accept"].get("state") if kind == "handoff" else None,
-                              why=item.get("why", ()))
+            ask = {"source": "derived", "question": canon["question"],
+                   "note": "the proposer's own question is left out (--content metadata)" if f.get("ask") and not full else None}
+        ask["default_if_unanswered"] = canon["default_if_unanswered"]
         item["ask"] = ask
         item["refs"] = sorted({x for x in ID_REF.findall(own) if x != cid}) if full else []
         pat = re.compile(rf"\b{re.escape(str(cid))}\b")
-        cited, waiting = [], []
+        cited, waiting, strong = [], [], []
+        day = str(item.get("date") or "")[:10]
         for (k2, i2), (r2, txt) in texts.items():
-            if i2 == cid or not pat.search(txt):
+            m = pat.search(txt)
+            if i2 == cid or not m or (k2, i2) in qa_ids:   # a Clarify question or its answer isn't evidence
                 continue
+            if (k2 == "decision" and i2 in superseded) or (k2 == "challenge" and i2 in closed):
+                continue   # settled since: neither waiting on it nor news about it
             st2 = r2.get("status") if k2 == "handoff" else r2["fields"].get("status")
-            d2 = (r2.get("created") if k2 == "handoff" else r2["fields"].get("date")) or ""
+            d2 = str((r2.get("created") if k2 == "handoff" else r2["fields"].get("date")) or "")
             ref = {"kind": k2, "id": i2, "status": st2, "date": d2}
+            # later: within one ledger, a higher id; otherwise a later day (same day across kinds is unordered)
+            if k2 == kind and k2 != "handoff":
+                later = ledger_num(i2) > ledger_num(cid)
+            else:
+                later = d2[:10] > day
             if (k2 == "handoff" and st2 not in led.FINAL) or (k2 == "decision" and st2 == "proposed") or \
                (k2 == "challenge" and st2 == "open"):
-                waiting.append(ref)
-            elif str(d2)[:10] >= str(item.get("date") or "")[:10]:
-                cited.append(ref)   # a later record that settled or acted on something citing this one
+                waiting.append(ref)   # still open and citing it: waits on it (weak evidence of anything else)
+                continue
+            if not later:
+                continue
+            cited.append(ref)
+            # strong: a settled later record that, near the id, says it closed, replaced or carried it out
+            near = txt[max(0, m.start() - 160): m.end() + 160]
+            if OVERTAKE_WORDS.search(near):
+                strong.append(ref)
         item["waiting_on_it"] = sorted(waiting, key=lambda r: str(r["id"]))
         item["cited_later_by"] = sorted(cited, key=lambda r: str(r["id"]))
         prs = []
-        if pr_lookup and full:
+        if full:   # references always; their state only with --pr-state (build time)
             for o_, r_, n_ in pr_refs(body + " " + str(f.get("evidence") or ""), owner_hint, known_repos):
-                key = f"{o_}/{r_}#{n_}"
-                if key not in pr_states:
+                key = f"{o_}/{r_}#{n_}".lower()
+                if pr_lookup and key not in pr_states:
                     pr_states[key] = pr_lookup(o_, r_, n_)
-                prs.append({"pr": key, "state": pr_states[key]})
+                prs.append({"pr": key, "state": pr_states.get(key) if pr_lookup else None})
         item["prs"] = prs
         sp = ex.span(item.get("date"))
         item["age_days"] = (as_of_dt - sp[0]).days if sp and as_of_dt else None
-        reasons = [f"cited later by {r['kind']} {r['id']} ({r['status']})" for r in item["cited_later_by"]]
+        reasons = [f"{r['kind']} {r['id']} ({r['status']}) says it closed, replaced or carried it out" for r in sorted(strong, key=lambda r: str(r["id"]))]
         reasons += [f"{x['pr']} is {x['state']}" for x in prs if x["state"] in ("merged", "closed")]
         item["possibly_overtaken"] = reasons
         if kind != "handoff":
@@ -948,7 +989,7 @@ def dl(pairs):
     return "<dl>" + "".join(f"<dt>{e(k)}</dt><dd>{e(v)}</dd>" for k, v in pairs if v not in (None, "", [])) + "</dl>"
 
 
-def choice_card(c):
+def choice_card(c, pr_fetched_at=None):
     key = f'{c["kind"]}:{c["id"]}'
     head = (f'<header><span class="badge {c["kind"]}">{e(c["kind"])}</span><b>{e(c["id"])}</b>'
             f'<span class="st">{e(c["status"])}</span><span class="date">{e(c.get("date"))}</span></header>')
@@ -993,29 +1034,45 @@ def choice_card(c):
                f'data-prompt="{e(comp["inquire"]["prompt"])}">Inquire</button>'
                f'<span>off record: copies a question for an assistant; nothing is written, nobody is obliged</span></div>')
     onrec = ('<p class="onrec-note">Clarify is on the record: it composes an open question addressed to '
-             f'{e(comp["clarify"]["json"]["addressed_to"])}, who then owes an answer.</p>') if "clarify" in comp else ""
-    return (f'<article class="card choice" data-key="{e(key)}">{head}{ask_block(c)}{body}<p class="hint">{e(hint)}</p>'
+             f'{e(comp["clarify"]["json"]["addressed_to"])}, listed under Questions until a line resolves it. '
+             'Recording it doesn\'t deliver it: tell them, or send a handoff, if you need the answer.</p>') if "clarify" in comp else ""
+    return (f'<article class="card choice" data-key="{e(key)}">{head}{ask_block(c, pr_fetched_at)}{body}<p class="hint">{e(hint)}</p>'
             f'<div class="btns">{btns}</div>{edits}{onrec}{off}</article>')
 
 
-def ask_block(c):
-    """'So what is this asking?' above the raw record: the question, what each action would do,
-    what waits on it and its age, and whether it may be overtaken. Says whose words it is."""
+def ask_block(c, pr_fetched_at=None):
+    """'So what is this asking?' above the raw record. What each action does is this page's own
+    description of the composed lines, always; a proposer's `ask` may word the question and explain
+    the options, shown apart and attributed to them. Then what waits on it, its age, and whether it
+    may be overtaken."""
     a = c.get("ask") or {}
-    whose = (f'written by {e(a.get("by") or "the proposer")}' if a.get("source") == "proposer"
-             else 'derived by this page from the record, not written by the proposer')
-    opts = "".join(f'<li><b>{e(o["label"])}</b> → {e(o["effect"])}</li>' for o in a.get("options", []))
-    dflt = f'<p class="dflt">If unanswered: {e(a["default_if_unanswered"])}</p>' if a.get("default_if_unanswered") else ""
+    whose = (f'question written by {e(a.get("by") or "the proposer")}' if a.get("source") == "proposer"
+             else 'question derived by this page from the record, not written by the proposer')
+    if a.get("note"):
+        whose += f' ({e(a["note"])})'
+    effects = "".join(f'<li><b>{e(o["label"])}</b> → {e(o["effect"])}</li>' for o in c.get("effects", []))
+    theirs = ""
+    if a.get("proposer_options") or a.get("proposer_default"):
+        li = "".join(f'<li><b>{e(o["label"])}</b>: {e(o["effect"])}</li>' for o in a.get("proposer_options") or [])
+        d_ = f'<li>If unanswered: {e(a["proposer_default"])}</li>' if a.get("proposer_default") else ""
+        theirs = (f'<p class="mini-label theirs">THE PROPOSER\'S EXPLANATION · {e(a.get("by") or "")} · their words, '
+                  f'not what the buttons do</p><ul class="effects theirs">{li}{d_}</ul>')
+    dflt = f'<p class="dflt">If nobody answers: {e(a["default_if_unanswered"])}</p>' if a.get("default_if_unanswered") else ""
     refs = lambda rs: ", ".join(f'{r["kind"]} {r["id"]} ({r["status"]})' for r in rs)
+    prs = ", ".join(f'{x["pr"]}' + (f' {x["state"]}' if x["state"] else "") for x in c.get("prs") or [])
+    if prs and pr_fetched_at:
+        prs += f" (states looked up {pr_fetched_at})"
     facts = [("age", f'{c["age_days"]} d' if c.get("age_days") is not None else None),
-             ("waiting on it", refs(c.get("waiting_on_it") or [])), ("cites", ", ".join(c.get("refs") or [])),
-             ("pull requests", ", ".join(f'{x["pr"]} {x["state"] or "unknown"}' for x in c.get("prs") or []))]
+             ("waiting on it", refs(c.get("waiting_on_it") or [])), ("cited later by", refs(c.get("cited_later_by") or [])),
+             ("cites", ", ".join(c.get("refs") or [])), ("pull requests", prs)]
     over = ""
     if c.get("possibly_overtaken"):
         over = ('<p class="overtaken-flag"><span class="tag warn">POSSIBLY OVERTAKEN</span> '
-                + e("; ".join(c["possibly_overtaken"])) + '. Check before settling it; "Close as overtaken" composes the closing line.</p>')
+                + e("; ".join(c["possibly_overtaken"])) + '. Check before settling it; "Close as overtaken" composes a '
+                'line that closes it without adopting anything.</p>')
     return (f'<div class="ask"><p class="mini-label">SO WHAT IS THIS ASKING? · <span class="whose {e(a.get("source"))}">{whose}</span></p>'
-            f'<p class="q">{e(a.get("question"))}</p><ul class="effects">{opts}</ul>{dflt}{dl(facts)}{over}</div>')
+            f'<p class="q">{e(a.get("question"))}</p><p class="mini-label">WHAT EACH ACTION DOES (THIS PAGE)</p>'
+            f'<ul class="effects">{effects}</ul>{dflt}{theirs}{dl(facts)}{over}</div>')
 
 
 def table(head, rows, cls=""):
@@ -1121,7 +1178,7 @@ are never recorded and never appear here.</div>
 {questions_table(data.get("questions") or [])}
 </section>"""
 
-    cards = "".join(choice_card(x) for x in data["choices"]) or '<p class="empty">Nothing waits on you.</p>'
+    cards = "".join(choice_card(x, (data.get("pr_state") or {}).get("fetched_at")) for x in data["choices"]) or '<p class="empty">Nothing waits on you.</p>'
     s_choices = f"""
 <section class="section surface" id="choices">
 {head(4, "HUMAN DECISION CONSOLE", "Choices", "Proposed decisions, handoffs that need you, and open challenges, read from the records.", "CHOICE ≠ COMMITMENT / ONLY YOU CAN SETTLE")}
@@ -1403,7 +1460,7 @@ dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 12px;mar
 .editor textarea{display:block;width:100%;min-height:0;height:auto;resize:vertical;box-sizing:border-box;margin:4px 0 6px;background:#0d1519;color:inherit;border:1px solid #39474b;border-radius:5px;padding:8px;font:13px/1.4 var(--sans,inherit)}
 .ask{border-left:3px solid var(--teal);padding:4px 0 4px 10px;margin:10px 0}
 .ask .q{font-size:15px;font-weight:600;margin:4px 0 6px}.ask .effects{margin:0 0 6px;padding-left:18px;font-size:13px}
-.ask .whose.derived{font-style:italic;color:#c9a96e}.ask .dflt{font-size:12px;color:#9fb1b1;margin:2px 0}
+.ask .whose.derived{font-style:italic;color:#c9a96e}.ask .theirs{color:#b3a4c9}.ask .dflt{font-size:12px;color:#9fb1b1;margin:2px 0}
 .overtaken-flag{font-size:12px;color:#e3c27d;margin:6px 0}.tag.warn{color:#e3c27d;border-color:#7a6a3d}
 .apply{position:sticky;top:80px;padding:14px;border-color:#5c6b4b}
 textarea,input,select{width:100%;background:#0a1013;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px}
@@ -1482,7 +1539,7 @@ JS = """
    if(old!==undefined&&v.indexOf(old)>=0){v=v.replace(old,function(){return line})}
    else{v=v.replace(/\\s*$/,'');v=(v?v+'\\n\\n':'')+line+'\\n';if(old!==undefined)msg='your edited line for '+k.split(':')[1]+' is kept above'}
    box.value=v;drawn=null}
-  var c=b.closest('.card');c.classList.remove('picked-accept','picked-reject','picked-defer','picked-amend','picked-overtaken');c.classList.add('picked-'+a);note.textContent=msg}
+  var c=b.closest('.card');if(a!=='clarify')c.classList.remove('picked-accept','picked-reject','picked-defer','picked-amend','picked-overtaken');c.classList.add('picked-'+a);note.textContent=msg}
  function ask(eyebrow,title,body,line,ok,cb){if(!dlg||!dlg.showModal){cb();return}
   d.getElementById('settle-eyebrow').textContent=eyebrow;d.getElementById('settle-title').textContent=title;
   d.getElementById('settle-body').textContent=body;d.getElementById('settle-line').textContent=line||'';
@@ -1516,7 +1573,7 @@ JS = """
   ask(a==='amend'?'AMEND THIS DECISION?':'ASK ON THE RECORD?',
    (a==='amend'?'Adopt '+k.split(':')[1]+' with your text?':'Ask about '+k.split(':')[1]+' on the record?'),
    a==='amend'?'This adds an adopted line that supersedes the proposal, with your edited text. You still fill in decider, basis and locator.'
-    :'This adds an open question (a challenge of kind question). Once you run it, the person it is addressed to owes an answer, and it shows under Questions.',
+    :'This adds an open question (a challenge of kind question), listed under Questions until a line resolves it. Recording it delivers nothing: tell the person it is addressed to.',
    line,'Add to To apply',function(){pick(pk)})})});
  // Inquire: off the record. Copies a prompt; no line, no record, no obligation
  $('.inquire').forEach(function(b){b.addEventListener('click',function(){var t=b.getAttribute('data-prompt');
@@ -1560,6 +1617,8 @@ def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=N
     if pr_state:   # opt-in, build time only: the page itself never touches the network
         pr_lookup = pr_lookup or gh_pr_state
         fetched = iso(dt.datetime.now(dt.timezone.utc))
+        if content != "full":   # no text is read for references in metadata mode, so nothing is looked up
+            pr_state, pr_lookup, fetched = False, None, None
     data = collect(root, lane=lane, content=content, weekly_tokens=weekly_tokens, drift_days=drift_days,
                    coordinator=coordinator, brand=brand, pr_lookup=pr_lookup if pr_state else None, pr_fetched_at=fetched)
     page = render(data)

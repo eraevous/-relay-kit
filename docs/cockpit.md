@@ -64,16 +64,20 @@ the placeholders, copy, and run the lines in your records with `RELAYKIT_ACTOR=<
 Every choice card opens with a block, above the raw record, that answers what you're being asked:
 
 - **The question**, in one sentence ending in "?".
-- **What each action would do**, as a consequence ("Accept → an adopted line supersedes DEC-N: it is
-  in force…"), and what happens if nobody answers.
+- **What each action does**, as a consequence ("Accept → an adopted line supersedes DEC-N: it is
+  in force…"), and what happens if nobody answers. This is always the page's own description of the
+  lines its buttons compose. A proposer can't redefine it.
 - **What waits on it** (open handoffs, proposed decisions and open challenges that cite it), its
   **age** in days back from the records' as-of date, the ids it cites, and the pull requests it names.
 - **Whose words these are.** A proposer can write the question with an `ask` field on the proposal
-  (see below), and the block then says "written by <proposer>". Otherwise the page derives one from the
-  record and says so: "derived by this page from the record, not written by the proposer". A derived
-  question is the page's reading, never presented as the proposer's.
+  (see below). The block then says "question written by <proposer>", and shows their explanation of
+  the options under its own heading ("the proposer's explanation: their words, not what the buttons
+  do"). Otherwise the page derives a question from the record and says so: "derived by this page from
+  the record, not written by the proposer". With `--content metadata` the proposer's `ask` is free
+  text, so it's left out like the rest, and the question is derived from ids only.
 
-Write `ask` when you propose (`check_ledgers.py` checks it when present):
+Write `ask` when you propose. `check_ledgers.py` checks it when it's an object: a question ending
+in "?", at least one `{label, effect}` option, and `default_if_unanswered`.
 
     relay-kit ledger append --dir governance decision '{"status": "proposed", "decision": "...", "scope": "...",
       "ask": {"question": "Run the survey weekly instead of monthly?",
@@ -83,20 +87,28 @@ Write `ask` when you propose (`check_ledgers.py` checks it when present):
 
 ### Possibly overtaken
 
-A card is flagged **possibly overtaken**, with its reasons, when:
-- a later decision or challenge, or a handoff that has finished or been cancelled, cites it (the
-  record dated on or after it, naming its id); or
+A card is flagged **possibly overtaken**, with its reasons, only on strong evidence:
+- a later, settled record that cites it says, near its id, that it closed, replaced or carried it out
+  ("overtaken", "supersedes", "closes", "merged", "already", "executed", "carried out" and similar). A
+  settled record is a decision that isn't proposed, a challenge that isn't open, or a handoff that has
+  finished or been cancelled. "Later" means a higher id in the same ledger, otherwise a later day.
 - with `--pr-state`, a pull request it names is merged or closed.
 
-It's a prompt to check, not a verdict: citing isn't the same as settling. Such a card offers
-**Close as overtaken**, which composes a closing line (an adopted line that supersedes a decision, or
-a resolved line for a challenge) with `<<REQUIRED>>` space for what overtook it.
+Weaker evidence is listed but not flagged: other later citations ("cited later by"), and open records
+that cite it ("waiting on it"). Records settled since don't appear in either list. Clarify questions
+and their answers aren't evidence of anything: answering a question about DEC-N doesn't overtake DEC-N.
+The flag is a prompt to check, not a verdict.
 
-`--pr-state` is opt-in and happens at build time only. It runs `gh api` for each pull request named
-in a choice's text: a full `https://github.com/<owner>/<repo>/pull/N` URL, or "<repo> PR #N" where the
+A flagged card offers **Close as overtaken**. It composes a closing line that adopts nothing: a
+`"status": "superseded"` line that supersedes a decision, or a resolved line for a challenge, with
+`<<REQUIRED>>` space for what overtook it.
+
+Pull requests a choice names are always listed. Looking up their state needs `--pr-state`: opt-in, at
+build time only, and only with full content. It runs `gh api` for each pull request named in a choice's text: a full `https://github.com/<owner>/<repo>/pull/N` URL, or "<repo> PR #N" where the
 records spell `<repo>` out as `<owner>/<repo>` somewhere (bare "#N" is ignored as ambiguous). The
-owner is the GitHub owner of the records' origin. `cockpit.json` records `pr_state.fetched_at`, the one
-clock time the output can hold, so a page built with it isn't byte-identical between runs. Without
+owner is the GitHub owner of the records' origin. The page and `cockpit.json` record when the
+states were looked up (`pr_state.fetched_at`), the one clock time the output can hold, so a page
+built with it isn't byte-identical between runs. Without
 the flag nothing touches the network, and the page never does.
 
 ### Amend, Clarify, Inquire
@@ -105,8 +117,8 @@ Beside Accept / Reject / Defer:
 
 | Action | On the record? | What it composes |
 | --- | --- | --- |
-| **Amend** (decisions) | yes: your decision | Opens an editor prefilled with the proposal's text. Your edited text goes into an adopted line that supersedes the proposal (`"amends"` names it), with the usual decider / basis / locator placeholders. |
-| **Clarify** | yes: an obligation for someone | Opens an editor for your question. Composes an open challenge with `"kind": "question"`, `"about"` the item and `"addressed_to"` its proposer (a handoff's sender, for a handoff). Once you run it, it shows under Questions until whoever answers appends a line that resolves it with the answer. Chosen over a handoff note because a question about a decision belongs next to it in the ledger, and the answer closes it the way any challenge closes. |
+| **Amend** (decisions) | yes: your decision | Opens an editor prefilled with the proposal's text. Your edited text goes into an adopted line that supersedes the proposal (`"amends"` names it, for the reader), with the usual decider / basis / locator placeholders. |
+| **Clarify** | yes: a question on the record | Opens an editor for your question. Composes an open challenge with `"kind": "question"`, `"about"` the item and `"addressed_to"` its proposer (a handoff's sender, for a handoff). Once you run it, it leaves Choices and shows under Questions until a line resolves it, with the answer as the resolution. **Recording it doesn't deliver it**: nothing notifies the addressee, so tell them, or send a handoff, if you need the answer. A challenge rather than a handoff note because a question about a decision belongs next to it in the ledger, and the answer closes it the way any challenge closes. A handoff remains the tool for work someone must do. |
 | **Inquire** | no | Copies a prompt for you to paste to an assistant ("Explain DEC-N from my records: what is being decided, what has changed since it was proposed, and the consequence of each option. Cite record ids…"). Nothing is written and nobody owes anything; the answer is information, not a decision. |
 
 Clarify and Inquire look different on purpose: Clarify is a solid button marked "on record", and
