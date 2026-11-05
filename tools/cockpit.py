@@ -69,6 +69,9 @@ def load_export():
 
 ex = load_export()
 Refused = ex.Refused
+_bspec = importlib.util.spec_from_file_location("relaykit_budget_for_cockpit", HERE / "budget.py")
+BG = importlib.util.module_from_spec(_bspec)
+_bspec.loader.exec_module(BG)
 
 
 def dumps(x):
@@ -101,7 +104,7 @@ def read_budget(root, rd):
     if not p.is_file() or p.is_symlink():
         return None, []
     raw = rd.read(p, "budget")
-    rows, bad = [], []
+    rows, bad, raws = [], [], {}
     for n, line in enumerate(raw.split(b"\n"), 1):
         if not line.strip():
             continue
@@ -109,6 +112,9 @@ def read_budget(root, rd):
             r = json.loads(line)
             if not isinstance(r, dict):
                 raise ValueError("not an object")
+            for pr in BG.problems(r):    # relay-kit/budget@2 fields
+                raise ValueError(pr)
+            raws[n] = line.decode("utf-8", "replace")
             sp = ex.span(r.get("ts"))
             if not sp:
                 raise ValueError("ts isn't an ISO time")
@@ -121,7 +127,10 @@ def read_budget(root, rd):
             bad.append({"line": n, "reason": str(e)})
             continue
         rows.append((n, sp[0], r))
-    return {"rows": rows, "bad": bad}, bad
+    kept, report = BG.effective([(n, raws[n], r) for n, _, r in rows])
+    keep = {n for n, _, _ in kept}
+    ids = {n: i for n, i, _ in kept}
+    return {"rows": rows, "bad": bad, "counted": keep, "ids": ids, "corrections": report}, bad
 
 
 def captures(rd, threads):
@@ -969,7 +978,8 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
          "weekly_allowance": weekly_tokens, "status_file_costs_parsed": False}
     if budget is not None:
         start = (as_of_dt - dt.timedelta(days=7)) if as_of_dt else None
-        recent = [(n, t, r) for n, t, r in budget["rows"] if start is None or t > start]
+        # relay-kit/budget@2: a corrected line and a child line its parent includes are never counted again
+        recent = [(n, t, r) for n, t, r in budget["rows"] if (start is None or t > start) and n in budget["counted"]]
         sess = [r for _, _, r in recent if r["window"] == "session"]
         weekly = sorted([(t, n, r) for n, t, r in recent if r["window"] == "weekly"], key=lambda x: (x[0], x[1]))
         by_actor, by_lane = {}, {}
@@ -989,6 +999,13 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             "session_tokens_7d": sess_total,
             "session_in_7d": sum(r["tokens_in"] for r in sess), "session_out_7d": sum(r["tokens_out"] for r in sess),
             "session_lines_7d": len(sess),
+            "session_tokens_7d_by_method": {m: sum(r["tokens_in"] + r["tokens_out"] for r in sess
+                                                   if (r.get("method") if r.get("method") in BG.METHODS else "unlabelled") == m)
+                                            for m in sorted({(r.get("method") if r.get("method") in BG.METHODS else "unlabelled") for r in sess})},
+            "corrections": {"budget_schema": BG.SCHEMA, "replaced": budget["corrections"]["replaced"],
+                            "children_included": budget["corrections"]["children_included"],
+                            "conflicts": budget["corrections"]["conflicts"],
+                            "unknown_targets": budget["corrections"]["unknown_targets"]},
             "weekly_reference": ({"ts": latest_weekly["ts"], "tokens": latest_weekly["tokens_in"] + latest_weekly["tokens_out"],
                                   "actor": latest_weekly.get("actor"),
                                   "note": "a separately reported weekly reading; reference only, never added to or substituted for the session sum"}
@@ -1582,6 +1599,11 @@ its scope names. These are readings, not delegations. Layout is automatic.{"" if
         bud = f"""
 <div class="panel pad">{dl([("window", f'{b["window"]["from"]} → {b["window"]["to"]}'), ("burn", f'{fmt_n(burn)} tokens ({b["burn_source"]})'),
   ("session lines, 7 d", f'{fmt_n(b["session_tokens_7d"])} ({fmt_n(b["session_in_7d"])} in, {fmt_n(b["session_out_7d"])} out)'),
+  ("by how it was measured", "; ".join(f'{m}: {fmt_n(v)}' for m, v in (b.get("session_tokens_7d_by_method") or {}).items()) or None),
+  ("corrections applied", (", ".join(f'{k} replaced by {v}' for k, v in b["corrections"]["replaced"].items())
+                           + ("; conflicting corrections: " + ", ".join(c["id"] for c in b["corrections"]["conflicts"]) if b["corrections"]["conflicts"] else "")
+                           + ("; corrections of unknown lines: " + ", ".join(str(c["line"]) for c in b["corrections"]["unknown_targets"]) if b["corrections"]["unknown_targets"] else ""))
+                          if b.get("corrections") and (b["corrections"]["replaced"] or b["corrections"]["unknown_targets"]) else None),
   ("weekly reading (reference only)", f'{fmt_n(wref["tokens"])} tokens at {wref["ts"]}, reported by {wref["actor"]}; not added to the gauge' if wref else None),
   ("most agents at once", fmt_n(b["max_agents_7d"])), ("records", b["records"]),
   ("invalid lines", ", ".join(f'{x["line"]}: {x["reason"]}' for x in b["invalid_lines"]) or "none")])}

@@ -148,6 +148,23 @@
       ]
     },
     {
+      "id": "relay-kit/budget@2",
+      "what": "governance/budget.jsonl, append-only: @1's ts, actor, window, tokens_in, tokens_out (and optional agents, note) plus @2's id (or a content-hash id for older lines), method (measured | proxy | estimate; required on new lines, 'unlabelled' for older ones), interval_start/end, includes_children {included, ids}, correction_of (the replaced line is never summed with its correction; two corrections of one line are a reported conflict), metric_version, scope and source. Read through tools/budget.py by every reader; written by relay-kit budget-append.",
+      "spec": "docs/budget.md",
+      "implementers": [
+        "tools/budget.py",
+        "tools/budget_append.py",
+        "tools/cockpit.py"
+      ],
+      "tests": [
+        "budget: a correction replaces the line it names; the two are never summed",
+        "budget: a parent that includes its children's use isn't counted with them",
+        "budget: new lines must say how they were measured; malformed @2 fields are refused",
+        "budget: two corrections of one line are a conflict, reported; only the later one counts",
+        "budget: older lines without a method count as 'unlabelled', never as measured"
+      ]
+    },
+    {
       "id": "relay-kit/mcp@1",
       "what": "Read-only MCP server over a records store, JSON-RPC 2.0 over stdio, protocol revisions 2024-11-05, 2025-03-26, 2025-06-18 and 2025-11-25 (any other gets -32022 with the supported list): the tool names and arguments, relaykit:// resource URIs, the result envelope (schema, evidence_class as in export@1, provenance 'read from <path> at records sha256:<hash>', content_level, notice) and the --content metadata policy. No tool writes to the records (DEC-019).",
       "spec": "docs/mcp.md",
