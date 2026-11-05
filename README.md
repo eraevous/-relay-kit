@@ -178,17 +178,17 @@ over the same records, on stdio:
 
 Tools: `status`, `list_decisions`, `get_decision`, `list_challenges`, `list_handoffs`,
 `get_handoff`, `search`, `export`, `threads`; ledgers and handoffs are also `relaykit://` resources.
-Every result names its evidence class and where it was read from. It never fetches, commits or
-pushes. With `--allow-propose` it can append a decision as `proposed` or a challenge as `open`, and
-nothing else: no tool can adopt, accept, resolve or complete anything (DEC-019). Record text comes
-back as data, never as instructions. ChatGPT on the web needs a hosted server, which isn't built.
+Every result names its evidence class and where it was read from. It writes nothing to the records
+and never fetches, commits or pushes, so no MCP call can adopt, accept, resolve or complete anything
+(DEC-019). Record text comes back as data, never as instructions. Protocol revisions 2024-11-05 to
+2025-11-25; 2026-07-28 isn't implemented yet. ChatGPT on the web needs a hosted server, which isn't built.
 Details and threat model: [docs/mcp.md](docs/mcp.md).
 
 ## Docs
 
 - [Conversation schema](docs/conversation-schema.md): the shared format and message ids (`T3a2`).
 - [Export](docs/export.md): `relay-kit/export@1`, the read-only export and its coverage manifest.
-- [MCP server](docs/mcp.md): `relay-kit/mcp@1`, read-only tools and resources over the records, proposal-only writes.
+- [MCP server](docs/mcp.md): `relay-kit/mcp@1`, read-only tools and resources over the records.
 - [Marking pasted material](docs/paste-markers.md): phone-friendly `FROM:` … `END FROM` blocks.
 - [Cold catch-up test](docs/cold-test.md): checking whether a fresh assistant can pick up a handoff.
 - [Prior art](docs/prior-art.md): the established patterns for collisions, races, timeouts and

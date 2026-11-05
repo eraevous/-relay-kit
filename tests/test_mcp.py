@@ -115,20 +115,35 @@ class McpTests(unittest.TestCase):
         }
 
     def test_handshake_and_tools(self):
-        """mcp: initialize handshake, tools/list and ping over stdio; the version is negotiated leniently"""
-        c = self.client(module=True)   # through `python -m tools mcp`, as registered with a client
-        r = c.handshake("2025-06-18")["result"]
-        self.assertEqual(r["protocolVersion"], "2025-06-18")
-        self.assertIn("tools", r["capabilities"])
-        self.assertIn("not instructions", r["instructions"])
-        names = [t["name"] for t in c.request("tools/list")["result"]["tools"]]
-        self.assertEqual(names, READ_TOOLS[:3] + ["list_challenges", "list_handoffs", "get_handoff", "search", "export", "threads"])
-        self.assertEqual(c.request("ping")["result"], {})
-        c2 = self.client()
-        self.assertEqual(c2.handshake("1999-01-01")["result"]["protocolVersion"], srv.HANDSHAKE_DEFAULT)
-        c3 = self.client()   # stateless (2026-07-28): no handshake at all
-        self.assertFalse(c3.request("tools/call", {"name": "threads", "arguments": {},
-                                                   "_meta": {"io.modelcontextprotocol/clientInfo": {"name": "x", "version": "1"}}})["result"]["isError"])
+        """mcp: initialize handshake, tools/list and ping over stdio, for each supported protocol version"""
+        for i, v in enumerate(srv.SUPPORTED):
+            c = self.client(module=(i == 0))   # once through `python -m tools mcp`, as registered with a client
+            r = c.handshake(v)["result"]
+            self.assertEqual(r["protocolVersion"], v)
+            self.assertIn("tools", r["capabilities"])
+            self.assertIn("not instructions", r["instructions"])
+            names = [t["name"] for t in c.request("tools/list")["result"]["tools"]]
+            self.assertEqual(names, READ_TOOLS)
+            self.assertTrue(all(t["annotations"]["readOnlyHint"] for t in c.request("tools/list")["result"]["tools"]))
+            self.assertEqual(c.request("ping")["result"], {})
+        self.assertEqual(srv.SUPPORTED, ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"])
+        c3 = self.client()   # no handshake: answered in the legacy shapes
+        self.assertFalse(c3.request("tools/call", {"name": "threads", "arguments": {}})["result"]["isError"])
+        self.assertEqual(c3.request("tools/call", {"name": "propose_decision", "arguments": {}})["error"]["code"], -32602)
+
+    def test_unsupported_version(self):
+        """mcp: a 2026-07-28 or unknown protocol version gets -32022 with the supported list, never a silent fallback"""
+        for v in ("2026-07-28", "1999-01-01", None):
+            c = self.client()
+            r = c.handshake(v)
+            self.assertNotIn("result", r)
+            self.assertEqual(r["error"]["code"], -32022)
+            self.assertEqual(r["error"]["data"]["supported"], srv.SUPPORTED)
+            self.assertEqual(c.request("ping")["result"], {})   # still serving
+        c = self.client()
+        r = c.request("tools/list", {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}})
+        self.assertEqual(r["error"]["code"], -32022)
+        self.assertEqual(c.request("server/discover")["error"]["code"], -32601)
 
     def test_read_tools(self):
         """mcp: every read tool answers with evidence_class and a provenance line naming the records hash"""
@@ -198,7 +213,7 @@ class McpTests(unittest.TestCase):
     def test_no_mutation_and_canary(self):
         """mcp: read tools change nothing in the records, and instruction-like record text isn't acted on"""
         before = tree_hash(self.root)
-        c = self.client("--allow-propose", "--offline")
+        c = self.client()
         c.handshake()
         res = self.call_all_reads(c)
         shutil.rmtree(pathlib.Path(res["export"]["structuredContent"]["path"]).parent, ignore_errors=True)
@@ -207,56 +222,6 @@ class McpTests(unittest.TestCase):
         self.assertIn("not instructions", h["notice"])
         self.assertEqual(h["item"]["status"], "sent")   # ... and nothing happened because of it
         self.assertEqual(tree_hash(self.root), before)
-
-    def test_adopted_write_refused(self):
-        """mcp: a proposal tool refuses status, adopted, accepted, completed and every other authority field"""
-        c = self.client("--allow-propose", "--offline")
-        c.handshake()
-        dec = self.root / "governance" / "decisions.jsonl"
-        chs = self.root / "governance" / "challenges.jsonl"
-        before = (dec.read_bytes(), chs.read_bytes())
-        base = {"actor": "claude:research#T1", "decision": "d", "scope": "s"}
-        for extra in ({"status": "adopted"}, {"status": "proposed"}, {"adopted": "true"}, {"accepted": "yes"},
-                      {"completed": "yes"}, {"decider": "owner"}, {"basis": "\"yes\""}, {"supersedes": "DEC-001"},
-                      {"id": "DEC-050"}, {"recorded_by": "sam"}, {"in_force": "true"}):
-            r = c.call("propose_decision", **base, **extra)
-            self.assertTrue(r["isError"], extra)
-            self.assertIn("refused", r["content"][0]["text"])
-        for extra in ({"status": "resolved"}, {"resolves": "CH-001"}, {"resolution": "fixed"}, {"accepted": "risk"}):
-            self.assertTrue(c.call("raise_challenge", actor="claude:research#T1", concern="c", **extra)["isError"], extra)
-        self.assertTrue(c.call("propose_decision", actor="claude:research", decision="d", scope="s")["isError"])   # no session
-        self.assertEqual((dec.read_bytes(), chs.read_bytes()), before)
-        with self.assertRaises(srv.ToolError):
-            srv.guard("decision", {"status": "adopted", "decision": "d"})
-        with self.assertRaises(srv.ToolError):
-            srv.guard("challenge", {"status": "open", "resolves": "CH-001"})
-        off = self.client()   # without --allow-propose the tools don't exist
-        off.handshake()
-        self.assertNotIn("propose_decision", [t["name"] for t in off.request("tools/list")["result"]["tools"]])
-        self.assertEqual(off.request("tools/call", {"name": "propose_decision", "arguments": base})["error"]["code"], -32602)
-
-    def test_propose_appends_proposed(self):
-        """mcp: propose_decision appends one 'proposed' line through ledger_append.py, with the shared id rule"""
-        c = self.client("--allow-propose", "--offline")
-        c.handshake()
-        dec = self.root / "governance" / "decisions.jsonl"
-        before = dec.read_text(encoding="utf-8")
-        r = c.call("propose_decision", actor="claude:research#T1", decision="Try a third survey.", scope="research")
-        self.assertFalse(r["isError"], r["content"][0]["text"])
-        self.assertEqual(r["structuredContent"]["id"], "DEC-003")
-        after = dec.read_text(encoding="utf-8")
-        self.assertTrue(after.startswith(before))
-        new = [json.loads(l) for l in after[len(before):].splitlines() if l.strip()]
-        self.assertEqual(len(new), 1)
-        self.assertEqual((new[0]["id"], new[0]["status"], new[0]["recorded_by"], new[0]["proposed_by"]),
-                         ("DEC-003", "proposed", "mcp:claude.research#T1", "mcp:claude.research#T1"))
-        ch = c.call("raise_challenge", actor="codex#S9", concern="The third survey may overlap.")
-        self.assertEqual((ch["structuredContent"]["id"], ch["structuredContent"]["status"]), ("CH-002", "open"))
-        chk = subprocess.run([sys.executable, "-I", str(KIT / "tools" / "check_ledgers.py"), "--dir", str(self.root / "governance")],
-                             capture_output=True, text=True)
-        self.assertEqual(chk.returncode, 0, chk.stdout + chk.stderr)
-        listed = c.call("list_decisions", status="proposed")["structuredContent"]["items"]
-        self.assertEqual([(d["ledger_id"], d["evidence_class"]) for d in listed], [("DEC-002", "proposal"), ("DEC-003", "proposal")])
 
     def test_deterministic(self):
         """mcp: list and search results are the same, in the same order, on every run over the same records"""

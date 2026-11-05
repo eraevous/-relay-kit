@@ -36,7 +36,7 @@ Registry: [governance/contracts.json](governance/contracts.json).
 | `relay-kit/paste-markers@1` | `FROM:` … `END FROM` and `>"""` | [docs/paste-markers.md](docs/paste-markers.md) |
 | `relay-kit/relay-result@1` | relay statuses: done / unconfirmed / pending | [chat-relay](skills/chat-relay/SKILL.md) |
 | `relay-kit/export@1` | read-only export: records file and coverage manifest | [docs/export.md](docs/export.md) |
-| `relay-kit/mcp@1` | read-only MCP server over the records; proposal-only writes | [docs/mcp.md](docs/mcp.md) |
+| `relay-kit/mcp@1` | read-only MCP server over the records (stdio) | [docs/mcp.md](docs/mcp.md) |
 
 **How a contract changes:** only by a new version. The spec, every implementer and the
 tests change in the same commit, and the owner records the change in the decision ledger.
@@ -82,10 +82,9 @@ missing outputs, hidden steps) so that missing is never read as empty.
 of reader, reached over the Model Context Protocol on stdio instead of the command line. It reuses
 export@1's readers, so every result carries the same evidence classes, plus a provenance line with
 the hash of what it read. It encodes DEC-019 (information crosses freely, authority never crosses
-implicitly): reads are open; the only writes, off by default, append a `proposed` decision or an
-`open` challenge through `ledger_append.py`, and refuse every status and authority field, so no MCP
-call can adopt, accept, resolve or complete anything. Record text is returned as data; no tool acts
-on it. It is a delivery route (layer 3), not an orchestration layer.
+implicitly): reads are open, and it writes nothing to the records, so no MCP call can adopt,
+accept, resolve or complete anything. Proposals over MCP are deferred until they have dedup, rate
+limits and explicit review. Record text is returned as data; no tool acts on it. It is a delivery route (layer 3), not an orchestration layer.
 
 Claims in records keep one of four labels where it matters: **stated preference**,
 **belief to test**, **proposal**, **result** (with the artifact that shows it). A result
