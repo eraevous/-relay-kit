@@ -1,4 +1,4 @@
-# Pull-request reader: `relay-kit/prs@1`
+# Pull-request reader: `relay-kit/prs@2`
 
 `relay-kit prs` reads pull-request state from GitHub, at build time and only when you run it, and
 appends what changed to `governance/pr-state.jsonl` in the records. The [Cockpit](cockpit.md)
@@ -6,7 +6,26 @@ renders that file; it never fetches. Other readers that need pull-request data s
 file too, so there is one GitHub reader, not one per tool.
 
     relay-kit prs --root RECORDS [--repo OWNER/NAME ...] [--since-days 14] [--limit 30]
-                  [--via gh|token] [--token-env NAME] [--dry-run]
+                  [--via gh|token] [--token-env NAME] [--max-wait 60] [--cache DIR] [--dry-run]
+
+**@2** (HO-RK-20261105-TXRM step 1) reads GitHub through [tools/github.py](../tools/github.py), the
+kit's one GitHub client, and records what was asked for against what came back, so a partial read
+shows as partial, never as zero. @1 lines stay readable; the first @2 run appends a fresh line for
+every pull request it reads.
+
+## The client
+
+Read-only: it only ever sends GET. Shared by every reader that needs GitHub; everything else reads
+the file this tool writes.
+
+- **Pagination:** list endpoints are walked page by page (100 a page) up to `--limit`; whether more
+  were available is recorded.
+- **Retries:** network errors and HTTP 500/502/503/504 are retried three times, waiting 1, 2 and 4 s.
+- **Rate limits:** a 429, or a 403 with no requests left, waits for GitHub's reset when that is at
+  most `--max-wait` seconds (default 60); otherwise that repository fails with the reset time.
+- **Caching:** each path is fetched once per run. `--cache DIR` keeps responses with their ETags and
+  revalidates them, so an unchanged resource costs a 304. The cache holds PR text from private
+  repositories, so it is off unless you ask for it; keep the folder private.
 
 - **Which repositories:** `--repo` (repeatable), else `"repos": ["owner/name", ...]` in
   `handoffs/.ledger.json`. Anything that isn't `OWNER/NAME` is refused.
@@ -21,7 +40,7 @@ file too, so there is one GitHub reader, not one per tool.
 
 ## Lines
 
-Every line has `"schema": "relay-kit/prs@1"` and a `kind`.
+Every line has `"schema": "relay-kit/prs@2"` and a `kind`.
 
 **`"kind": "pr"`**, written only when something about the pull request changed since its last line
 (any field but `ts`):
@@ -38,9 +57,16 @@ Every line has `"schema": "relay-kit/prs@1"` and a `kind`.
 | `ci` | `state`: `failure` if any check run or status failed, else `pending` if any is still running, else `success`, or `none` when there are none; `failing`: their names |
 | `body_sections` | `what`, `why`, `how`, `authorized`: the text under each heading, verbatim (HTML comments removed), up to 4000 characters each. A heading counts when its first word is the section's name ("What this changes" is `what`); headings in code fences don't |
 | `missing`, `truncated` | sections absent or empty; sections cut at 4000 characters |
+| `unread` | @2: `reviews` and/or `ci` when they couldn't be read. Then `reviews` is empty and `ci.state` is `unknown`: not read, not none |
 
 **`"kind": "fetch"`**, one per run: `ts`, `via`, `repos`, `ok`, `failed` (repo → error),
-`since_days`, `prs_seen`, `appended`. A repository that fails doesn't stop the others.
+`since_days`, `prs_seen`, `appended`. A repository that fails doesn't stop the others. @2 adds:
+
+| Field | Meaning |
+| --- | --- |
+| `coverage` | per repository: `asked` (in words), `listed`, `more_available`, `reread_open` (PRs last recorded open, read again by number), `prs_read`, and `partial`: each read that failed inside a repository that otherwise succeeded (`number`, `what`: reviews, ci or repository, `error`) |
+| `revisions` | per repository: `default_branch` and `pushed_at` when it was read |
+| `client` | `requests`, `retries`, `rate_limit_waits`, `memo_hits`, `not_modified`, `rate_limit_remaining`, `first_at`, `last_at` |
 
 Readers take the last `pr` line per `(repo, number)`, and a repository's freshness from its last
 `fetch` line that lists it under `ok`. Lines of another schema version are unreadable to an @1

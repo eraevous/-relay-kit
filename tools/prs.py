@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""relay-kit/prs@1: a build-time, opt-in reader of GitHub pull-request state into the records.
+"""relay-kit/prs@2: a build-time, opt-in reader of GitHub pull-request state into the records.
 
     relay-kit prs --root RECORDS [--repo OWNER/NAME ...] [--since-days N] [--limit N]
                   [--via gh|token] [--token-env NAME] [--dry-run]
@@ -22,6 +22,7 @@ with a token read from an environment variable (--via token, default GITHUB_TOKE
 The token is never written or printed.
 """
 import argparse
+import importlib.util
 import datetime as dt
 import json
 import os
@@ -33,7 +34,8 @@ import sys
 import urllib.error
 import urllib.request
 
-SCHEMA = "relay-kit/prs@1"
+SCHEMA = "relay-kit/prs@2"
+READS = {"relay-kit/prs@1", SCHEMA}   # @1 lines (no coverage, no unread) stay readable
 OUT = "governance/pr-state.jsonl"
 SECTIONS = ("what", "why", "how", "authorized")
 MAX_SECTION = 4000      # characters kept per section; longer ones are cut and listed under "truncated"
@@ -48,10 +50,6 @@ NEGATED = re.compile(r"\b(?:not|no|never|isn't|aren't|cannot|can't|won't|un)\W*$
 FENCE = re.compile(r"^[ \t]*(```|~~~)")
 FAILED = {"failure", "timed_out", "cancelled", "action_required", "startup_failure", "error"}
 COMPARE_SKIP = {"ts"}
-
-
-class Refused(Exception):
-    pass
 
 
 def now_iso():
@@ -125,34 +123,28 @@ def parse_body(body):
             "missing": [k for k in SECTIONS if k not in sections], "truncated": truncated}
 
 
-# ---------------- GitHub ----------------
-def gh_getter():
-    def get(path):
-        try:
-            p = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=60)
-        except (OSError, subprocess.TimeoutExpired) as x:
-            raise Refused(f"gh api {path}: {x}")
-        if p.returncode != 0:
-            raise Refused(f"gh api {path}: {(p.stderr or p.stdout).strip()[:200]}")
-        return json.loads(p.stdout or "null")
-    return get
+# ---------------- GitHub (through tools/github.py, the kit's one GitHub client) ----------------
+def _github():
+    spec = importlib.util.spec_from_file_location("relaykit_github", pathlib.Path(__file__).resolve().parent / "github.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
 
 
-def token_getter(token):
-    def get(path):
-        req = urllib.request.Request("https://api.github.com/" + path,
-                                     headers={"Authorization": f"Bearer {token}",
-                                              "Accept": "application/vnd.github+json",
-                                              "X-GitHub-Api-Version": "2022-11-28",
-                                              "User-Agent": "relay-kit-prs"})
-        try:
-            with urllib.request.urlopen(req, timeout=60) as r:
-                return json.loads(r.read().decode("utf-8") or "null")
-        except urllib.error.HTTPError as x:
-            raise Refused(f"GET {path}: HTTP {x.code}")
-        except (urllib.error.URLError, OSError) as x:
-            raise Refused(f"GET {path}: {x}")
-    return get
+GH = _github()
+Refused = GH.Refused     # one exception for the reader and the client
+
+
+class FnClient:
+    """A bare get(path) function (tests) behind the client's interface."""
+    def __init__(self, get):
+        self.get, self.stats = get, {}
+
+    def pages(self, path, limit=100, **_):
+        got = self.get(f"{path}&per_page={max(1, min(limit, 100))}")
+        if not isinstance(got, list):
+            raise Refused(f"GET {path}: expected a list")
+        return got[:limit], len(got) >= limit
 
 
 def ci_state(get, repo, sha):
@@ -176,17 +168,34 @@ def ci_state(get, repo, sha):
     return {"state": state, "failing": sorted(set(failing))}
 
 
-def pr_record(get, repo, pr, ts):
+def pr_record(get, repo, pr, ts, partial=None):
+    """One pr line. Reviews or CI that can't be read are listed under `unread` (and in `partial`), not
+    recorded as none: missing isn't zero."""
     n = pr["number"]
     body = parse_body(pr.get("body"))
-    reviews = []
-    for r in get(f"repos/{repo}/pulls/{n}/reviews?per_page=100") or []:
-        if r.get("state") in (None, "PENDING"):
-            continue
-        sig = next((m.group(1)[:120] for ln in (r.get("body") or "").split("\n") if (m := SIGNED.match(ln))), None)
-        reviews.append({"by": (r.get("user") or {}).get("login"), "verdict": r.get("state"),
-                        "at": r.get("submitted_at"), "signed": sig, "stated": stated_verdict(r.get("body"))})
+    reviews, unread = [], []
+    try:
+        got = get(f"repos/{repo}/pulls/{n}/reviews?per_page=100")
+        for r in got if isinstance(got, list) else []:
+            if not isinstance(r, dict) or r.get("state") in (None, "PENDING"):
+                continue
+            sig = next((m.group(1)[:120] for ln in (r.get("body") or "").split("\n") if (m := SIGNED.match(ln))), None)
+            reviews.append({"by": (r.get("user") or {}).get("login"), "verdict": r.get("state"),
+                            "at": r.get("submitted_at"), "signed": sig, "stated": stated_verdict(r.get("body"))})
+    except Refused as x:
+        unread.append("reviews")
+        if partial is not None:
+            partial.append({"number": n, "what": "reviews", "error": str(x)[:200]})
     sha = (pr.get("head") or {}).get("sha")
+    ci = {"state": "none", "failing": []}
+    if sha:
+        try:
+            ci = ci_state(get, repo, sha)
+        except Refused as x:
+            ci = {"state": "unknown", "failing": []}
+            unread.append("ci")
+            if partial is not None:
+                partial.append({"number": n, "what": "ci", "error": str(x)[:200]})
     state = "merged" if pr.get("merged_at") else pr.get("state")
     return {"schema": SCHEMA, "kind": "pr", "ts": ts, "repo": repo, "number": n,
             "url": pr.get("html_url"), "title": pr.get("title"), "state": state, "draft": bool(pr.get("draft")),
@@ -194,7 +203,7 @@ def pr_record(get, repo, pr, ts):
             "created_at": pr.get("created_at"), "updated_at": pr.get("updated_at"),
             "merged_at": pr.get("merged_at"), "closed_at": pr.get("closed_at"),
             "base": (pr.get("base") or {}).get("ref"), "head": {"ref": (pr.get("head") or {}).get("ref"), "sha": sha},
-            "reviews": reviews, "ci": ci_state(get, repo, sha) if sha else {"state": "none", "failing": []},
+            "reviews": reviews, "ci": ci, "unread": unread,
             "body_sections": body["sections"], "missing": body["missing"], "truncated": body["truncated"]}
 
 
@@ -214,13 +223,15 @@ def read_lines(path):
 def latest_by_pr(lines):
     last = {}
     for x in lines:
-        if x.get("kind") == "pr":
+        if x.get("kind") == "pr" and x.get("schema") in READS:
             last[(x.get("repo"), x.get("number"))] = x
     return last
 
 
 def same(a, b):
-    return {k: v for k, v in a.items() if k not in COMPARE_SKIP} == {k: v for k, v in b.items() if k not in COMPARE_SKIP}
+    """Unchanged apart from when it was read (and, for an @1 line, the fields @2 added)."""
+    skip = COMPARE_SKIP | ({"schema", "unread"} if a.get("schema") != b.get("schema") else set())
+    return {k: v for k, v in a.items() if k not in skip} == {k: v for k, v in b.items() if k not in skip}
 
 
 def repos_of(root, given):
@@ -241,9 +252,11 @@ def repos_of(root, given):
     return list(dict.fromkeys(repos))
 
 
-def run(root, get, via, repos=None, since_days=14, limit=30, ts=None, dry_run=False):
+def run(root, client, via, repos=None, since_days=14, limit=30, ts=None, dry_run=False):
     """Read, compare with the last line per PR, append what changed and a fetch line. Returns the
-    fetch line. `get(path)` returns parsed JSON for a GitHub REST path (injected so tests needn't fetch)."""
+    fetch line. `client` is a github.Client, or a bare get(path) function (tests)."""
+    client = client if hasattr(client, "pages") else FnClient(client)
+    get = client.get
     root = pathlib.Path(root)
     if not root.is_dir():
         raise Refused(f"--root {root} isn't a folder")
@@ -257,13 +270,20 @@ def run(root, get, via, repos=None, since_days=14, limit=30, ts=None, dry_run=Fa
     ts = ts or now_iso()
     cutoff = (dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ") - dt.timedelta(days=since_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     last = latest_by_pr(read_lines(path))
-    new, ok, failed, seen = [], [], {}, 0
+    new, ok, failed, seen, coverage, revisions = [], [], {}, 0, {}, {}
     for repo in repos:
-        found = []
+        found, partial = [], []
+        cov = {"asked": f"the {limit} most recently updated, plus any last recorded open", "listed": 0,
+               "more_available": None, "reread_open": 0, "prs_read": 0, "partial": partial}
         try:
-            prs = get(f"repos/{repo}/pulls?state=all&sort=updated&direction=desc&per_page={max(1, min(limit, 100))}")
-            if not isinstance(prs, list):
-                raise Refused(f"repos/{repo}/pulls: unexpected response")
+            try:   # revision identity: what the repository looked like when it was read
+                meta = get(f"repos/{repo}")
+                if isinstance(meta, dict):
+                    revisions[repo] = {"default_branch": meta.get("default_branch"), "pushed_at": meta.get("pushed_at")}
+            except Refused as x:
+                partial.append({"number": None, "what": "repository", "error": str(x)[:200]})
+            prs, more = client.pages(f"repos/{repo}/pulls?state=all&sort=updated&direction=desc", limit=max(1, min(limit, 100)))
+            cov["listed"], cov["more_available"] = len(prs), more
             listed = {pr.get("number") for pr in prs if isinstance(pr, dict)}
             # a PR last recorded open is re-read whatever its age, so a closed one never stays "open"
             for (r_, n_), prev in sorted(last.items(), key=lambda kv: kv[0][1]):
@@ -271,6 +291,7 @@ def run(root, get, via, repos=None, since_days=14, limit=30, ts=None, dry_run=Fa
                     one = get(f"repos/{repo}/pulls/{n_}")
                     if isinstance(one, dict):
                         prs.append(one)
+                        cov["reread_open"] += 1
             for pr in prs:
                 if not isinstance(pr, dict) or not isinstance(pr.get("number"), int):
                     raise Refused(f"repos/{repo}/pulls: unexpected response")
@@ -278,16 +299,22 @@ def run(root, get, via, repos=None, since_days=14, limit=30, ts=None, dry_run=Fa
                 if pr.get("state") != "open" and not was_open and (pr.get("updated_at") or "") < cutoff:
                     continue
                 seen += 1
-                rec = pr_record(get, repo, pr, ts)
+                cov["prs_read"] += 1
+                rec = pr_record(get, repo, pr, ts, partial)
                 prev = last.get((repo, rec["number"]))
                 if prev is None or not same(prev, rec):
                     found.append(rec)
-            new += found          # a repository that fails part-way contributes nothing
+            new += found          # a repository whose list fails part-way contributes nothing
             ok.append(repo)
+            coverage[repo] = cov
         except Refused as x:
             failed[repo] = str(x)[:300]
+    stats = dict(getattr(client, "stats", {}) or {})
     fetch = {"schema": SCHEMA, "kind": "fetch", "ts": ts, "via": via, "repos": repos, "ok": ok, "failed": failed,
-             "since_days": since_days, "prs_seen": seen, "appended": len(new)}
+             "since_days": since_days, "prs_seen": seen, "appended": len(new), "coverage": coverage,
+             "revisions": revisions, "client": {k: stats.get(k) for k in ("requests", "retries", "rate_limit_waits",
+                                                                           "memo_hits", "not_modified", "rate_limit_remaining",
+                                                                           "first_at", "last_at") if k in stats}}
     lines = new + [fetch]
     if dry_run:
         for x in lines:
@@ -314,20 +341,24 @@ def main(argv=None):
     ap.add_argument("--via", choices=["gh", "token"], help="gh CLI (default when installed) or a token from the environment")
     ap.add_argument("--token-env", help="environment variable holding the token (default GITHUB_TOKEN, then GH_TOKEN)")
     ap.add_argument("--dry-run", action="store_true", help="print the lines instead of appending them")
+    ap.add_argument("--max-wait", type=int, default=60, help="longest rate-limit wait, in seconds, before giving up (default 60)")
+    ap.add_argument("--cache", type=pathlib.Path, help="keep responses with their ETags here and revalidate them (holds PR text: "
+                                                         "keep it private); off by default")
     a = ap.parse_args(argv)
     via = a.via or ("gh" if shutil.which("gh") else "token")
     try:
         if via == "gh":
             if not shutil.which("gh"):
                 raise Refused("gh isn't installed; use --via token")
-            get = gh_getter()
+            transport = GH.gh_transport()
         else:
             names = [a.token_env] if a.token_env else ["GITHUB_TOKEN", "GH_TOKEN"]
             token = next((os.environ[n] for n in names if os.environ.get(n)), None)
             if not token:
                 raise Refused(f"no token in {' or '.join(names)}")
-            get = token_getter(token)
-        f = run(a.root, get, via, a.repo, a.since_days, a.limit, dry_run=a.dry_run)
+            transport = GH.token_transport(token)
+        client = GH.Client(transport, max_wait=a.max_wait, cache_dir=a.cache)
+        f = run(a.root, client, via, a.repo, a.since_days, a.limit, dry_run=a.dry_run)
     except Refused as x:
         sys.exit(f"refused: {x}")
     print(f"{f['prs_seen']} PR(s) read from {len(f['ok'])} repo(s), {f['appended']} changed line(s) "

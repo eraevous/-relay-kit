@@ -395,7 +395,8 @@ def compose_extra(kind, cid, owner, proposer, full, text, scope, expect=None):
 
 # ---------------- pull requests, from relay-kit prs (HO-RK-20261105-SWK5) ----------------
 PRS_FILE = "governance/pr-state.jsonl"
-PRS_SCHEMA = "relay-kit/prs@1"
+PRS_SCHEMA = "relay-kit/prs@2"
+PRS_READS = {"relay-kit/prs@1", PRS_SCHEMA}
 PR_SECTIONS = ("what", "why", "how", "authorized")
 APPROVING = {"APPROVED", "COMMENTED", "CHANGES_REQUESTED"}
 
@@ -415,7 +416,7 @@ def read_pr_state(root):
         except json.JSONDecodeError:
             bad += 1
             continue
-        if not isinstance(x, dict) or x.get("schema") != PRS_SCHEMA:
+        if not isinstance(x, dict) or x.get("schema") not in PRS_READS:
             bad += 1
             continue
         if x.get("kind") == "pr" and isinstance(x.get("repo"), str) and isinstance(x.get("number"), int):
@@ -423,11 +424,15 @@ def read_pr_state(root):
         elif x.get("kind") == "fetch":
             failed = x.get("failed") if isinstance(x.get("failed"), dict) else {}
             for r in x.get("repos") or []:
-                f = fetches.setdefault(r, {"repo": r, "last_ok": None, "last_try": None, "error": None, "since_days": None})
+                f = fetches.setdefault(r, {"repo": r, "last_ok": None, "last_try": None, "error": None, "since_days": None,
+                                           "partial": 0, "more_available": None})
                 f["last_try"] = x.get("ts")
                 if r in (x.get("ok") or []):
                     f["last_ok"], f["error"] = x.get("ts"), None
                     f["since_days"] = x.get("since_days") if isinstance(x.get("since_days"), int) else None
+                    cov = (x.get("coverage") or {}).get(r) if isinstance(x.get("coverage"), dict) else None
+                    f["partial"] = len(cov.get("partial") or []) if isinstance(cov, dict) else 0
+                    f["more_available"] = cov.get("more_available") if isinstance(cov, dict) else None
                 else:
                     f["error"] = str(failed.get(r) or "failed")[:200]
         else:
@@ -507,7 +512,8 @@ def pr_items(ps, owner, settings, full):
             "missing": [k for k in PR_SECTIONS if not isinstance(secs.get(k), str)],
             "truncated": list(x.get("truncated") or []),
             "reviews": reviews, "reviewers_counted": len(ids), "other_family": other,
-            "ci": {"state": ci.get("state") or "none", "failing": list(ci.get("failing") or [])}})
+            "ci": {"state": ci.get("state") or "none", "failing": list(ci.get("failing") or [])},
+            "unread": [u for u in x.get("unread") or [] if u in ("reviews", "ci")]})
     group = {"open": 0, "merged": 2, "closed": 2}
     items.sort(key=lambda i: (i["repo"], i["number"]))
     items.sort(key=lambda i: str(i["merged_at"] or i["updated_at"] or ""), reverse=True)   # newest first within a group
@@ -1335,7 +1341,8 @@ def ask_block(c, pr_fetched_at=None):
             f'<ul class="effects">{effects}</ul>{dflt}{theirs}{dl(facts)}{over}</div>')
 
 
-CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running", "none": "no CI"}
+CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running", "none": "no CI",
+           "unknown": "CI not read (the reader couldn't get it)"}
 VERDICT = {"APPROVED": "approved", "COMMENTED": "commented", "CHANGES_REQUESTED": "changes requested", "DISMISSED": "dismissed"}
 
 
@@ -1362,10 +1369,11 @@ def pr_card(x, full):
                    + "</dl></details>" if rest else ""))
     elif not full:
         secs = f'<p class="hint">Sections present: {e(", ".join(x["present"]) or "none")} (text left out: --content metadata)</p>'
-    revs = ", ".join(f'{r["who"]} ({VERDICT.get(r["verdict"], str(r["verdict"]).lower())}'
+    revs = "not read (the reader couldn't get them)" if "reviews" in x.get("unread", []) else ", ".join(f'{r["who"]} ({VERDICT.get(r["verdict"], str(r["verdict"]).lower())}'
                      + (f', body says “{r["stated"]}”' if r.get("stated") else "")
                      + f'; {r["family"] or "family unknown"})' for r in x["reviews"]) or "none yet"
-    other = (("no reviews yet" if not x["reviews"] else "no counted reviews (only dismissed)") if not x["reviewers_counted"] else
+    other = ("not known (reviews not read)" if "reviews" in x.get("unread", []) else
+             ("no reviews yet" if not x["reviews"] else "no counted reviews (only dismissed)") if not x["reviewers_counted"] else
              {True: "yes", False: "no", None: "can't tell (a family is unknown)"}[x["other_family"]])
     ci = CI_WORD.get(x["ci"]["state"], x["ci"]["state"]) + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] else "")
     return (f'<article class="card pr pr-{e(st)}"><header><span class="badge pr-st">{e(st)}</span>{link}'
@@ -1653,8 +1661,9 @@ more than one line is shown with all of them.</p>
                                + "</tr>" for r in fetch_rows) + "</tbody></table></div>")
         okd = [f["last_ok"] for f in prd["fetches"] if f["last_ok"]]
         nfail = sum(1 for f in prd["fetches"] if f["error"])
+        npart = sum(f.get("partial") or 0 for f in prd["fetches"])
         fetch_sum = (f'{len(prd["fetches"])} repositories, last read <span class="age" data-ts="{e(max(okd))}">{e(max(okd)[:16].replace("T", " "))}</span>'
-                     if okd else f'{len(prd["fetches"])} repositories, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "")
+                     if okd else f'{len(prd["fetches"])} repositories, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "") + (f' · <b class="warn">{npart} partial read(s)</b>' if npart else "")
         days = sorted({f["since_days"] for f in prd["fetches"] if f.get("since_days")}) or [14]
         older = sum(1 for x in prd["items"] if not x["recent"])
         groups = [("Open", [x for x in prd["items"] if x["state"] == "open"]),

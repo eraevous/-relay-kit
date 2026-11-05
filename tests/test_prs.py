@@ -1,4 +1,4 @@
-"""Tests for tools/prs.py (relay-kit/prs@1) and the Pull requests surface, themes and landing of
+"""Tests for tools/prs.py (relay-kit/prs@2) and the Pull requests surface, themes and landing of
 tools/cockpit.py (relay-kit/cockpit@4). Standard library only; synthetic data only; no network: the
 GitHub reader is given a fake `get`.
 
@@ -55,6 +55,8 @@ class FakeGitHub:
         repo = "/".join(path.split("/")[1:3])
         if repo in self.broken:
             raise prs.Refused(f"GET {path}: HTTP 404")
+        if path.count("/") == 2:
+            return {"default_branch": "main", "pushed_at": "2026-11-03T09:30:00Z"}
         if "/pulls?" in path:
             return self.prs.get(repo, [])
         if "/reviews" in path:
@@ -144,7 +146,7 @@ class PrsTests(unittest.TestCase):
     def test_newline(self):
         """prs: appending to a file without a final newline doesn't join two lines"""
         path = self.root / prs.OUT
-        path.write_text('{"schema": "relay-kit/prs@1", "kind": "fetch", "ts": "2026-11-01T00:00:00Z", "repos": [], "ok": [], "failed": {}}',
+        path.write_text('{"schema": "relay-kit/prs@2", "kind": "fetch", "ts": "2026-11-01T00:00:00Z", "repos": [], "ok": [], "failed": {}}',
                         encoding="utf-8")
         prs.run(self.root, FakeGitHub({"example/synthetic": [gh_pr(7)]}), "test", ["example/synthetic"], ts="2026-11-03T12:00:00Z")
         self.assertEqual([x["kind"] for x in lines(self.root)], ["fetch", "pr", "fetch"])
