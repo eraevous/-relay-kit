@@ -18,7 +18,7 @@ The page is deterministic: two runs over the same records give byte-identical fi
 date on it is "generated from records as of" the latest timestamp found in the records, and
 "last 7 days" and "older than N days" are measured back from that timestamp, never from today.
 
-The layout follows Kate's Cockpit v0.4 prototype (2026-11-04): a left rail of numbered surfaces,
+The layout follows the Cockpit v0.4 prototype (2026-11-04): a left rail of numbered surfaces,
 the dark instrument-panel palette, and its vocabulary ("Inquiry is not authority. Capture is not
 commitment."; "Settle this choice?"; "Move from Drift to Run?"). `--brand` sets the name in the
 header (default `relay-kit`; or `brand` in `governance/cockpit.json`).
@@ -176,7 +176,7 @@ Rebuild and redeploy whenever the records change; the page never updates itself.
 
 ## Restoration candidates from v0.4
 
-Parts of Kate's prototype that were dropped because the records can't feed them yet. Each needs a
+Parts of the v0.4 prototype that were dropped because the records can't feed them yet. Each needs a
 record format (and a decision) before it can come back:
 
 - **Choices lifecycle**: Open / Leaning / Settled / Reconsider / Deferred, with alternatives,

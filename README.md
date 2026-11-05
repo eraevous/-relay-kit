@@ -175,7 +175,7 @@ One static page over your records, to see what waits on you before you start:
 
     relay-kit cockpit --root path/to/records --out ~/cockpit --weekly-tokens 5000000
 
-`index.html` (self-contained, works offline and on a phone) has nine surfaces after Kate's Cockpit
+`index.html` (self-contained, works offline and on a phone) has nine surfaces after the Cockpit
 v0.4 prototype; the ones drawn from the records are **Choices** (proposed decisions, handoffs that
 need you, open challenges, each with Accept / Reject / Defer buttons that only compose a paste-ready
 `ledger append` or `handoff set` line with `<<REQUIRED>>` placeholders for your own words: the page

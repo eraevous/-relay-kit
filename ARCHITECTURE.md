@@ -79,7 +79,7 @@ missing outputs, hidden steps) so that missing is never read as empty.
 
 **The cockpit** ([tools/cockpit.py](tools/cockpit.py), `relay-kit/cockpit@1`) is a third reader on
 the same export readers: it renders the records into one static page (Choices, Topology, Budget,
-Run/Drift and the other surfaces of Kate's v0.4 design) plus the `cockpit.json` it was built from.
+Run/Drift and the other surfaces of the v0.4 design prototype) plus the `cockpit.json` it was built from.
 It keeps DEC-019 by construction: its buttons only compose lines for the owner to paste, so the
 ledger still changes only through a human-run `ledger_append` or `handoff set`. Its one new record
 is `governance/budget.jsonl`, append-only, written by `relay-kit budget-append`, never by the page.

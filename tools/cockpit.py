@@ -781,7 +781,7 @@ def table(head, rows, cls=""):
 SURFACES = [("overview", "◈", "Overview"), ("intake", "✳", "Idea intake"), ("questions", "❖", "Questions"),
             ("choices", "⌁", "Choices"), ("topology", "◎", "Topology"), ("budget", "◉", "Budget control"),
             ("lanes", "▦", "Project lanes"), ("run", "◇", "Run commitments"), ("review", "◷", "Review")]
-CREDIT = "design after Kate's Cockpit v0.4 prototype (2026-11-04)"
+CREDIT = "design after the Cockpit v0.4 prototype (2026-11-04)"
 
 
 def head(n, eyebrow, title, lede, tag):
