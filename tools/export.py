@@ -48,8 +48,9 @@ TEXT_FIELDS = {
     "decision": ["decision", "scope", "basis", "locator", "evidence", "note", "not_covered", "(any other string field)"],
     "challenge": ["concern", "resolution", "check", "fix", "scope", "evidence", "(any other string field)"],
 }
-LEDGER_STRUCTURAL = {"id", "date", "status", "decider", "recorded_by", "raised_by", "proposed_by", "supersedes", "resolves",
-                     "revokes", "amends", "effective_from", "effective_until"}
+LEDGER_STRUCTURAL = {"id", "date", "status", "decider", "recorded_by", "raised_by", "proposed_by", "supersedes", "resolves"}
+# amends, revokes and effective dates can hold free text: in metadata mode they are hashed like prose; the
+# record's derived fields (closed_by, amended_by, applicability) carry only ids and states
 KNOWN_FIELDS = {
     "decision": {"id", "date", "status", "decision", "scope", "decider", "basis", "locator", "evidence",
                  "proposed_by", "note", "recorded_by", "not_covered", "supersedes", "ask", "amends",
@@ -683,8 +684,7 @@ def ledger_records(rd, name, kind):
     fh = rd.files[rd.rel(p)]["sha256"]
     recs, seen = [], {}
     lc = load_lifecycle()
-    dated = sorted(str(r.get("date")) for _, _, r in rows if re.match(r"^\d{4}-\d{2}-\d{2}$", str(r.get("date") or "")))
-    as_of = dated[-1] + "T23:59:59Z" if dated else None   # the ledger's own latest date, never the clock
+    as_of = lc.ledger_as_of([r for _, _, r in rows]) if kind == "decision" else None   # the ledger's own latest date, never the clock
     res = lc.resolve([r for _, _, r in rows], [], as_of) if kind == "decision" else lc.resolve([], [r for _, _, r in rows])
     table = res["decisions"] if kind == "decision" else res["challenges"]
     own = {}
@@ -712,6 +712,8 @@ def ledger_records(rd, name, kind):
             rec["applicability"] = r_.get("applicability")
             rec["proposed_replacements"] = r_.get("proposed_replacements") or []
             rec["amended_by"] = [a["id"] for a in r_.get("amended_by") or []]
+            rec["revocations_pending"] = [a["id"] for a in r_.get("revocations_pending") or []]
+            rec["applicability_as_of"] = as_of
         else:
             rec["open"] = bool(r_.get("open"))
         rec["closed_by"] = [c["id"] for c in r_.get("closed_by") or []]

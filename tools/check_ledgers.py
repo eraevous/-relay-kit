@@ -160,7 +160,7 @@ def check_decisions(rows):
                 if not str(r.get(f, "")).strip():
                     out.append(f"{where}: '{f}' is required once a decision isn't just proposed")
         sup = r.get("supersedes")
-        if sup and sup not in ids:
+        if isinstance(sup, str) and sup and sup not in ids:
             out.append(f"{where}: supersedes unknown {sup}")
         out += check_ask(where, r.get("ask"))
     return out
@@ -171,7 +171,7 @@ def check_challenges(rows):
     seen = set()
     for n, r in rows:
         res = r.get("resolves")
-        if res and res not in seen:
+        if isinstance(res, str) and res and res not in seen:
             out.append(f"challenges.jsonl:{n}: resolves {res!r}, which isn't an earlier challenge")
         seen.add(r.get("id"))
         where = f"challenges.jsonl:{n}"
@@ -191,26 +191,48 @@ def check_challenges(rows):
     return out
 
 
-def check_transitions(dec_rows, ch_rows):
+def check_transitions(dec_rows, ch_rows, new=None):
     """relay-kit/lifecycle@1: transitions that would take no effect (self, forward, a proposal or an open
-    challenge closing something, a rejected/superseded line retiring an adopted decision, a malformed
-    date). Unknown decision targets and every bad challenge target are already reported above."""
+    challenge closing something, a rejected/superseded line retiring an adopted decision, a non-text
+    target, a malformed revokes/amends/date). Unknown decision targets and bad challenge targets are
+    already reported by the checks above. With `new` (ids added since --base), problems on older lines
+    are returned separately as warnings: an append-only ledger can't take them back, and they mustn't
+    block every later append."""
     res = LC.resolve([r for _, r in dec_rows], [r for _, r in ch_rows])
-    line = {("decisions.jsonl", r.get("id")): n for n, r in dec_rows}
-    line.update({("challenges.jsonl", r.get("id")): n for n, r in ch_rows})
-    out = []
+    line = {}
+    for n, r in dec_rows:
+        line.setdefault(("decisions.jsonl", r.get("id")), n)
+    for n, r in ch_rows:
+        line.setdefault(("challenges.jsonl", r.get("id")), n)
+    out, warn = [], []
     for p in res["problems"]:
         name = "challenges.jsonl" if str(p["id"]).startswith("CH-") else "decisions.jsonl"
         if p["rule"] == "unknown" and p["field"] == "supersedes":
             continue
         if name == "challenges.jsonl" and p["rule"] in ("unknown", "forward", "self"):
             continue
-        out.append(f"{name}:{line.get((name, p['id']), '?')}: {p['message']}")
-    for n, r in dec_rows:
-        for f in ("revokes", "amends"):
-            v = r.get(f)
-            if v is not None and not LC.refs(v):
-                out.append(f"decisions.jsonl:{n}: {f} must be a DEC id, a list of them, or {{\"id\": ..., \"clauses\": [...]}}")
+        msg = f"{name}:{line.get((name, p['id']), '?')}: {p['message']}"
+        (warn if new is not None and p["id"] not in new else out).append(msg)
+    return out, warn
+
+
+def new_ids(path, base):
+    """Ids of the lines added since base (None when base can't be read: then every line counts as new)."""
+    if not path.exists():
+        return set()
+    try:
+        rel = subprocess.run(["git", "-C", str(path.parent), "ls-files", "--full-name", path.name],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        old = subprocess.run(["git", "-C", str(path.parent), "show", f"{base}:{rel}"],
+                             capture_output=True, text=True, check=True).stdout if rel else ""
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    out = set()
+    for ln in path.read_text(encoding="utf-8").splitlines()[len(old.splitlines()):]:
+        try:
+            out.add(json.loads(ln).get("id"))
+        except (ValueError, AttributeError):
+            continue
     return out
 
 
@@ -271,12 +293,20 @@ def main():
     problems = []
     dec_rows, p = load(a.dir / "decisions.jsonl"); problems += p
     ch_rows, p = load(a.dir / "challenges.jsonl"); problems += p
-    problems += check_decisions(dec_rows) + check_challenges(ch_rows) + check_transitions(dec_rows, ch_rows)
+    problems += check_decisions(dec_rows) + check_challenges(ch_rows)
+    new = None
+    if a.git:
+        nd, nc = new_ids(a.dir / "decisions.jsonl", a.base), new_ids(a.dir / "challenges.jsonl", a.base)
+        new = None if nd is None or nc is None else nd | nc
+    tp, warnings = check_transitions(dec_rows, ch_rows, new)
+    problems += tp
     if a.git:
         for f in ("decisions.jsonl", "challenges.jsonl"):
             if (a.dir / f).exists():
                 problems += check_append_only(a.dir / f, a.base)
                 problems += check_merge_attr(a.dir / f) + check_new_recorders(a.dir / f, a.base)
+    for x in warnings:
+        print("WARNING", x, "(an earlier line: it takes no effect; append a correcting line)")
     for x in problems:
         print("PROBLEM", x)
     print(f"{len(dec_rows)} decision(s), {len(ch_rows)} challenge(s), {len(problems)} problem(s)")
