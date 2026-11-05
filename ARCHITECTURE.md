@@ -36,7 +36,8 @@ Registry: [governance/contracts.json](governance/contracts.json).
 | `relay-kit/paste-markers@1` | `FROM:` … `END FROM` and `>"""` | [docs/paste-markers.md](docs/paste-markers.md) |
 | `relay-kit/relay-result@1` | relay statuses: done / unconfirmed / pending | [chat-relay](skills/chat-relay/SKILL.md) |
 | `relay-kit/export@1` | read-only export: records file and coverage manifest | [docs/export.md](docs/export.md) |
-| `relay-kit/cockpit@2` | static control surface: index.html and the cockpit.json it was built from | [docs/cockpit.md](docs/cockpit.md) |
+| `relay-kit/cockpit@3` | static control surface: index.html and the cockpit.json it was built from | [docs/cockpit.md](docs/cockpit.md) |
+| `relay-kit/prs@1` | governance/pr-state.jsonl: pull-request state read from GitHub at build time | [docs/prs.md](docs/prs.md) |
 | `relay-kit/mcp@1` | read-only MCP server over the records (stdio) | [docs/mcp.md](docs/mcp.md) |
 
 **How a contract changes:** only by a new version. The spec, every implementer and the
@@ -79,12 +80,16 @@ proposal or an adopted decision, using the ledger's status rather than inferring
 manifest lists what the records refer to but don't contain (uncaptured threads and sessions,
 missing outputs, hidden steps) so that missing is never read as empty.
 
-**The cockpit** ([tools/cockpit.py](tools/cockpit.py), `relay-kit/cockpit@2`) is a third reader on
+**The cockpit** ([tools/cockpit.py](tools/cockpit.py), `relay-kit/cockpit@3`) is a third reader on
 the same export readers: it renders the records into one static page (Choices, Topology, Budget,
 Run/Drift and the other surfaces of the v0.4 design prototype) plus the `cockpit.json` it was built from.
 It keeps DEC-019 by construction: its buttons only compose lines for the owner to paste, so the
 ledger still changes only through a human-run `ledger_append` or `handoff set`. Its one new record
 is `governance/budget.jsonl`, append-only, written by `relay-kit budget-append`, never by the page.
+**The pull-request reader** ([tools/prs.py](tools/prs.py), `relay-kit/prs@1`) is the one part of the kit that
+reads pull requests from GitHub, and only when someone runs it: it appends what changed to
+`governance/pr-state.jsonl`. The cockpit renders that file; any other reader (a telemetry collector, say)
+should read the file rather than GitHub again. It copies PR body sections verbatim and summarises nothing.
 **The MCP server** ([tools/mcp_server.py](tools/mcp_server.py), `relay-kit/mcp@1`) is the same kind
 of reader, reached over the Model Context Protocol on stdio instead of the command line. It reuses
 export@1's readers, so every result carries the same evidence classes, plus a provenance line with
