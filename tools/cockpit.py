@@ -118,17 +118,12 @@ def read_budget(root, rd):
             r = json.loads(line)
             if not isinstance(r, dict):
                 raise ValueError("not an object")
-            for pr in BG.problems(r):    # relay-kit/budget@2 fields
+            for pr in BG.row_problems(r):    # the same check every budget reader makes
                 raise ValueError(pr)
             raws[n] = line.decode("utf-8", "replace")
             sp = ex.span(r.get("ts"))
             if not sp:
                 raise ValueError("ts isn't an ISO time")
-            if r.get("window") not in ("weekly", "session"):
-                raise ValueError("window must be weekly or session")
-            for f in ("tokens_in", "tokens_out"):
-                if not isinstance(r.get(f), int) or isinstance(r.get(f), bool) or r[f] < 0:
-                    raise ValueError(f"{f} must be an integer >= 0")
         except ValueError as e:
             bad.append({"line": n, "reason": str(e)})
             continue
@@ -1139,7 +1134,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         "unreadable": sorted(rd.unreadable, key=lambda x: str(x["path"])),
         "limits": LIMITS,
         "snapshot": snapshot_of(rd.root, as_of),
-        "telemetry": TEL.derive(rd.root),
+        "telemetry": TEL.derive(rd.root, lane=lane, content=content, as_of=as_of),
         "transitions": {"lifecycle": "relay-kit/lifecycle@1",
                         "problems": sorted(({"id": r["fields"].get("id"), "message": m} for r in decisions_all + challenges_all
                                             for m in r.get("transition_problems") or []), key=lambda x: str(x["id"])),
@@ -1712,12 +1707,15 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
         d = lambda x: f'median {x["median"]}, p90 {x["p90"]}, n {x["n"]}' if x and x.get("n") else "unknown"
         if k == "compute_consumption":
             v = "; ".join(f"{mm}: {fmt_n(n)}" for mm, n in m["tokens_by_method"].items()) or "unknown"
-            return f'{v} tokens over {m["active_days"]} active day(s), {m["lines"]} line(s)'
+            return (f'{v} tokens over {m["active_days"]} active day(s), {m["lines"]} line(s)'
+                    + (f'; {m["incomplete_lines"]} incomplete (lower bounds)' if m.get("incomplete_lines") else "")
+                    + (f'; {len(m["invalid_lines"])} invalid line(s) not counted' if m.get("invalid_lines") else "")
+                    + (f'; measured and estimated lines for the same actor: {", ".join(m["possible_double_count_actors"])}' if m.get("possible_double_count_actors") else ""))
         if k == "delivery_throughput":
             weeks = "; ".join(f'{w}: {sum(r.values())}' for w, r in m["merged_per_week"].items())
             return f'{m["merged"]} merged ({weeks or "none"}); {m["abandoned"]} abandoned'
         if k == "lead_time":
-            return d(m["hours"]) + " (hours)"
+            return d(m["hours"]) + " (hours)" + (f'; excluded: {m["excluded"]}' if m.get("excluded") else "")
         if k == "review_burden":
             return d(m["rounds"]) + " change-request rounds per merged PR"
         if k == "post_merge_remediation":
@@ -1726,14 +1724,15 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
         if k == "surviving_changes":
             return f'{m["count"]} of {m["cohort"]}' if m.get("count") is not None else (m.get("unknown") or "unknown")
         if k == "human_intervention":
-            return f'{m["minutes_reported"]} min from {m["lines"]} line(s)' if m.get("minutes_reported") is not None else "unknown"
+            return f'{m["minutes_recorded"]} min from {m["lines"]} line(s)' if m.get("minutes_recorded") is not None else "unknown"
         if k == "measurement_coverage":
             return (f'{m["with_measured_budget_line"]} of {m["agent_sessions_in_handoffs"]} agent sessions measured; '
                     f'budget lines {", ".join(f"{a}: {b}" for a, b in m["budget_lines_by_method"].items()) or "none"}; '
-                    f'{len(m["repositories_read"])} repositories read')
+                    f'{len(m["repositories_read"])} repositories read'
+                    + (f'; more PRs than read in {", ".join(m["repositories_with_more_than_read"])}' if m.get("repositories_with_more_than_read") else ""))
         if k == "coordination_loss":
             return (f'{len(m["stale_handoffs"])} stale handoff(s), {len(m["cancelled_handoffs"])} cancelled, '
-                    f'{len(m["overlapping_claims"])} overlapping claim(s), {len(m["ledger_conflicts"])} ledger conflict(s); '
+                    f'{m["overlapping_claim_count"] if m.get("overlapping_claim_count") is not None else "unknown"} overlapping claim(s), {len(m["ledger_conflicts"])} ledger conflict(s); '
                     f'reconciliation time unknown')
         return ""
     tel_rows = [[m["metric"], m["label"], tel_value(m), m["definition"]] for m in tel["metrics"]]

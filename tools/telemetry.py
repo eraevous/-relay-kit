@@ -44,10 +44,12 @@ LC = _load("relaykit_lifecycle_for_telemetry", "lifecycle.py")
 
 
 def t(s):
+    """An ISO time with a zone as UTC; a time without a zone isn't guessed at."""
     try:
-        return dt.datetime.fromisoformat(str(s).replace("Z", "+00:00")).astimezone(dt.timezone.utc)
+        d = dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
+    return d.astimezone(dt.timezone.utc) if d.tzinfo else None
 
 
 def iso(d):
@@ -70,93 +72,136 @@ def metric(name, definition, label, version=1, **body):
 
 def read_prs(root):
     p = pathlib.Path(root) / PRS_FILE
-    latest, fetches, bad = {}, {}, 0
-    if not p.is_file():
+    if not p.is_file() or p.is_symlink():
         return None
+    latest, fetches, cover, bad = {}, {}, {}, 0
     for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             x = json.loads(ln) if ln.strip() else None
         except ValueError:
             bad += 1
             continue
+        if x is None:
+            continue
         if not isinstance(x, dict) or x.get("schema") not in PRS_READS:
-            bad += 0 if x is None else 1
+            bad += 1
             continue
         if x.get("kind") == "pr" and isinstance(x.get("number"), int):
             latest[(x.get("repo"), x["number"])] = x
         elif x.get("kind") == "fetch":
             for r in x.get("ok") or []:
                 fetches[r] = x.get("ts")
-    return {"latest": latest, "fetches": fetches, "unreadable": bad}
+                c = (x.get("coverage") or {}).get(r) if isinstance(x.get("coverage"), dict) else None
+                cover[r] = {"since_days": x.get("since_days"), "more_available": (c or {}).get("more_available"),
+                            "partial_reads": len((c or {}).get("partial") or [])}
+    return {"latest": latest, "fetches": fetches, "coverage": cover, "unreadable": bad}
 
 
-def derive(root):
+def session_of(actor):
+    """'claude:aec#01ABC' -> ('claude:aec', '01ABC'); the session is what is counted, not the spelling."""
+    a = str(actor or "").split()[0] if actor else ""
+    lane, _, sess = a.partition("#")
+    return lane, sess or None
+
+
+def remediation_link(y, x):
+    """y explicitly reverts or fixes x: a fix verb right before x's reference in y's title or sections,
+    or a 'Reverts owner/repo#N' line. References to another repository don't count."""
+    n, repo = x["number"], re.escape(str(x.get("repo") or ""))
+    ref = rf"(?:(?<![\w/.-]){repo}#{n}|(?<![\w/#.-])#{n}|github\.com/{repo}/pull/{n})(?!\d)"
+    verb = r"(?:revert(?:s|ed)?|hotfix(?:es|ed)?(?:\s+for)?|fix(?:es|ed)?(?:\s+(?:for|(?:the\s+|a\s+)?regression\s+(?:from|in|introduced\s+(?:by|in))))?)"
+    text = " ".join([str(y.get("title") or "")] + [str(v) for v in (y.get("body_sections") or {}).values()])
+    return bool(re.search(rf"\b{verb}\s+{ref}", text, re.I) or re.search(rf"^\s*Reverts\s+{ref}", text, re.I | re.M))
+
+
+def derive(root, lane=None, content="full", as_of=None):
+    """The view. lane: only that lane's handoffs, sessions and budget lines (pull requests are per
+    repository, not per lane, and are all shown). content='metadata': nothing derived from free text
+    (no PR body or handoff text is read; those figures are unknown). as_of: the time to measure ages
+    from (the cockpit passes its own, so the page and the panel agree)."""
     root = pathlib.Path(root)
+    full = content == "full"
     rd = ex.Reader(root)
     rd.config()
     led = ex.load_ledger()
     _, decisions = ex.ledger_records(rd, "decisions.jsonl", "decision")
     _, challenges = ex.ledger_records(rd, "challenges.jsonl", "challenge")
     _, handoffs, _ = ex.handoff_records(rd, led)
+    in_lane = lambda r: lane is None or any(rd.lanes.matches(lane, l) for l in (r.get("lanes") or [r.get("lane")]) if l)
+    actor_in_lane = lambda a: lane is None or bool(rd.lanes.lane(session_of(a)[0]) and rd.lanes.matches(lane, rd.lanes.lane(session_of(a)[0])))
+    handoffs = [h for h in handoffs if in_lane(h)]
     prs = read_prs(root)
     bpath = root / "governance" / "budget.jsonl"
     brows, bbad = BG.parse(bpath.read_text(encoding="utf-8")) if bpath.is_file() and not bpath.is_symlink() else ([], [])
+    invalid = [{"line": n, "reasons": BG.row_problems(o)} for n, _, o in brows if BG.row_problems(o)] + \
+              [{"line": n, "reasons": [r]} for n, r in bbad]
+    brows = [(n, raw, o) for n, raw, o in brows if not BG.row_problems(o)]      # the lines every reader accepts
     kept4, corr = BG.effective(brows) if brows else ([], {"replaced": {}, "children": {}, "conflicts": [], "invalid": [], "duplicates": [], "methods": {}})
     kept4 = BG.exclude_children(kept4, corr)            # all-time view: a child inside a counted parent isn't added again
-    kept = [(n, i, dict(o, ts=at or o.get("ts"))) for n, i, o, at in kept4]   # counted at the replaced line's time
+    kept = [(n, i, dict(o, ts=at or o.get("ts"))) for n, i, o, at in kept4 if actor_in_lane(o.get("actor"))]
 
-    # as of: the newest time anywhere in what was read, never the clock
-    stamps = [t(x.get("ts")) for x in (prs or {"latest": {}})["latest"].values()]
-    stamps += [t(v) for v in (prs or {"fetches": {}})["fetches"].values()]
-    stamps += [t(o.get("ts")) for _, _, o in kept]
-    stamps += [t(e["at"]) for h in handoffs for e in h["log"]]
-    stamps = [s for s in stamps if s]
-    if not stamps:   # only dated ledger lines: the end of the latest date
-        stamps = [t(f"{r['fields'].get('date')}T23:59:59Z") for r in decisions + challenges if r["fields"].get("date")]
+    # as of: given by the caller, else the newest record time (never the clock, and never a pr-state
+    # fetch time, which is when the reader happened to run); times past the newest fetch are flagged
+    future = []
+    if as_of:
+        now = t(as_of)
+    else:
+        stamps = [t(e["at"]) for h in handoffs for e in h["log"]] + [t(o.get("ts")) for _, _, o in kept]
+        stamps += [t(x.get("merged_at") or x.get("updated_at")) for x in (prs or {"latest": {}})["latest"].values()]
+        last_fetch = max((t(v) for v in (prs or {"fetches": {}})["fetches"].values() if t(v)), default=None)
+        if last_fetch:
+            future = [iso(s) for s in stamps if s and s > last_fetch + dt.timedelta(days=1)]
+            stamps = [s for s in stamps if s and s <= last_fetch + dt.timedelta(days=1)]
         stamps = [s for s in stamps if s]
-    as_of = max(stamps) if stamps else None
-    out = {"schema": SCHEMA, "as_of": iso(as_of), "derived_from": {
-        "budget": "governance/budget.jsonl (relay-kit/budget@2)" if brows else None,
-        "pull_requests": PRS_FILE + " (relay-kit/prs@2)" if prs else None,
-        "handoffs": "handoffs/ (relay-kit/handoff@2)", "ledgers": "governance/*.jsonl (relay-kit/lifecycle@1)"},
-        "notes": ["A derived view: rebuild it, don't edit it.",
-                  "No composite score and no targets: DEC-100's '2-3 points' needs a baseline that doesn't exist yet.",
-                  "A merged pull request is not a production deployment; remediation here is not DORA's Change Failure Rate."],
-        "metrics": []}
+        if not stamps:
+            stamps = [t(f"{r['fields'].get('date')}T23:59:59Z") for r in decisions + challenges if r["fields"].get("date")]
+            stamps = [s for s in stamps if s]
+        now = max(stamps) if stamps else None
+    out = {"schema": SCHEMA, "as_of": iso(now), "query": {"lane": lane, "content": content},
+           "derived_from": {"budget": "governance/budget.jsonl (relay-kit/budget@2)" if bpath.is_file() else None,
+                            "pull_requests": PRS_FILE + " (relay-kit/prs@2)" if prs else None,
+                            "handoffs": "handoffs/ (relay-kit/handoff@2)", "ledgers": "governance/*.jsonl (relay-kit/lifecycle@1)"},
+           "notes": ["A derived view: rebuild it, don't edit it.",
+                     "No composite score and no targets: DEC-100's '2-3 points' needs a baseline that doesn't exist yet.",
+                     "A merged pull request is not a production deployment; remediation here is not DORA's Change Failure Rate."]
+           + ([f"Times after the last pull-request read were left out of as_of: {', '.join(future[:5])}"] if future else []),
+           "metrics": []}
     M = out["metrics"]
 
     # ---- compute consumption ----
     cats = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
-    by_method, by_actor, days, unknown_split = {}, {}, set(), 0
+    by_method, by_actor, days, lines_, incomplete = {}, {}, set(), 0, 0
     for _, _, o in kept:
-        if o.get("window") != "session":
+        tot = o["tokens_in"] + o["tokens_out"]
+        if o.get("window") != "session" or tot == 0:     # a minutes-only line isn't compute
             continue
+        lines_ += 1
         m = o.get("method") if o.get("method") in BG.METHODS else "unlabelled"
-        tot = int(o.get("tokens_in") or 0) + int(o.get("tokens_out") or 0)
         by_method[m] = by_method.get(m, 0) + tot
-        by_actor[str(o.get("actor"))] = by_actor.get(str(o.get("actor")), 0) + tot
+        by_actor.setdefault(str(o.get("actor")), {}).setdefault(m, 0)
+        by_actor[str(o.get("actor"))][m] += tot
         d = t(o.get("interval_end") or o.get("ts"))
         if d:
             days.add(d.date().isoformat())
+        incomplete += 1 if o.get("complete") is False else 0
         td = o.get("tokens_detail")
-        if isinstance(td, dict):
+        if m == "measured" and isinstance(td, dict):
             for k in cats:
                 cats[k] += int(td.get(k) or 0)
-        else:
-            unknown_split += 1
     labels = set(by_method)
+    mixed_actors = sorted(a for a, ms in by_actor.items() if "measured" in ms and len(ms) > 1)
     M.append(metric("compute_consumption",
                     "Input and output tokens per uniquely identified execution interval (budget@2 session lines, corrections "
-                    "and included child runs applied), by how each was measured; cache reads apart. Unattributed use stays "
-                    "unattributed.", "+".join(sorted(labels)) if labels else "unknown",
+                    "and included child runs applied), by how each was measured; cache reads apart, from measured lines' "
+                    "tokens_detail. Unattributed use stays unattributed.", "+".join(sorted(labels)) if labels else "unknown",
                     tokens_by_method=dict(sorted(by_method.items())), tokens_by_actor=dict(sorted(by_actor.items())),
-                    categories_from_measured_detail=cats, lines_without_category_split=unknown_split,
-                    active_days=len(days), lines=len([1 for _, _, o in kept if o.get("window") == "session"]),
+                    categories_from_measured_lines=cats, lines=lines_, incomplete_lines=incomplete, active_days=len(days),
                     corrections_applied=len(corr["replaced"]), correction_conflicts=corr["conflicts"],
-                    budget_lines_taking_no_effect=corr["invalid"],
+                    budget_lines_taking_no_effect=corr["invalid"], invalid_lines=invalid,
+                    possible_double_count_actors=mixed_actors,
                     unknown=None if by_method else "no budget lines"))
 
-    # ---- pull-request metrics ----
+    # ---- pull-request metrics (per repository; not lane-filtered) ----
     items = list((prs or {"latest": {}})["latest"].values())
     merged = [x for x in items if x.get("state") == "merged" and t(x.get("merged_at"))]
     abandoned = [x for x in items if x.get("state") == "closed" and not x.get("merged_at")]
@@ -166,13 +211,22 @@ def derive(root):
         k = f"{y}-W{w:02d}"
         weeks.setdefault(k, {}).setdefault(x["repo"], 0)
         weeks[k][x["repo"]] += 1
-    M.append(metric("delivery_throughput", "Merged pull requests per ISO calendar week, by repository; abandoned (closed, "
-                    "not merged) counted apart. A proxy for delivered value.", "proxy",
+    cover = (prs or {"coverage": {}})["coverage"]
+    M.append(metric("delivery_throughput", "Merged pull requests per ISO calendar week (UTC), by repository; abandoned (closed, "
+                    "not merged) counted apart. A proxy for delivered value. Only as complete as the reads: see read_window.", "proxy",
                     merged_per_week=dict(sorted(weeks.items())), merged=len(merged), abandoned=len(abandoned),
+                    read_window={r: c for r, c in sorted(cover.items())},
                     unknown=None if prs else "no governance/pr-state.jsonl: run relay-kit prs"))
-    lt = [(t(x["merged_at"]) - t(x.get("created_at"))).total_seconds() / 3600 for x in merged if t(x.get("created_at"))]
+    lt, no_created = [], 0
+    for x in merged:
+        c = t(x.get("created_at"))
+        if c:
+            lt.append((t(x["merged_at"]) - c).total_seconds() / 3600)
+        else:
+            no_created += 1
     M.append(metric("lead_time", "Wall-clock hours from pull request creation to merge (GitHub timestamps). Never human work time.",
-                    "measured", hours=dist(lt), unknown=None if lt else "no merged pull requests recorded"))
+                    "measured", hours=dist(lt), excluded={"no created_at": no_created} if no_created else {},
+                    unknown=None if lt else "no merged pull requests recorded"))
     rounds = []
     for x in merged:
         n = sum(1 for r in x.get("reviews") or [] if r.get("verdict") == "CHANGES_REQUESTED"
@@ -180,63 +234,61 @@ def derive(root):
         if "reviews" not in (x.get("unread") or []):
             rounds.append(n)
     M.append(metric("review_burden", "Change-request review rounds per merged pull request (GitHub's verdict, or a verdict "
-                    "stated at the start of a review posted as a comment); each implies a revision and a re-review.",
-                    "measured", rounds=dist(rounds), prs_with_unread_reviews=len(merged) - len(rounds),
+                    "stated at the start of a review posted as a comment); each implies a revision and a re-review. Reviews "
+                    "posted as plain comments without a stated verdict aren't counted.",
+                    "measured", rounds=dist(rounds), excluded={"reviews unread": len(merged) - len(rounds)} if len(merged) > len(rounds) else {},
                     unknown=None if rounds else "no merged pull requests with readable reviews"))
 
-    def remediated(x, days_):
-        """A later merged PR in the same repository that explicitly links this one with fix/revert wording."""
-        mt = t(x["merged_at"])
-        pat = re.compile(rf"(?:#{x['number']}\b|/pull/{x['number']}\b)")
-        for y in merged:
-            if y is x or y.get("repo") != x.get("repo"):
-                continue
-            yt = t(y["merged_at"])
-            if not (mt < yt <= mt + dt.timedelta(days=days_)):
-                continue
-            text = " ".join([str(y.get("title") or "")] + [str(v) for v in (y.get("body_sections") or {}).values()])
-            if pat.search(text) and FIX.search(text):
-                return True
-        return False
     rem = {}
     for days_ in (14, 30):
-        cohort = [x for x in merged if as_of and t(x["merged_at"]) <= as_of - dt.timedelta(days=days_)]
-        hit = sum(1 for x in cohort if remediated(x, days_))
+        cohort = [x for x in merged if now and t(x["merged_at"]) <= now - dt.timedelta(days=days_)]
+        if not full:
+            rem[f"{days_}d"] = {"cohort": len(cohort), "remediated": None, "share": None,
+                                "unknown": "--content metadata: pull-request text isn't read"}
+            continue
+        hit = sum(1 for x in cohort if any(
+            y is not x and y.get("repo") == x.get("repo") and t(x["merged_at"]) < t(y["merged_at"]) <= t(x["merged_at"]) + dt.timedelta(days=days_)
+            and remediation_link(y, x) for y in merged))
         rem[f"{days_}d"] = {"cohort": len(cohort), "remediated": hit,
                             "share": round(hit / len(cohort), 3) if cohort else None,
                             "unknown": None if cohort else f"no merged pull request is {days_} days old yet"}
     M.append(metric("post_merge_remediation", "Share of merged pull requests with an explicitly linked later revert or fix "
-                    "(same repository, the PR referenced with fix/revert/hotfix wording) within 14 and 30 days, counted "
-                    "only over cohorts at least that old. An internal quality proxy, not production Change Failure Rate.",
-                    "proxy", windows=rem))
+                    "within 14 and 30 days, counted only over cohorts at least that old. Linked means: in the same repository, "
+                    "a later merged pull request whose title or sections say revert/fix/hotfix immediately before this one's "
+                    "reference (#N, owner/repo#N or its URL), or 'Reverts owner/repo#N'. An internal quality proxy, not "
+                    "production Change Failure Rate.", "proxy", windows=rem))
     surv = rem["14d"]
     M.append(metric("surviving_changes", "Merged pull requests not reverted or fixed by an explicitly linked change within 14 "
                     "days (DEC-123's unit of output; '>50% rewritten' isn't detectable from pr-state and isn't applied).",
-                    "proxy", count=(surv["cohort"] - surv["remediated"]) if surv["cohort"] else None,
+                    "proxy", count=(surv["cohort"] - surv["remediated"]) if surv["cohort"] and surv["remediated"] is not None else None,
                     cohort=surv["cohort"], unknown=surv["unknown"]))
-    hm = [o.get("human_minutes") for _, _, o in kept if isinstance(o.get("human_minutes"), int)]
-    M.append(metric("human_intervention", "Self-reported active owner minutes spent reviewing, deciding, repairing or "
-                    "coordinating (budget lines with human_minutes). Unknown otherwise; never inferred from session spans.",
-                    "proxy" if hm else "unknown", minutes_reported=sum(hm) if hm else None, lines=len(hm),
-                    unknown=None if hm else "no line reports human_minutes"))
+    hm = [(o.get("human_minutes"), o.get("method") if o.get("method") in BG.METHODS else "unlabelled") for _, _, o in kept
+          if isinstance(o.get("human_minutes"), int) and not isinstance(o.get("human_minutes"), bool) and o["human_minutes"] >= 0]
+    M.append(metric("human_intervention", "Active owner minutes recorded on budget lines (human_minutes), labelled as those lines "
+                    "are: only a line the owner wrote as active time is that; a merge-window span is an upper-bound proxy. "
+                    "Unknown otherwise; never inferred from session spans.",
+                    "+".join(sorted({m for _, m in hm})) if hm else "unknown",
+                    minutes_recorded=sum(v for v, _ in hm) if hm else None, lines=len(hm),
+                    unknown=None if hm else "no line records human_minutes"))
 
     # ---- measurement coverage ----
-    actors = set()
+    sessions = {}
     for h in handoffs:
         for e in h["log"]:
-            if e.get("actor"):
-                actors.add(str(e["actor"]).split()[0])
-    measured_actors = {str(o.get("actor")).split()[0] for _, _, o in kept if o.get("method") == "measured"}
-    any_actors = {str(o.get("actor")).split()[0] for _, _, o in kept}
-    agents = sorted(a for a in actors if ":" in a)
-    M.append(metric("measurement_coverage", "Which known sessions, pull requests and repositories have trustworthy telemetry. "
-                    "Missing means unmeasured, never zero.", "measured",
-                    agent_sessions_in_handoffs=len(agents),
-                    with_measured_budget_line=len([a for a in agents if a in measured_actors]),
-                    with_any_budget_line=len([a for a in agents if a in any_actors]),
-                    unmeasured_sessions=[a for a in agents if a not in measured_actors],
-                    budget_lines_by_method=corr["methods"],
+            ln, ss = session_of(e.get("actor"))
+            if ":" in ln and ss and actor_in_lane(e.get("actor")):    # --lane: that lane's own sessions only
+                sessions.setdefault(ss, ln)
+    measured = {session_of(o.get("actor"))[1] for _, _, o in kept if o.get("method") == "measured"}
+    anyline = {session_of(o.get("actor"))[1] for _, _, o in kept}
+    M.append(metric("measurement_coverage", "Which agent sessions named in the handoffs (counted by session id) have a measured or "
+                    "any budget line, budget lines by method, and how complete the pull-request reads were. Missing means "
+                    "unmeasured, never zero.", "derived",
+                    agent_sessions_in_handoffs=len(sessions), with_measured_budget_line=len([s for s in sessions if s in measured]),
+                    with_any_budget_line=len([s for s in sessions if s in anyline]),
+                    unmeasured_sessions=sorted(f"{l}#{s}" for s, l in sessions.items() if s not in measured),
+                    budget_lines_by_method=corr["methods"], invalid_budget_lines=len(invalid),
                     repositories_read=sorted((prs or {"fetches": {}})["fetches"]),
+                    repositories_with_more_than_read=sorted(r for r, c in cover.items() if c.get("more_available")),
                     pr_lines=len(items), pr_lines_with_unread=len([x for x in items if x.get("unread")]),
                     not_meterable=["ChatGPT and Codex cloud sessions (no exposed metering; estimates from captures, "
                                    "Kairos threads only, when recorded)"]))
@@ -248,23 +300,28 @@ def derive(root):
             continue
         last = max((t(e["at"]) for e in h["log"] if t(e["at"])), default=None)
         open_.append(h)
-        if as_of and last and as_of - last > dt.timedelta(hours=24):
+        if now and last and now - last > dt.timedelta(hours=24):
             stale.append({"id": h["handoff_id"], "status": h["status"], "last_step": iso(last)})
     cancelled = [h["handoff_id"] for h in handoffs if h["status"] == "cancelled"]
     claims = {}
-    for h in open_:
-        if h["status"] not in ("acknowledged", "in_progress"):
-            continue
-        m = re.search(r"^touches:[ \t]*(.+)$", h.get("text") or "", re.M)
-        for part in (m.group(1).split(",") if m else []):
-            claims.setdefault(part.strip(), []).append(h["handoff_id"])
+    if full:
+        for h in open_:
+            if h["status"] not in ("acknowledged", "in_progress"):
+                continue
+            m = re.search(r"^touches:[ \t]*(.+)$", h.get("text") or "", re.M)
+            for part in (m.group(1).split(",") if m else []):
+                claims.setdefault(part.strip(), []).append(h["handoff_id"])
     overlaps = {k: v for k, v in claims.items() if k and len(v) > 1}
     res = LC.resolve([r["fields"] for r in decisions], [r["fields"] for r in challenges])
     M.append(metric("coordination_loss", "Stale handoffs (open, no step in 24 h before as_of), cancelled handoffs, handoffs in "
-                    "progress that claim the same path, and ledger transitions in conflict. Time spent reconciling isn't "
-                    "recorded yet: unknown.", "measured", stale_handoffs=stale, cancelled_handoffs=cancelled,
-                    overlapping_claims=overlaps, ledger_conflicts=[c["id"] for c in res["conflicts"]],
-                    reconciliation_minutes=None, unknown="reconciliation time isn't recorded"))
+                    "progress that claim the same path, and ledger transitions in conflict. Duplicate work and the time spent "
+                    "reconciling aren't detected yet: unknown.", "derived", stale_handoffs=stale, cancelled_handoffs=cancelled,
+                    overlapping_claims=overlaps if full else None,
+                    overlapping_claim_count=len(overlaps) if full else None,
+                    ledger_conflicts=[c["id"] for c in res["conflicts"]],
+                    reconciliation_minutes=None,
+                    unknown="duplicate work and reconciliation time aren't recorded"
+                            + ("; claims come from handoff text, not read in --content metadata" if not full else "")))
     return out
 
 
@@ -272,9 +329,15 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="relay-kit telemetry", description=__doc__.split("\n\n")[0])
     ap.add_argument("--root", required=True, type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, help="write the view here (outside the records) instead of printing it")
+    ap.add_argument("--lane", help="only this lane's handoffs, sessions and budget lines (pull requests stay per repository)")
+    ap.add_argument("--content", choices=("full", "metadata"), default="full",
+                    help="metadata: read no free text; figures that need it are unknown")
+    ap.add_argument("--as-of", help="measure ages from this ISO time (UTC) instead of the newest record")
     a = ap.parse_args(argv)
+    if a.as_of and not t(a.as_of):
+        sys.exit("refused: --as-of must be an ISO time with a zone")
     try:
-        view = derive(a.root)
+        view = derive(a.root, lane=a.lane, content=a.content, as_of=a.as_of)
     except ex.Refused as x:
         sys.exit(f"refused: {x}")
     text = json.dumps(view, ensure_ascii=False, sort_keys=True, indent=1) + "\n"
