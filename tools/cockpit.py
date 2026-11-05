@@ -1273,9 +1273,13 @@ def pr_card(x, full):
     missing = (f'<span class="tag warn">sections missing: {e(", ".join(x["missing"]))}</span>' if x["missing"] else "")
     secs = ""
     if full and x["sections"]:
-        secs = "<dl class=\"pr-secs\">" + "".join(
-            f'<dt>{k.title()}</dt><dd class="txt">{e(x["sections"][k])}{" <i>(cut at 4000 characters)</i>" if k in x["truncated"] else ""}</dd>'
-            for k in PR_SECTIONS if k in x["sections"]) + "</dl>"
+        cut = lambda k: " <i>(cut at 4000 characters)</i>" if k in x["truncated"] else ""
+        first = next(k for k in PR_SECTIONS if k in x["sections"])
+        rest = [k for k in PR_SECTIONS if k in x["sections"] and k != first]
+        secs = (f'<dl class="pr-secs"><dt>{first.title()}</dt><dd class="txt">{e(x["sections"][first])}{cut(first)}</dd></dl>'
+                + (f'<details class="pr-more"><summary>{" · ".join(k.title() for k in rest)}</summary><dl class="pr-secs">'
+                   + "".join(f'<dt>{k.title()}</dt><dd class="txt">{e(x["sections"][k])}{cut(k)}</dd>' for k in rest)
+                   + "</dl></details>" if rest else ""))
     elif not full:
         secs = f'<p class="hint">Sections present: {e(", ".join(x["present"]) or "none")} (text left out: --content metadata)</p>'
     revs = ", ".join(f'{r["who"]} ({VERDICT.get(r["verdict"], str(r["verdict"]).lower())}'
@@ -1553,18 +1557,23 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
                    '--repo OWNER/NAME</code> (or list the repositories under <code>"repos"</code> in handoffs/.ledger.json), then '
                    'rebuild this page. The page itself never fetches.</div>')
     else:
-        fetch_rows = [[f["repo"], (f'<span class="age" data-ts="{e(f["last_ok"])}">{e(f["last_ok"])}</span>' if f["last_ok"] else "never"),
-                       e(f["error"] or "")] for f in prd["fetches"]]
+        fetch_rows = [[e(f["repo"]), (f'<span class="age" data-ts="{e(f["last_ok"])}">{e(f["last_ok"][:16].replace("T", " "))}</span>'
+                                      if f["last_ok"] else "never"),
+                       f'<span title="{e(f["error"])}">{e(trunc(f["error"], 90))}</span>' if f["error"] else ""] for f in prd["fetches"]]
         fetch_tbl = ('<div class="tw"><table><thead><tr><th>repository</th><th>last read</th><th>last error</th></tr></thead><tbody>'
                      + "".join("<tr>" + "".join(f'<td data-h="{h}">{v}</td>' for h, v in zip(("repository", "last read", "last error"), r))
                                + "</tr>" for r in fetch_rows) + "</tbody></table></div>")
+        okd = [f["last_ok"] for f in prd["fetches"] if f["last_ok"]]
+        nfail = sum(1 for f in prd["fetches"] if f["error"])
+        fetch_sum = (f'{len(prd["fetches"])} repositories, last read <span class="age" data-ts="{e(max(okd))}">{e(max(okd)[:16].replace("T", " "))}</span>'
+                     if okd else f'{len(prd["fetches"])} repositories, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "")
         groups = [("Open", [x for x in prd["items"] if x["state"] == "open"]),
                   ("Merged or closed recently", [x for x in prd["items"] if x["state"] != "open"])]
-        pr_body = (f'<div class="panel pad"><p class="eyebrow dark">WHERE THIS COMES FROM</p><p class="hint">Read from '
+        pr_body = (f'<details class="panel pad pr-src"><summary>Where this comes from · {fetch_sum}</summary><p class="hint">Read from '
                    f'<code>{e(prd["file"])}</code>, written by <code>relay-kit prs</code> at build time. Sections are the PR body\'s '
                    'own words (## What / ## Why / ## How / ## Authorized); nothing here is summarised. Ages are counted in your '
                    'browser from the read time; the page fetches nothing.'
-                   + (f' {prd["unreadable"]} line(s) of the file were unreadable.' if prd["unreadable"] else "") + f'</p>{fetch_tbl}</div>'
+                   + (f' {prd["unreadable"]} line(s) of the file were unreadable.' if prd["unreadable"] else "") + f'</p>{fetch_tbl}</details>'
                    + "".join(f'<p class="eyebrow dark">{e(g.upper())} · {len(xs)}</p><div class="cards">'
                              + ("".join(pr_card(x, full) for x in xs) or '<p class="empty">None.</p>') + "</div>"
                              for g, xs in groups))
@@ -1832,7 +1841,9 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);marg
 .badge.pr-st{color:var(--muted)}.pr-open .badge.pr-st{color:var(--teal);border-color:var(--teal-deep)}.pr-merged .badge.pr-st{color:var(--purple)}
 .pr-draft .badge.pr-st{border-style:dashed}.tag.agent{color:var(--blue);border-color:var(--blue)}.pr-secs dd{margin-bottom:6px}
 .pr-secs dt{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.age.old{color:var(--gold)}
-.cards+.eyebrow{margin-top:18px}
+.cards+.eyebrow{margin-top:18px}.pr-src summary{font:600 12px var(--mono);color:var(--text-2)}.pr-src[open] summary{margin-bottom:10px}
+.pr-src .warn{color:var(--gold)}.pr-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+.card.pr .tag{white-space:normal;overflow-wrap:anywhere}
 @media (max-width:1000px){.choices-grid,.cols,.overview-grid,.budget-top{grid-template-columns:1fr}.apply{position:static;order:-1}
  .apply textarea{min-height:120px}
  .dials,.stats-row,.principles{grid-template-columns:repeat(2,minmax(0,1fr))}}
