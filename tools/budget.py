@@ -14,6 +14,9 @@ A line is one reading of compute or time spent. @2 adds, all optional on old lin
   source           where the numbers came from (a log path pattern, a capture id, a status file)
   tokens_detail    {input, output, cache_write, cache_read, by_model}: the split behind tokens_in
                    (input + cache_write) and tokens_out (output); cache reads are kept apart
+  complete         false when the reading is known to miss part of what it covers (a compacted log):
+                   its numbers are a lower bound, and the line is an estimate
+  log_coverage     what the source showed about its own completeness (compactions, tokens dropped)
 
 effective(rows) decides which lines count:
 - a correction replaces the line it names; a chain resolves to its last line. Two corrections of the
@@ -82,6 +85,10 @@ def problems(obj):
     if td is not None and not (isinstance(td, dict) and all(isinstance(td.get(k), int) and not isinstance(td.get(k), bool) and td[k] >= 0
                                                           for k in ("input", "output", "cache_write", "cache_read"))):
         out.append("tokens_detail must hold input, output, cache_write and cache_read as integers >= 0")
+    if "complete" in obj and not isinstance(obj["complete"], bool):
+        out.append("complete must be true or false")
+    if "log_coverage" in obj and not isinstance(obj["log_coverage"], dict):
+        out.append("log_coverage must be an object")
     for f in ("correction_of", "metric_version", "scope", "source"):
         if f in obj and not (isinstance(obj[f], str) and obj[f].strip() and "\n" not in obj[f]):
             out.append(f"{f} must be one line of text")

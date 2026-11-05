@@ -83,5 +83,43 @@ class UsageTests(unittest.TestCase):
             self.assertNotEqual(p.returncode, 0, bad)
 
 
+    def test_incomplete(self):
+        """usage: a compacted log, or one starting well after its session did, gives an estimate marked incomplete, never a measurement"""
+        main = next(self.projects.glob(f"*/{SID}.jsonl"))
+        with open(main, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "system", "subtype": "compact_boundary", "timestamp": "2026-11-03T10:20:00Z",
+                                "compactMetadata": {"cumulativeDroppedTokens": 5000}}) + "\n")
+        row = json.loads(self.ingest("--dry-run").stdout)
+        self.assertEqual((row["method"], row["complete"], row["log_coverage"]["compactions"], row["log_coverage"]["dropped_tokens"]),
+                         ("estimate", False, 1, 5000))
+        self.assertIn("INCOMPLETE", row["scope"])
+        main.write_text(main.read_text().replace('"subtype": "compact_boundary"', '"subtype": "other"')
+                        + json.dumps({"type": "cost-state", "startTime": 1761901200000}) + "\n", encoding="utf-8")   # 2025-10-31
+        row = json.loads(self.ingest("--dry-run").stdout)
+        self.assertEqual((row["method"], row["log_coverage"]["session_started"]), ("estimate", "2025-10-31T09:00:00Z"))
+
+    def test_refusals(self):
+        """usage: a re-run that shows less than before is refused; duplicate session lines are refused; unidentified usage lines and zone-less times aren't counted"""
+        self.assertEqual(self.ingest().returncode, 0)
+        main = next(self.projects.glob(f"*/{SID}.jsonl"))
+        kept = [l for l in main.read_text().splitlines() if '"m2"' not in l]
+        main.write_text("\n".join(kept) + "\n", encoding="utf-8")          # the log lost m2 since
+        p = self.ingest()
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("show less than", p.stderr)
+        g = self.root / "governance" / "budget.jsonl"
+        g.write_text(g.read_text() * 2, encoding="utf-8")                    # the same line twice (two branches merged)
+        p = self.ingest()
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("more than once", p.stderr)
+        g.unlink()
+        main.write_text(json.dumps({"type": "assistant", "timestamp": "2026-11-03T10:00:00",
+                                    "message": {"model": "m", "usage": {"input_tokens": 1, "output_tokens": 5}}}) + "\n", encoding="utf-8")
+        shutil.rmtree(main.with_suffix(""))
+        p = self.ingest("--dry-run")
+        self.assertNotEqual(p.returncode, 0)                                  # no id: nothing counted, so no usage
+        self.assertIn("no usage", p.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -89,9 +89,22 @@ logs' `costUSD` isn't used. Only what is on disk is counted: a transcript compac
 only its later part, though subagent logs may reach back further. The line's `scope` says how many
 messages each file gave.
 
-**Running it again** for the same session appends a correction of its previous line, so a session is
-counted once. Nothing but the line leaves the machine, and the line holds no file paths or folder
-names.
+**Incomplete logs.** A main log that was compacted (it holds a `compact_boundary` record), or whose
+first entry is more than an hour after the session started (Claude Code's `cost-state` record gives
+the start), misses part of the session. A usage line without a response id can't be de-duplicated,
+so it isn't counted. In any of these cases the line is `method: estimate` with `complete: false`: its
+numbers are a lower bound. `log_coverage` gives the compactions, the tokens the compaction reported
+dropping, when the session started and when its logs start. The `cost-state` record's own totals are
+not used: whether they span process restarts isn't verified.
+
+**Running it again** for the same session appends a correction of its latest line, so a session is
+counted once. It is refused if the logs now show less than that line (compacted or deleted since),
+and if the session's line appears more than once in the file. Nothing but the line leaves the
+machine, and the line holds no file paths or folder names.
+
+**Estimates it replaces.** Earlier estimate lines covering the same session (a coordinator's
+approximate block totals, say) aren't linked to the measured line automatically. Correct them by
+hand (`budget-append --correction-of`), or the telemetry view counts both and flags the actor.
 
 **What it can't meter.** It can't see Codex or ChatGPT sessions, or another machine's sessions. Those
 stay `estimate` lines, or absent, and a coverage count says so.
