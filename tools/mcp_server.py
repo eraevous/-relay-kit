@@ -163,11 +163,37 @@ class Server:
                                 "(run relay-kit status for those)",
                                 "whether chat threads still exist or match their records (only files are read)"]}
         if self.content == "full":
-            env = {k: v for k, v in os.environ.items() if k != "RELAYKIT_ACTOR"}
-            p = subprocess.run([sys.executable, "-I", str(HERE / "status.py"), "--root", str(self.root),
-                                "--no-fetch", "--no-ci"], capture_output=True, text=True, timeout=120, env=env)
-            body["status_text"] = p.stdout
-            body["status_exit"] = p.returncode
+            lines = ["== Waiting on the owner"]
+            lines.extend(f"{r['ledger_id']}  proposed {r['fields'].get('date', '')}: {r['fields'].get('decision', '')}"
+                         for r in s.decisions if r["status"] == "proposed" and r["ledger_id"] not in superseded)
+            for h in s.handoffs:
+                if h["handoff_id"] in unauthorized:
+                    lines.append(f"{h['handoff_id']}  {h['title']} (Authorized not filled: nobody may start it)")
+            if not waiting and not unauthorized:
+                lines.append("nothing")
+            lines.extend(["", "== Open handoffs"])
+            lines.extend(f"{h['handoff_id']}  {h['status']:<12} with {h.get(HOLDER.get(h['status'], 'to'), '?')}  "
+                         f"{h['title']}" for h in s.handoffs if h["status"] not in led.FINAL)
+            if not open_rows:
+                lines.append("none")
+            lines.extend(["", "== Open challenges"])
+            lines.extend(f"{r['ledger_id']}  {r['fields'].get('concern', '')}" for r in s.challenges
+                         if r["status"] == "open" and r["ledger_id"] not in closed)
+            if not open_ch:
+                lines.append("none")
+            lines.extend(["", "== Coordination index"])
+            if s.threads_path:
+                changes = [line for line in s.text(s.threads_path).splitlines() if line.startswith("- 20")]
+                lines.append(str(s.threads_path))
+                if changes:
+                    lines.append(f"last change: {changes[-1][:200]}")
+            else:
+                lines.append("none")
+            lines.extend(["", "== Not checked",
+                          "- whether this copy is behind the shared one, and CI (the server never fetches)",
+                          "- whether chat threads still exist or match their records (only files are read)",
+                          "- work done outside the records (local Codex threads, unfiled chat replies)"])
+            body["status_text"] = "\n".join(lines) + "\n"
         else:
             body["status_text_omitted"] = f"--content {self.content}: status.py's text (titles, decision prose) is left out"
         return self.result(s, "the records (status.py's rules, no fetch, no CI)", "derived", body)

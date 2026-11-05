@@ -216,6 +216,29 @@ class McpTests(unittest.TestCase):
         self.assertNotIn(taken[-1][1], res)
         self.assertIn(taken[-1][0], res)
 
+    def test_status_text_uses_snapshot(self):
+        """mcp: status text and its provenance describe the same cached snapshot"""
+        server = srv.Server(self.root, "full")
+        original_snap = server.snap
+        marker = "late-status-change"
+        snapshot_hash = []
+
+        def snap_then_change():
+            snapshot = original_snap()
+            snapshot_hash.append(snapshot.hash)
+            for rel in ("threads.md", "governance/decisions.jsonl", "governance/challenges.jsonl",
+                        "handoffs/HO-RS-20261102-CD34.md"):
+                path = self.root / rel
+                path.write_text(path.read_text(encoding="utf-8") + f"\n{marker}\n", encoding="utf-8")
+            return snapshot
+
+        server.snap = snap_then_change
+        result = server.t_status({})
+        self.assertIn("Add a second survey.", result["status_text"])
+        self.assertIn("Sample is small.", result["status_text"])
+        self.assertNotIn(marker, result["status_text"])
+        self.assertIn(f"records sha256:{snapshot_hash[0]}", result["provenance"])
+
     def test_metadata_mode_hides_bodies(self):
         """mcp: with --content metadata no tool or resource returns record text, and text filters are refused"""
         c = self.client("--content", "metadata")
