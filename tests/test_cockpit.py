@@ -209,9 +209,9 @@ class CockpitTests(unittest.TestCase):
         (rec / "governance").mkdir(parents=True)
         shutil.copy(self.root / "governance" / "decisions.jsonl", rec / "governance")
         shutil.copy(self.root / "governance" / "challenges.jsonl", rec / "governance")
-        env = dict(os.environ, RELAYKIT_ACTOR="sam", GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
-                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
-        for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "."], ["git", "commit", "-q", "-m", "synthetic"]):
+        env = dict(os.environ, RELAYKIT_ACTOR="sam")
+        ident = ["-c", "user.name=t", "-c", "user.email=t"]   # a throwaway identity for the synthetic commit
+        for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "."], ["git"] + ident + ["commit", "-q", "-m", "synthetic"]):
             subprocess.run(cmd, cwd=rec, check=True, capture_output=True, env=env)
         before = (rec / "governance" / "decisions.jsonl").read_bytes(), (rec / "governance" / "challenges.jsonl").read_bytes()
         for item in data["choices"]:
