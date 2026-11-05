@@ -40,9 +40,11 @@ LIMITS = [
     "(DEC-019: authority stays with the human paste).",
     "Open pull requests are not fetched (no network). PR links are the ones threads.md lists.",
     "The coordinator's status-file cost lines are not parsed; only governance/budget.jsonl counts toward the budget.",
-    "Delegation edges are inferred from in-force decisions whose text mentions delegating or authorizing; "
-    "the decision is the authority, the edge is a reading of it.",
-    "The owner -> coordinator -> lane edges are the assumed reporting structure, not a recorded decision.",
+    "The authority diagram shows only recorded delegation (an adopted decision with delegates_to). Text-matched "
+    "delegations and the assumed owner -> coordinator -> lane lines are in a closed 'hypothesised authority (inferred)' "
+    "overlay. Nothing executable is derived from either graph.",
+    "Composed lines carry <<REQUIRED>> placeholders: the owner supplies decider, basis and locator; the ledger check "
+    "refuses a line that still holds one.",
     "'Last 7 days' and 'older than N days' are measured back from the latest record timestamp, not from today.",
     "Topology layout is automatic: position carries no meaning beyond the band (lane) a node sits in.",
 ]
@@ -143,6 +145,10 @@ def captures(rd, threads):
 
 
 # ---------------- composing paste lines ----------------
+REQ = {"decider": "<<REQUIRED: your name>>", "basis": "<<REQUIRED: your words, quoted>>",
+       "locator": "<<REQUIRED: where you said it (thread, date, time)>>"}
+
+
 def ledger_cmd(kind, obj):
     return f"relay-kit ledger append --dir governance {kind} {shlex.quote(dumps(obj))}"
 
@@ -155,9 +161,8 @@ def compose_decision(rec, owner, as_of, full):
     out = {}
     for action, status in (("accept", "adopted"), ("reject", "rejected")):
         obj = {"status": status, "supersedes": did, "decision": text or f"As proposed in {did}.",
-               "scope": scope or f"As in {did}.", "decider": owner,
-               "basis": "<replace with your words>", "locator": f"cockpit (records as of {as_of})",
-               "recorded_by": owner}
+               "scope": scope or f"As in {did}.", "decider": REQ["decider"],
+               "basis": REQ["basis"], "locator": REQ["locator"]}   # recorded_by: ledger_append fills it from $RELAYKIT_ACTOR
         out[action] = {"command": ledger_cmd("decision", obj), "json": obj}
     out["defer"] = {"command": f"# {did}: deferred. Nothing to append; it stays proposed and stays on this page.",
                     "json": None}
@@ -169,10 +174,10 @@ def compose_challenge(rec, owner, full):
     cid = f.get("id")
     concern = f.get("concern") if full else f"As raised in {cid} (text left out of this page)."
     out = {}
-    for action, status, why in (("accept", "accepted-risk", "<replace: why the risk is accepted>"),
-                                ("reject", "resolved", "<replace: why it's dismissed, or how it was fixed>")):
+    for action, status, why in (("accept", "accepted-risk", "<<REQUIRED: why you accept the risk, in your words>>"),
+                                ("reject", "resolved", "<<REQUIRED: why it is dismissed, or how it was fixed, in your words>>")):
         obj = {"status": status, "resolves": cid, "concern": concern or f"As raised in {cid}.",
-               "raised_by": f.get("raised_by") or owner, "resolution": why, "recorded_by": owner}
+               "raised_by": f.get("raised_by") or owner, "resolution": why}
         out[action] = {"command": ledger_cmd("challenge", obj), "json": obj}
     out["defer"] = {"command": f"# {cid}: deferred. Nothing to append; it stays open and stays on this page.",
                     "json": None}
@@ -183,10 +188,11 @@ def compose_handoff(h, owner, unauthorized):
     hid, st = h["handoff_id"], h["status"]
     nxt = {"prepared": "sent", "sent": "acknowledged", "blocked": "in_progress"}.get(st, "acknowledged")
     pre = f"# first write your words under '## Authorized' in handoffs/{hid}.md\n" if unauthorized else ""
-    acc = pre + (f"relay-kit handoff --dir handoffs set {hid} {nxt} --by {shlex.quote(owner)} "
-                 f"--note {shlex.quote('accepted from the cockpit')}")
-    rej = (f"relay-kit handoff --dir handoffs set {hid} cancelled --by {shlex.quote(owner)} "
-           f"--note {shlex.quote('<replace: why it is cancelled>')}")
+    # no --by: handoff.py takes the actor from $RELAYKIT_ACTOR, i.e. whoever runs the line
+    acc = pre + (f"relay-kit handoff --dir handoffs set {hid} {nxt} "
+                 f"--note {shlex.quote('<<REQUIRED: your words>>')}")
+    rej = (f"relay-kit handoff --dir handoffs set {hid} cancelled "
+           f"--note {shlex.quote('<<REQUIRED: why it is cancelled, in your words>>')}")
     return {"accept": {"command": acc, "json": None, "state": nxt},
             "reject": {"command": rej, "json": None, "state": "cancelled"},
             "defer": {"command": f"# {hid}: deferred. Nothing to run; it stays {st}.", "json": None}}
@@ -255,14 +261,28 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         if full:
             item.update(text=f.get("decision"), scope=f.get("scope"), basis=f.get("basis"), locator=f.get("locator"))
         choices.append(item)
+    def authorized(h):
+        """The handoff's Authorized section holds something other than a TODO or NOT AUTHORIZED."""
+        m = re.search(r"^## Authorized[ \t]*\n(.*?)(?=^## |\Z)", h["text"], re.S | re.M)
+        auth = m.group(1) if m else ""
+        return bool(auth.strip()) and not led.TODO_RE.search(auth) and "NOT AUTHORIZED" not in auth
+
+    def run_class(h):
+        """'authorized' (sent, acknowledged or in progress, with an Authorized section), 'pending'
+        (prepared, or no authorization), 'blocked', or None for completed and cancelled."""
+        st = h["status"]
+        if st in led.FINAL:
+            return None
+        if st == "prepared" or not authorized(h):
+            return "pending"
+        return "authorized" if st in ("sent", "acknowledged", "in_progress") else "blocked"
+
     waiting_handoffs = []
     for h in handoffs:
         st = h["status"]
         if st in led.FINAL:
             continue
-        m = re.search(r"^## Authorized[ \t]*\n(.*?)(?=^## |\Z)", h["text"], re.S | re.M)
-        auth = m.group(1) if m else ""
-        unauth = not auth.strip() or bool(led.TODO_RE.search(auth)) or "NOT AUTHORIZED" in auth
+        unauth = not authorized(h)
         why = []
         if st == "prepared":
             why.append("prepared, not sent")
@@ -352,44 +372,70 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     lane_names = sorted(l for l in lanes_all)
     coords = [coordinator.lower()] if coordinator else [l for l in lane_names if "coord" in l]
     coords = [c for c in coords if c in lane_names] or []
-    a_nodes = [{"id": "owner", "type": "owner", "label": owner}] + \
-        [{"id": f"lane:{l}", "type": "coordinator" if l in coords else "lane", "label": l} for l in lane_names]
-    a_edges = []
+    lane_nodes = [{"id": f"lane:{l}", "type": "coordinator" if l in coords else "lane", "label": l} for l in lane_names]
+
+    def lane_targets(text):
+        return sorted({l for l in lane_names if re.search(rf"(?<![\w-]){re.escape(l)}(?![\w-])", text, re.I)}
+                      | {l for l in lane_names if rd.lanes.codes.get(l) and re.search(rf"\b{re.escape(rd.lanes.codes[l])}\b", text)})
+
+    def source_of(decider):
+        if base_of(decider, owner) == "owner" or str(decider or "").strip().lower() in (owner, "owner"):
+            return "owner"
+        if coords and re.search(r"coordinat", str(decider or ""), re.I):
+            return f"lane:{coords[0]}"
+        return "decider:" + str(decider or "(none)")
+
+    # recorded: an adopted, in-force decision that names its delegate in a delegates_to field
+    rec_edges = []
+    for d in decisions:
+        f = d["fields"]
+        dt_ = f.get("delegates_to")
+        if not d.get("in_force") or not dt_:
+            continue
+        for target in ([dt_] if isinstance(dt_, str) else [x for x in dt_ if isinstance(x, str)]):
+            tos = lane_targets(target) or [None]
+            for l in tos:
+                rec_edges.append({"from": source_of(f.get("decider")), "to": f"lane:{l}" if l else "target:" + target,
+                                  "kind": "recorded", "decision": f.get("id"), "date": f.get("date"), "inferred": False,
+                                  "delegates_to": target, "scope": f.get("scope") if full else None})
+    rec_ids = {e["from"] for e in rec_edges} | {e["to"] for e in rec_edges}
+    rec_nodes = [{"id": "owner", "type": "owner", "label": owner}] + [n for n in lane_nodes if n["id"] in rec_ids] + \
+        [{"id": x, "type": "lane", "label": x.split(":", 1)[1]} for x in sorted(rec_ids) if x.startswith(("target:", "decider:"))]
+
+    # hypothesised (an overlay, off by default): assumed reporting lines and text-matched delegations
+    hyp_edges = []
     for c in coords:
-        a_edges.append({"from": "owner", "to": f"lane:{c}", "kind": "structure", "decision": None, "inferred": True,
-                        "basis": "assumed reporting line: the owner directs the coordinator"})
+        hyp_edges.append({"from": "owner", "to": f"lane:{c}", "kind": "structure", "decision": None, "inferred": True,
+                          "basis": "assumed reporting line: the owner directs the coordinator"})
     for l in lane_names:
         if l in coords:
             continue
-        src = f"lane:{coords[0]}" if coords else "owner"
-        a_edges.append({"from": src, "to": f"lane:{l}", "kind": "structure", "decision": None, "inferred": True,
-                        "basis": "assumed reporting line" + (" via the coordinator" if coords else "")})
+        hyp_edges.append({"from": f"lane:{coords[0]}" if coords else "owner", "to": f"lane:{l}", "kind": "structure",
+                          "decision": None, "inferred": True,
+                          "basis": "assumed reporting line" + (" via the coordinator" if coords else "")})
     delegations = []
     for d in decisions:
         f = d["fields"]
         if not d.get("in_force") or not DELEGATION.search(str(f.get("decision", ""))):
             continue
-        decider = str(f.get("decider") or "")
-        frm = "owner"
-        if coords and re.search(r"coordinat", decider, re.I):
-            frm = f"lane:{coords[0]}"
-        scope = str(f.get("scope") or "")
-        tos = sorted({l for l in lane_names if re.search(rf"(?<![\w-]){re.escape(l)}(?![\w-])", scope, re.I)}
-                     | {l for l in lane_names if rd.lanes.codes.get(l) and re.search(rf"\b{re.escape(rd.lanes.codes[l])}\b", scope)})
-        if not tos:
-            tos = sorted(d.get("lanes") or [])
-        for t in tos or [None]:
-            to = f"lane:{t}" if t else "unspecified"
+        frm = source_of(f.get("decider"))
+        frm = "owner" if frm.startswith("decider:") else frm
+        tos = lane_targets(str(f.get("scope") or "")) or sorted(d.get("lanes") or [])
+        for l in tos or [None]:
+            to = f"lane:{l}" if l else "unspecified"
             if to == frm:
                 continue
             e = {"from": frm, "to": to, "kind": "delegation", "decision": f.get("id"), "date": f.get("date"),
                  "inferred": True, "basis": "decision text mentions delegating or authorizing; target read from its scope"}
-            a_edges.append(e)
+            hyp_edges.append(e)
             delegations.append(e)
-    if any(e["to"] == "unspecified" for e in a_edges):
-        a_nodes.append({"id": "unspecified", "type": "lane", "label": "(scope names no lane)"})
-    authority = {"nodes": a_nodes, "edges": sorted(a_edges, key=lambda e: (e["kind"], e["from"], e["to"], str(e["decision"]))),
-                 "coordinator": coords}
+    hyp_nodes = [{"id": "owner", "type": "owner", "label": owner}] + lane_nodes + \
+        ([{"id": "unspecified", "type": "lane", "label": "(scope names no lane)"}] if any(e["to"] == "unspecified" for e in hyp_edges) else [])
+    srt = lambda es: sorted(es, key=lambda e: (e["kind"], e["from"], e["to"], str(e["decision"])))
+    authority = {"recorded": {"nodes": rec_nodes if rec_edges else [], "edges": srt(rec_edges)},
+                 "hypothesised": {"nodes": hyp_nodes, "edges": srt(hyp_edges)},
+                 "coordinator": coords, "executable": False,
+                 "note": "Nothing executable is derived from either graph; the decisions are the authority."}
 
     # ---- Budget ----
     b = {"present": budget is not None, "file": BUDGET_FILE, "schema": BUDGET_FIELDS,
@@ -409,30 +455,35 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             by_lane[ln or "(no lane)"] = by_lane.get(ln or "(no lane)", 0) + tot
         sess_total = sum(r["tokens_in"] + r["tokens_out"] for r in sess)
         latest_weekly = weekly[-1][2] if weekly else None
-        burn = latest_weekly["tokens_in"] + latest_weekly["tokens_out"] if latest_weekly else sess_total
+        burn = sess_total if sess else None   # no session lines: no observation, never a manufactured 0
         b.update({
             "records": len(budget["rows"]), "invalid_lines": budget["bad"],
             "window": {"from": iso(start) if start else None, "to": as_of},
             "session_tokens_7d": sess_total,
             "session_in_7d": sum(r["tokens_in"] for r in sess), "session_out_7d": sum(r["tokens_out"] for r in sess),
-            "latest_weekly_reading": ({"ts": latest_weekly["ts"], "tokens": burn, "actor": latest_weekly.get("actor")}
-                                      if latest_weekly else None),
-            "burn_7d": burn, "burn_source": "latest weekly reading" if latest_weekly else "sum of session lines",
+            "session_lines_7d": len(sess),
+            "weekly_reference": ({"ts": latest_weekly["ts"], "tokens": latest_weekly["tokens_in"] + latest_weekly["tokens_out"],
+                                  "actor": latest_weekly.get("actor"),
+                                  "note": "a separately reported weekly reading; reference only, never added to or substituted for the session sum"}
+                                 if latest_weekly else None),
+            "burn_7d": burn, "burn_source": f"sum of {len(sess)} session line(s) in the window" if sess else "no session lines in the window",
             "by_actor": dict(sorted(by_actor.items())), "by_lane": dict(sorted(by_lane.items())),
             "max_agents_7d": max((r.get("agents") for _, _, r in recent if isinstance(r.get("agents"), int)), default=None),
-            "fraction": (burn / weekly_tokens) if weekly_tokens else None,
+            "fraction": (burn / weekly_tokens) if (weekly_tokens and burn is not None) else None,
         })
         if full:
             b["recent_notes"] = [{"ts": r["ts"], "actor": r.get("actor"), "note": r.get("note")}
                                  for _, _, r in sorted(recent, key=lambda x: (x[1], x[0]))[-10:] if r.get("note")]
 
     # ---- Run / Drift ----
-    by_status = {}
+    by_status, commitments = {}, {"authorized": [], "pending": [], "blocked": []}
     for h in sorted(handoffs, key=lambda h: (h["created"] or "", h["handoff_id"])):
         last = h["log"][-1] if h["log"] else {}
-        by_status.setdefault(h["status"], []).append({
-            "id": h["handoff_id"], "title": htitle(h), "from": h["from"], "to": h["to"], "created": h["created"],
-            "last": {"at": last.get("at"), "state": last.get("state"), "actor": last.get("actor")}})
+        row = {"id": h["handoff_id"], "title": htitle(h), "from": h["from"], "to": h["to"], "created": h["created"],
+               "status": h["status"], "last": {"at": last.get("at"), "state": last.get("state"), "actor": last.get("actor")}}
+        by_status.setdefault(h["status"], []).append(row)
+        if run_class(h):
+            commitments[run_class(h)].append(row)
     by_status = {s: by_status[s] for s in sorted(by_status, key=lambda s: (STATE_ORDER.index(s) if s in STATE_ORDER else 99, s))}
 
     def dec_row(d):
@@ -463,6 +514,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             stale.append({**dec_row(d), "age_days": (as_of_dt - sp[0]).days})
     run = {"handoffs_by_status": by_status,
            "handoff_counts": {s: len(v) for s, v in by_status.items()},
+           "commitments": commitments,
            "pr_links": sorted(set(PR_LINK.findall(threads_text))),
            "decisions_recent": recent_dec, "challenges_open": open_ch,
            "drift": {"challenges_mentioning_drift": drift_ch, "stale_proposals": stale, "drift_days": drift_days}}
@@ -494,8 +546,10 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
               "decisions": len(decisions), "challenges": len(challenges), "handoffs": len(handoffs),
               "captures": len(convs), "threads": len(thread_ids),
               "open_handoffs": sum(1 for h in handoffs if h["status"] not in led.FINAL),
+              "authorized_in_progress": sum(1 for h in handoffs if run_class(h) == "authorized"),
+              "pending_authorization": sum(1 for h in handoffs if run_class(h) == "pending"),
               "drift_flags": len([c for c in drift_ch if c["open"]]) + len(stale),
-              "delegations": len(delegations)}
+              "delegations_inferred": len(delegations), "delegations_recorded": len(rec_edges)}
     return {
         "schema": SCHEMA,
         "generator": {"tool": "relay-kit cockpit (tools/cockpit.py)", "kit_version": __version__,
@@ -613,7 +667,7 @@ def info_svg(info):
             f'aria-label="Information topology"><defs>{defs}</defs>{"".join(parts)}{"".join(lines)}</svg>')
 
 
-def authority_svg(auth):
+def authority_svg(auth, pid="a"):
     nodes = auth["nodes"]
     owner = [n for n in nodes if n["type"] == "owner"]
     mid = [n for n in nodes if n["type"] == "coordinator"]
@@ -648,10 +702,11 @@ def authority_svg(auth):
             d = f"M {x1:.1f} {y1} Q {(x1 + x2) / 2 + off:.1f} {(y1 + y2) / 2:.1f} {x2:.1f} {y2}"
             ids = [x["decision"] for x in eds]
             label = f'<text class="e-dec" x="{(x1 + 2 * ((x1 + x2) / 2 + off) + x2) / 4:.1f}" y="{(y1 + y2) / 2:.1f}">{e(trunc(", ".join(ids), 22))}</text>'
-        tip = f"{kind}: {a} → {b}" + (f" ({', '.join(x['decision'] for x in eds)}; inferred)" if kind == "delegation" else " (assumed)")
-        lines.append(f'<g><title>{e(tip)}</title><path class="a-{kind}" d="{d}" marker-end="url(#arrow-{kind})"/>{label}</g>')
-    defs = "".join(f'<marker id="arrow-{t}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">'
-                   f'<path class="m-{t}" d="M 0 0 L 10 5 L 0 10 z"/></marker>' for t in ("structure", "delegation"))
+        ids_ = ", ".join(x["decision"] for x in eds if x["decision"])
+        tip = f"{kind}: {a} → {b}" + {"delegation": f" ({ids_}; inferred from text)", "recorded": f" ({ids_}; delegates_to)"}.get(kind, " (assumed)")
+        lines.append(f'<g><title>{e(tip)}</title><path class="a-{kind}" d="{d}" marker-end="url(#{pid}-arrow-{kind})"/>{label}</g>')
+    defs = "".join(f'<marker id="{pid}-arrow-{t}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">'
+                   f'<path class="m-{t}" d="M 0 0 L 10 5 L 0 10 z"/></marker>' for t in ("structure", "delegation", "recorded"))
     return (f'<svg class="topo" viewBox="0 0 {width:.0f} {height}" width="{width:.0f}" height="{height}" role="img" '
             f'aria-label="Authority and delegation topology"><defs>{defs}</defs>{"".join(lines)}{"".join(parts)}</svg>')
 
@@ -668,16 +723,16 @@ def choice_card(c):
         body = (f'<p class="txt">{e(c.get("text"))}</p>' if c.get("text") else "") + dl(
             [("scope", c.get("scope")), ("proposed by", c.get("proposed_by")), ("decider", c.get("decider")),
              ("basis", c.get("basis")), ("locator", c.get("locator")), ("source", c["source"])])
-        hint = "Accept appends an adopted line that supersedes it; Reject a rejected one. Fill in your words as basis."
+        hint = "Accept appends an adopted line that supersedes it; Reject a rejected one. You fill in decider, basis and locator."
     elif c["kind"] == "handoff":
         body = (f'<p class="txt">{e(c.get("title"))}</p>' if c.get("title") else "") + dl(
             [("from", c.get("from")), ("to", c.get("to")), ("needs the owner", "; ".join(c["why"])), ("source", c["source"])])
-        hint = f'Accept moves it to {c["compose"]["accept"]["state"]}; Reject cancels it (owner only). These are handoff.py commands.'
+        hint = f'Accept moves it to {c["compose"]["accept"]["state"]}; Reject cancels it (owner only). These are handoff.py commands; your words go in the note.'
     else:
         body = (f'<p class="txt">{e(c.get("text"))}</p>' if c.get("text") else "") + dl(
             [("raised by", c.get("raised_by")), ("affects", c.get("affects")), ("proposed test", c.get("proposed_test")),
              ("source", c["source"])])
-        hint = "Accept records accepted-risk; Reject records resolved (dismissed or fixed). Fill in the resolution."
+        hint = "Accept records accepted-risk; Reject records resolved (dismissed or fixed). You write the resolution."
     btns = "".join(f'<button type="button" class="act {a}" data-key="{e(key)}" data-act="{a}" '
                    f'data-line="{e(c["compose"][a]["command"])}">{a.title()}</button>' for a in ("accept", "reject", "defer"))
     return f'<article class="card choice" data-key="{e(key)}">{head}{body}<p class="hint">{e(hint)}</p><div class="btns">{btns}</div></article>'
@@ -723,6 +778,9 @@ def render(data):
     if not b["present"]:
         bg = gauge(0, None, "resource budget / 7 d", "NO RECORDS", "no budget records yet", "muted")
         budget_read = "NO RECORDS"
+    elif burn is None:
+        bg = gauge(0, None, "resource budget / 7 d", "NO DATA", "no session lines in the window", "muted")
+        budget_read = "NO DATA"
     elif allowance:
         frac = burn / allowance
         bg = gauge(burn, allowance, "resource budget / 7 d", f"{frac:.0%}", f"{fmt_n(burn)} of {fmt_n(allowance)} tokens",
@@ -736,8 +794,8 @@ def render(data):
                    f'{kinds["decision"]} decisions · {kinds["handoff"]} handoff{"" if kinds["handoff"] == 1 else "s"} · {kinds["challenge"]} challenges',
                    "warn" if c["choices"] else "ok")
              + bg
-             + gauge(c["open_handoffs"], max(c["handoffs"], 1), "run commitments / open", str(c["open_handoffs"]),
-                     f'of {c["handoffs"]} handoffs', "ok")
+             + gauge(c["authorized_in_progress"], max(c["open_handoffs"], 1), "run commitments / authorized",
+                     str(c["authorized_in_progress"]), f'authorized & in progress · {c["pending_authorization"]} pending authorization', "ok")
              + gauge(c["drift_flags"], max(c["drift_flags"], 5), "drift flags", str(c["drift_flags"]),
                      f'stale proposals > {run["drift"]["drift_days"]} d · drift challenges', "bad" if c["drift_flags"] else "ok"))
     waiting = "".join(f'<a class="direction" href="#choices" data-goto="choices" data-card="{e(x["kind"])}:{e(x["id"])}">'
@@ -779,8 +837,10 @@ def render(data):
 {stat("OPEN CHALLENGES", kinds["challenge"], "not resolved")}{stat("LEDGER SYNC", "READ-ONLY", "this page appends nothing")}</div>
 <div class="notice"><b>Authority stays with your paste (DEC-019).</b> Accept, Reject and Defer write nothing. Each composes a line
 into <i>To apply</i>: a <code>relay-kit ledger append</code> command for decisions and challenges, a <code>relay-kit handoff set</code>
-command for handoffs. Replace the placeholders in angle brackets, copy, and run it in your records with
-<code>RELAYKIT_ACTOR={e(data["owner"])}</code>. Until you do, nothing has changed.</div>
+command for handoffs. <b>You supply the justification:</b> every line carries <code>&lt;&lt;REQUIRED: …&gt;&gt;</code>
+placeholders for the decider, your words (basis) and where you said them (locator), and the ledger check refuses a line that
+still holds one. The page never fills in who decided or why. Replace them, copy, and run the line in your records with
+<code>RELAYKIT_ACTOR={e(data["owner"])}</code>, which records you as the writer. Until you do, nothing has changed.</div>
 <div class="choices-grid"><div class="cards">{cards}</div>
 <aside class="apply panel"><p class="eyebrow dark">TO APPLY</p><textarea id="apply" spellcheck="false" aria-label="Lines to apply"
 placeholder="Choose Accept, Reject or Defer on an item."></textarea>
@@ -789,7 +849,13 @@ placeholder="Choose Accept, Reject or Defer on an item."></textarea>
 </section>"""
 
     a = topo["authority"]
-    deleg_rows = [(x["decision"], x.get("date"), x["from"], x["to"], "inferred") for x in a["edges"] if x["kind"] == "delegation"]
+    rec, hyp = a["recorded"], a["hypothesised"]
+    rec_rows = [(x["decision"], x.get("date"), x["from"], x["to"], x["delegates_to"]) for x in rec["edges"]]
+    deleg_rows = [(x["decision"], x.get("date"), x["from"], x["to"], "inferred from text") for x in hyp["edges"] if x["kind"] == "delegation"]
+    rec_block = (f'<div class="scroll">{authority_svg(rec, "rec")}</div><p class="mini-label">RECORDED DELEGATIONS</p>'
+                 + table(["decision", "date", "from", "to", "delegates_to"], rec_rows)) if rec["edges"] else \
+        ('<p class="empty norec">No recorded delegation. A delegation is recorded when an adopted decision names its delegate '
+         'in a <code>delegates_to</code> field; none does yet.</p>')
     s_topo = f"""
 <section class="section surface" id="topology">
 {head(5, "MISSION MAPS", "Topology", "Two systems drawn from the records: where information flows, and who may act.", "DRAWN FROM RECORDS / NO LIVE AGENT STATES")}
@@ -803,22 +869,28 @@ placeholder="Choose Accept, Reject or Defer on an item."></textarea>
 <span class="k k-captured"></span>actor → capture → thread. Rows are lanes; placement inside a row is automatic and means nothing.
 Hover a node or edge for detail.</p>
 <div class="scroll">{info_svg(topo["information"])}</div></div>
-<div class="panel pad net" data-net="auth"><p class="eyebrow dark">02 / AUTHORITY / AGENTS</p>
-<p class="legend"><span class="k k-structure"></span>assumed reporting line, owner → coordinator → lanes (not a recorded decision)
-<span class="k k-delegation"></span>standing delegation, <b>inferred</b> from an in-force decision whose text mentions delegating
-or authorizing; label = decision id, target read from its scope. The decision is the authority; the edge is a reading of it.
-Layout is automatic.{"" if a["coordinator"] else " No coordinator lane found (none is named *coord*; pass --coordinator)."}</p>
-<div class="scroll">{authority_svg(a)}</div>
-<p class="mini-label">DELEGATION EDGES</p>{table(["decision", "date", "from", "to", "status"], deleg_rows)}</div>
+<div class="panel pad net" data-net="auth"><p class="eyebrow dark">02 / AUTHORITY / AGENTS · RECORDED ONLY</p>
+<p class="legend"><span class="k k-recorded"></span>recorded delegation: an adopted, in-force decision with a <code>delegates_to</code>
+field (label = decision id). Nothing executable is derived from this or the overlay below: the decisions are the authority.</p>
+{rec_block}
+<details class="hyp" id="hyp"><summary>Show hypothesised authority (inferred)</summary>
+<p class="eyebrow dark">HYPOTHESISED AUTHORITY (INFERRED) · NOT A RECORD</p>
+<p class="legend"><span class="k k-structure"></span>assumed reporting line, owner → coordinator → lanes (no decision says so)
+<span class="k k-delegation"></span>text match: an in-force decision whose text mentions delegating or authorizing, drawn to the lanes
+its scope names. These are readings, not delegations. Layout is automatic.{"" if a["coordinator"] else " No coordinator lane found (none is named *coord*; pass --coordinator)."}</p>
+<div class="scroll">{authority_svg(hyp, "hyp")}</div>
+<p class="mini-label">TEXT-MATCHED EDGES</p>{table(["decision", "date", "from", "to", "status"], deleg_rows)}</details></div>
 </section>"""
 
     pol = b["policy"]
     pol_rows = [(k.replace("_", " "), "UNSET (unknown, not unlimited)" if v is None else v) for k, v in pol["caps"].items()]
-    remaining = (allowance - burn) if (allowance and b["present"]) else None
+    remaining = (allowance - burn) if (allowance and b["present"] and burn is not None) else None
+    wref = b.get("weekly_reference")
     if b["present"]:
         bud = f"""
 <div class="panel pad">{dl([("window", f'{b["window"]["from"]} → {b["window"]["to"]}'), ("burn", f'{fmt_n(burn)} tokens ({b["burn_source"]})'),
   ("session lines, 7 d", f'{fmt_n(b["session_tokens_7d"])} ({fmt_n(b["session_in_7d"])} in, {fmt_n(b["session_out_7d"])} out)'),
+  ("weekly reading (reference only)", f'{fmt_n(wref["tokens"])} tokens at {wref["ts"]}, reported by {wref["actor"]}; not added to the gauge' if wref else None),
   ("most agents at once", fmt_n(b["max_agents_7d"])), ("records", b["records"]),
   ("invalid lines", ", ".join(f'{x["line"]}: {x["reason"]}' for x in b["invalid_lines"]) or "none")])}
 <div class="cols"><div><p class="mini-label">LAST 7 DAYS BY LANE</p>{table(["lane", "tokens"], [(k, fmt_n(v)) for k, v in b["by_lane"].items()])}</div>
@@ -831,7 +903,7 @@ Layout is automatic.{"" if a["coordinator"] else " No coordinator lane found (no
 {head(6, "RESOURCE & ATTENTION GOVERNOR", "Budget control", "Recorded token use against a weekly allowance, with an advisory policy before any automated enforcement.", "RECORDED DATA · NO LIVE PROVIDER TELEMETRY")}
 <div class="stats-row">{stat("CONTROL MODE", pol["caps"].get("default_effort") or "UNSET", "advisory setting")}
 {stat("WEEKLY ALLOWANCE", fmt_n(allowance) if allowance else "UNSET", "tokens · --weekly-tokens or governance/cockpit.json")}
-{stat("BURN / LAST 7 DAYS", fmt_n(burn) if b["present"] else "—", b.get("burn_source") or "no budget records yet")}
+{stat("BURN / LAST 7 DAYS", fmt_n(burn) if burn is not None else "—", b.get("burn_source") or "no budget records yet")}
 {stat("LIVE METERING", "OFFLINE", "no external services connected")}</div>
 <div class="budget-top"><div class="gauge-big">{bg}</div>{bud}</div>
 <div class="overview-grid">
@@ -852,8 +924,9 @@ Layout is automatic.{"" if a["coordinator"] else " No coordinator lane found (no
 <div class="concept"><span>03 / ATTENTION</span><p>Your review and interruptions consume a budget too. A question can wait instead of interrupting.</p></div>
 <div class="concept"><span>04 / AUTHORITY</span><p>A budget may constrain routing; it cannot grant agents rights to decide, spawn or execute.</p></div></div>
 <p class="mini-label">BUDGET.JSONL SCHEMA</p>{table(["field", "meaning"], list(b["schema"].items()))}
-<p class="hint">Append with <code>relay-kit budget-append --window session --tokens-in N --tokens-out N</code>. The gauge uses the latest
-<i>weekly</i> reading in the window if there is one, else the sum of <i>session</i> lines. The coordinator's status-file cost lines are
+<p class="hint">Append with <code>relay-kit budget-append --window session --tokens-in N --tokens-out N</code>. The gauge sums the
+<i>session</i> lines inside the 7-day window; a <i>weekly</i> line is shown only as a separately labelled reference. With no session
+lines the gauge says so; it never shows a zero it didn't observe. The coordinator's status-file cost lines are
 <b>not</b> parsed.</p>
 </section>"""
 
@@ -884,7 +957,13 @@ Layout is automatic.{"" if a["coordinator"] else " No coordinator lane found (no
     s_run = f"""
 <section class="section surface" id="run">
 {head(8, "RUN COMMITMENTS", "Run commitments", "Handoffs by state, and what has drifted: proposals left waiting and challenges that name drift.", "EXPLICITLY AUTHORIZED ONLY")}
-<div class="cols"><div class="panel pad"><p class="eyebrow dark">HANDOFFS BY STATUS</p>{status_blocks}
+<div class="stats-row">{stat("AUTHORIZED & IN PROGRESS", c["authorized_in_progress"], "sent, acknowledged or in progress, with an Authorized section")}
+{stat("PENDING AUTHORIZATION", c["pending_authorization"], "prepared, or no authorization quote: not a commitment yet")}</div>
+<div class="cols"><div class="panel pad"><p class="eyebrow dark">AUTHORIZED &amp; IN PROGRESS</p>
+{table(["id", "status", "from → to"], [(x["id"], x["status"], f'{x["from"]} → {x["to"]}') for x in run["commitments"]["authorized"]])}
+<p class="eyebrow dark">PENDING AUTHORIZATION · NOT RUN</p>
+{table(["id", "status", "from → to"], [(x["id"], x["status"], f'{x["from"]} → {x["to"]}') for x in run["commitments"]["pending"]])}
+<p class="eyebrow dark">ALL HANDOFFS BY STATUS</p>{status_blocks}
 <p class="mini-label">PULL REQUESTS</p><p class="hint">Open pull requests aren't fetched (no network): see GitHub. Links listed in threads.md:</p>
 {f"<ul class='links'>{prs}</ul>" if prs else '<p class="empty">none in threads.md</p>'}</div>
 <div class="panel pad"><p class="eyebrow dark">DRIFT</p><p class="mini-label">PROPOSALS OLDER THAN {dr["drift_days"]} DAYS</p>
@@ -933,7 +1012,10 @@ Layout is automatic.{"" if a["coordinator"] else " No coordinator lane found (no
 <main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}</main>
 <footer class="section"><p class="mini-label">WHAT THIS PAGE CAN'T TELL YOU</p><ul>{limits}</ul>{unread}
 <p class="hint">{e(SCHEMA)} · relay-kit {e(data["generator"]["kit_version"])} · owner {e(data["owner"])} · data: cockpit.json beside this page ·
-{e(CREDIT)}. Private by default: it can hold your records' text; don't publish it.</p></footer></div></div>
+{e(CREDIT)}.</p>
+<p class="hint"><b>Privacy:</b> this page and cockpit.json hold your records{"' text" if full else " (metadata: no bodies, but thread links, session ids, actor names and file paths remain)"}.
+<code>--content metadata</code> is redaction, not publication safety. Serving it from a domain needs authentication on both
+index.html and cockpit.json; <code>noindex</code> is not access control.</p></footer></div></div>
 {modal}<script>{JS}</script></body></html>
 """
 
@@ -1038,6 +1120,10 @@ textarea{min-height:260px;color:var(--teal);font:12px/1.45 var(--mono);resize:ve
 .a-delegation{fill:none;stroke:var(--gold);stroke-width:1.8}.m-delegation{fill:var(--gold)}
 .e-dec{fill:var(--gold);font:600 10px var(--mono);text-anchor:middle;paint-order:stroke;stroke:#0c1418;stroke-width:3}
 .legend{font-size:13px;color:#a7b8b6}
+.a-recorded{fill:none;stroke:var(--teal);stroke-width:2.2}.m-recorded{fill:var(--teal)}
+.k-recorded{height:3px;width:22px;border-radius:0;background:var(--teal);vertical-align:3px}
+.hyp{border:1px dashed #6b5f45;border-radius:8px;padding:12px;margin-top:10px;background:repeating-linear-gradient(135deg,#14181b,#14181b 8px,#161b1d 8px,#161b1d 16px)}
+.hyp summary{color:var(--gold);font:600 12px var(--mono);letter-spacing:.06em}.hyp[open] summary{margin-bottom:10px}
 .k{display:inline-block;width:14px;height:14px;vertical-align:-2px;margin:0 4px 0 10px;border-radius:50%}.k:first-child{margin-left:0}
 .k-actor{background:#183a33;border:2px solid var(--teal)}.k-owner{background:#3a3220;border:2px solid var(--gold)}
 .k-thread{background:#1a2c3d;border:2px solid var(--blue);border-radius:2px}.k-capture{background:#2a2540;border:2px solid var(--purple);transform:rotate(45deg);border-radius:1px;width:11px;height:11px}
@@ -1169,7 +1255,8 @@ def main(argv=None):
         sys.exit(f"refused: {err}")
     c = d["counts"]
     print(f"cockpit written to {pathlib.Path(a.out).resolve()}/index.html ({SCHEMA}), records as of {d['as_of']}: "
-          f"{c['choices']} waiting on the owner, {c['open_handoffs']} open handoffs, {c['drift_flags']} drift flags, "
+          f"{c['choices']} waiting on the owner, {c['authorized_in_progress']} authorized handoffs in progress "
+          f"({c['pending_authorization']} pending authorization), {c['drift_flags']} drift flags, "
           f"budget {'present' if d['budget']['present'] else 'absent'}")
 
 

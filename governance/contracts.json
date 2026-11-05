@@ -81,7 +81,10 @@
         "cockpit: a composed ledger line parses as JSON with the referenced id and the chosen status, and passes the ledger check",
         "cockpit: --content metadata leaves out decision, challenge and handoff bodies (ids and states only)",
         "cockpit: a destination inside a public GitHub repository or inside the records is refused",
-        "cockpit: two runs give byte-identical output and leave the records untouched"
+        "cockpit: two runs give byte-identical output and leave the records untouched",
+        "cockpit: a composed line pasted unedited is refused by ledger_append (its <<REQUIRED placeholders fail the ledger check)",
+        "cockpit: Run commitments count only authorized handoffs in progress; prepared or unauthorized ones are pending",
+        "cockpit: only an adopted decision with delegates_to draws a recorded delegation edge"
       ]
     }
   ]

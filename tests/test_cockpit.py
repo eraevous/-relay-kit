@@ -74,6 +74,9 @@ DECISIONS = [
     {"id": "DEC-004", "date": "2026-11-03", "status": "adopted", "supersedes": "DEC-003", "decision": "Settled already.",
      "scope": "research", "decider": "sam", "basis": "\"ok\"", "locator": "synthetic chat", "recorded_by": "sam"},
 ]
+RECORDED = {"id": "DEC-005", "date": "2026-11-03", "status": "adopted", "decision": "Review may close its own handoffs.",
+            "scope": "review", "delegates_to": "review", "decider": "sam", "basis": "\"fine\"", "locator": "synthetic chat",
+            "recorded_by": "sam"}
 CHALLENGES = [
     {"id": "CH-001", "date": "2026-11-02", "status": "open", "concern": BODY_CH, "raised_by": "claude:review#SESSR9"},
     {"id": "CH-002", "date": "2026-11-02", "status": "open", "concern": "Closed later.", "raised_by": "claude:review#SESSR9"},
@@ -106,7 +109,7 @@ BUDGET = [
 ]
 
 
-def build_root(base, budget=False):
+def build_root(base, budget=False, recorded=False):
     r = pathlib.Path(base) / "records"
     (r / "handoffs" / "outputs").mkdir(parents=True)
     (r / "governance").mkdir()
@@ -114,7 +117,7 @@ def build_root(base, budget=False):
     for text, hid in ((HO_DONE, "HO-RS-20261101-AB12"), (HO_WAIT, "HO-RS-20261103-CD34"), (HO_SENT, "HO-RV-20261103-EF56")):
         (r / "handoffs" / f"{hid}.md").write_text(text, encoding="utf-8")
     (r / "handoffs" / "outputs" / "HO-RS-20261101-AB12.md").write_text("HO-RS-20261101-AB12 · synthetic\n\nok\n", encoding="utf-8")
-    (r / "governance" / "decisions.jsonl").write_text("".join(json.dumps(d) + "\n" for d in DECISIONS), encoding="utf-8")
+    (r / "governance" / "decisions.jsonl").write_text("".join(json.dumps(d) + "\n" for d in DECISIONS + ([RECORDED] if recorded else [])), encoding="utf-8")
     (r / "governance" / "challenges.jsonl").write_text("".join(json.dumps(c) + "\n" for c in CHALLENGES), encoding="utf-8")
     (r / "threads.md").write_text(THREADS, encoding="utf-8")
     if budget:
@@ -183,16 +186,53 @@ class CockpitTests(unittest.TestCase):
             self.assertEqual(obj, item["compose"][action]["json"])
         self.assertTrue(dec["compose"]["defer"]["command"].startswith("# DEC-002"))
         ho = next(c for c in data["choices"] if c["kind"] == "handoff")
-        self.assertIn("set HO-RS-20261103-CD34 sent --by sam", ho["compose"]["accept"]["command"])
-        self.assertIn("set HO-RS-20261103-CD34 cancelled --by sam", ho["compose"]["reject"]["command"])
-        # the accepted line, given the id and date ledger_append fills, is a valid ledger line
+        self.assertIn("set HO-RS-20261103-CD34 sent --note", ho["compose"]["accept"]["command"])
+        self.assertIn("set HO-RS-20261103-CD34 cancelled --note", ho["compose"]["reject"]["command"])
+        self.assertNotIn("--by", ho["compose"]["accept"]["command"])   # the actor comes from whoever runs it
+        acc = json.loads(shlex.split(dec["compose"]["accept"]["command"])[-1])
+        self.assertNotIn("recorded_by", acc)
+        for f in ("decider", "basis", "locator"):
+            self.assertIn("<<REQUIRED", acc[f])
+        # once the owner replaces the placeholders, the line (with the id and date ledger_append fills) is valid
         g = self.tmp / "gov"
         g.mkdir()
-        acc = dict(json.loads(shlex.split(dec["compose"]["accept"]["command"])[-1]), id="DEC-005", date="2026-11-04")
-        (g / "decisions.jsonl").write_text("".join(json.dumps(d) + "\n" for d in DECISIONS + [acc]), encoding="utf-8")
+        filled = dict(acc, id="DEC-005", date="2026-11-04", decider="sam", basis='"adopt it"', locator="synthetic chat", recorded_by="sam")
+        (g / "decisions.jsonl").write_text("".join(json.dumps(d) + "\n" for d in DECISIONS + [filled]), encoding="utf-8")
         (g / "challenges.jsonl").write_text("".join(json.dumps(c) + "\n" for c in CHALLENGES), encoding="utf-8")
         p = subprocess.run([sys.executable, "-I", str(KIT / "tools" / "check_ledgers.py"), "--dir", str(g)], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_unedited_paste_refused(self):
+        """cockpit: a composed line pasted unedited is refused by ledger_append (its <<REQUIRED placeholders fail the ledger check)"""
+        data, _, _ = self.build()
+        rec = self.tmp / "rec"
+        (rec / "governance").mkdir(parents=True)
+        shutil.copy(self.root / "governance" / "decisions.jsonl", rec / "governance")
+        shutil.copy(self.root / "governance" / "challenges.jsonl", rec / "governance")
+        env = dict(os.environ, RELAYKIT_ACTOR="sam", GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+        for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "."], ["git", "commit", "-q", "-m", "synthetic"]):
+            subprocess.run(cmd, cwd=rec, check=True, capture_output=True, env=env)
+        before = (rec / "governance" / "decisions.jsonl").read_bytes(), (rec / "governance" / "challenges.jsonl").read_bytes()
+        for item in data["choices"]:
+            if item["kind"] == "handoff":
+                continue
+            for action in ("accept", "reject"):
+                argv = shlex.split(item["compose"][action]["command"])
+                p = subprocess.run([sys.executable, "-I", str(KIT / "tools" / "ledger_append.py"), "--offline"] + argv[3:],
+                                   cwd=rec, capture_output=True, text=True, env=env)
+                self.assertNotEqual(p.returncode, 0, f"{item['id']} {action}: {p.stdout}")
+                self.assertIn("<<REQUIRED", p.stdout + p.stderr)
+        self.assertEqual(before, ((rec / "governance" / "decisions.jsonl").read_bytes(), (rec / "governance" / "challenges.jsonl").read_bytes()))
+
+    def test_run_commitments(self):
+        """cockpit: Run commitments count only authorized handoffs in progress; prepared or unauthorized ones are pending"""
+        data, page, _ = self.build()
+        c, com = data["counts"], data["run"]["commitments"]
+        self.assertEqual((c["authorized_in_progress"], c["pending_authorization"]), (1, 1))
+        self.assertEqual([x["id"] for x in com["authorized"]], ["HO-RV-20261103-EF56"])
+        self.assertEqual([x["id"] for x in com["pending"]], ["HO-RS-20261103-CD34"])
+        self.assertIn("run commitments / authorized", page)
 
     def test_topology_edges(self):
         """cockpit: information topology handoff edges match the planted handoffs; delegations are inferred from decisions"""
@@ -200,9 +240,22 @@ class CockpitTests(unittest.TestCase):
         edges = {(x["from"], x["to"], tuple(x["refs"])) for x in data["topology"]["information"]["edges"] if x["type"] == "handoff"}
         self.assertEqual(edges, {("claude:research", "chatgpt:review", ("HO-RS-20261101-AB12", "HO-RS-20261103-CD34")),
                                  ("claude:review", "claude:research", ("HO-RV-20261103-EF56",))})
-        dele = [x for x in data["topology"]["authority"]["edges"] if x["kind"] == "delegation"]
+        auth = data["topology"]["authority"]
+        self.assertEqual(auth["recorded"]["edges"], [])   # no decision carries delegates_to
+        self.assertIn("No recorded delegation", page)
+        dele = [x for x in auth["hypothesised"]["edges"] if x["kind"] == "delegation"]
         self.assertEqual([(x["decision"], x["to"], x["inferred"]) for x in dele], [("DEC-001", "lane:research", True)])
-        self.assertEqual(page.count('class="topo"'), 2)
+        self.assertIn('<details class="hyp" id="hyp">', page)   # inferred overlay: closed unless opened
+        self.assertNotIn('<details class="hyp" id="hyp" open', page)
+        self.assertFalse(auth["executable"])
+
+    def test_recorded_delegation(self):
+        """cockpit: only an adopted decision with delegates_to draws a recorded delegation edge"""
+        root = build_root(self.tmp / "r", recorded=True)
+        data, page, _ = self.build(root=root)
+        rec = data["topology"]["authority"]["recorded"]["edges"]
+        self.assertEqual([(x["decision"], x["from"], x["to"], x["inferred"]) for x in rec], [("DEC-005", "owner", "lane:review", False)])
+        self.assertNotIn("No recorded delegation", page)
 
     def test_budget_absent(self):
         """cockpit: without budget.jsonl the gauge says there are no budget records yet and shows the schema"""
@@ -217,10 +270,24 @@ class CockpitTests(unittest.TestCase):
         data, page, _ = self.build(root=root, weekly_tokens=10000)
         b = data["budget"]
         self.assertEqual((b["burn_7d"], b["fraction"], b["records"]), (1500, 0.15, 2))
+        self.assertIsNone(b["weekly_reference"])
         self.assertEqual(b["by_lane"], {"research": 1500})
         self.assertEqual([x["line"] for x in b["invalid_lines"]], [3])
         self.assertFalse(b["status_file_costs_parsed"])
         self.assertIn("15%", page)
+
+    def test_budget_weekly_reference(self):
+        """cockpit: a weekly reading is a labelled reference and never replaces the session sum; no session lines means no reading, not zero"""
+        root = build_root(self.tmp / "w")
+        (root / "governance" / "budget.jsonl").write_text(json.dumps(
+            {"ts": "2026-11-03T09:00:00Z", "actor": "sam", "window": "weekly", "tokens_in": 7000, "tokens_out": 0, "agents": None, "note": "plan page"}) + "\n", encoding="utf-8")
+        data, page, _ = self.build(root=root, weekly_tokens=10000)
+        b = data["budget"]
+        self.assertIsNone(b["burn_7d"])
+        self.assertIsNone(b["fraction"])
+        self.assertEqual(b["weekly_reference"]["tokens"], 7000)
+        self.assertIn("no session lines in the window", page)
+        self.assertIn("reference only", page)
 
     def test_budget_append(self):
         """cockpit: budget-append adds one valid line the cockpit reads"""

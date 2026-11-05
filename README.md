@@ -178,8 +178,9 @@ One static page over your records, to see what waits on you before you start:
 `index.html` (self-contained, works offline and on a phone) has nine surfaces after Kate's Cockpit
 v0.4 prototype; the ones drawn from the records are **Choices** (proposed decisions, handoffs that
 need you, open challenges, each with Accept / Reject / Defer buttons that only compose a paste-ready
-`ledger append` or `handoff set` line: the page writes nothing), **Topology** (information flows and
-the authority/delegation lines, drawn in SVG), **Budget control** (`governance/budget.jsonl`
+`ledger append` or `handoff set` line with `<<REQUIRED>>` placeholders for your own words: the page
+writes nothing), **Topology** (information flows, and
+recorded delegation only, with inferred authority in a closed overlay; SVG), **Budget control** (`governance/budget.jsonl`
 against a weekly allowance; add lines with `relay-kit budget-append`), **Project lanes**, **Run
 commitments** with a Drift panel, and **Review**. `cockpit.json` beside it holds the data. It
 refuses to write into the records or a public repository; `--content metadata` leaves the text out.
