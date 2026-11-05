@@ -1662,6 +1662,7 @@ JS = """
   if(a==='overtaken'){if(!v)return say(b.closest('.card'),'Say what overtook it first.',ed);o[f]=o[f].replace(RQ,function(){return v});RQ.lastIndex=0}
   else if(v){o[f]=v}
   if(a==='amend'&&RQ.test(o[f])){RQ.lastIndex=0;return say(b.closest('.card'),'Write the decision text for your amendment first.',ed)}
+  if(a==='amend'&&(!v||v===ed.defaultValue.trim()))return say(b.closest('.card'),'Your text is the same as the proposal: use Accept instead, or change it.',ed);
   if(a==='amend'||a==='overtaken'){o=filled(b,b.closest('.card'),o);if(!o)return}
   var line='relay-kit ledger append --dir governance '+b.getAttribute('data-kind')+' '+shq(JSON.stringify(o));
   var pk={getAttribute:function(n){return n==='data-key'?(a==='clarify'?k+'|question':k):n==='data-act'?a:n==='data-line'?line:null},
