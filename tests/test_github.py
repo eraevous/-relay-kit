@@ -51,8 +51,15 @@ class ClientTests(unittest.TestCase):
         """github: pages walks pages until the limit or a short page, and says whether more were available"""
         t = Script({"x?per_page=2&page=1": [(200, {}, [1, 2])], "x?per_page=2&page=2": [(200, {}, [3])]})
         self.assertEqual(self.client(t).pages("x", limit=5, per_page=2), ([1, 2, 3], False))
-        t = Script({"x?a=1&per_page=2&page=1": [(200, {}, [1, 2])], "x?a=1&per_page=2&page=2": [(200, {}, [3, 4])]})
-        self.assertEqual(self.client(t).pages("x?a=1", limit=4, per_page=2), ([1, 2, 3, 4], True))
+        pages = {"x?a=1&per_page=2&page=1": [(200, {}, [1, 2])], "x?a=1&per_page=2&page=2": [(200, {}, [3, 4])],
+                 "x?a=1&per_page=2&page=3": [(200, {}, [5])]}
+        self.assertEqual(self.client(Script(pages)).pages("x?a=1", limit=4, per_page=2), ([1, 2, 3, 4], True))
+        pages["x?a=1&per_page=2&page=3"] = [(200, {}, [])]       # exactly the limit: nothing more
+        self.assertEqual(self.client(Script(pages)).pages("x?a=1", limit=4, per_page=2), ([1, 2, 3, 4], False))
+        t = Script({"y?per_page=4&page=1": [(200, {}, [1, 2, 3])]})   # one past the limit is asked for
+        self.assertEqual(self.client(t).pages("y", limit=3), ([1, 2, 3], False))
+        t = Script({"z?per_page=2&page=1": [(200, {}, [1, 2])]})
+        self.assertEqual(self.client(t).pages("z", limit=9, per_page=2, max_pages=1), ([1, 2], None))   # pages ran out: unknown
 
     def test_retries(self):
         """github: network errors and 5xx are retried with backoff; other errors and exhausted retries are refused with the status"""
@@ -75,6 +82,10 @@ class ClientTests(unittest.TestCase):
         t = Script({"p": [(429, {"x-ratelimit-reset": "99999"}, "")]})
         with self.assertRaisesRegex(GH.Refused, "rate limited \\(until 1970-01-02T03:46:39Z\\)"):
             self.client(t, max_wait=60).get("p")
+        self.slept.clear()     # GitHub's secondary limit: a 403 with retry-after, requests still left
+        t = Script({"q": [(403, {"retry-after": "5", "x-ratelimit-remaining": "4000"}, {"message": "secondary"}), (200, {}, [])]})
+        self.assertEqual(self.client(t).get("q"), [])
+        self.assertEqual(self.slept, [5])
 
     def test_cache(self):
         """github: a path is fetched once per run; with a cache folder an unchanged resource is revalidated by its ETag"""
@@ -86,7 +97,8 @@ class ClientTests(unittest.TestCase):
         c2 = self.client(t2, cache_dir=self.tmp / "cache")
         self.assertEqual(c2.get("p"), {"v": 1})
         self.assertEqual((t2.calls[0][1], c2.stats["not_modified"]), ({"If-None-Match": '"e1"'}, 1))
-        self.assertEqual(list((self.tmp / "cache").iterdir())[0].suffix, ".json")
+        f = list((self.tmp / "cache").iterdir())[0]
+        self.assertEqual((f.suffix, f.stat().st_mode & 0o777, (self.tmp / "cache").stat().st_mode & 0o777), (".json", 0o600, 0o700))
         c3 = self.client(Script({"p": [(200, {}, {"v": 2})]}))            # no cache folder: nothing is kept
         self.assertEqual(c3.get("p"), {"v": 2})
 
@@ -115,14 +127,14 @@ class ClientTests(unittest.TestCase):
               "body": "## What\nx", "created_at": "2026-11-02T00:00:00Z", "updated_at": "2026-11-03T00:00:00Z",
               "base": {"ref": "main"}, "head": {"ref": "b", "sha": "a" * 40}}
         t = Script({"repos/o/r": [(200, {}, {"default_branch": "main", "pushed_at": "2026-11-03T01:00:00Z"})],
-                    "repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=1&page=1": [(200, {}, [pr])],
+                    "repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=2&page=1": [(200, {}, [pr])],
                     "repos/o/r/pulls/7/reviews?per_page=100": [(403, {}, {"message": "Resource not accessible"})],
                     f"repos/o/r/commits/{'a' * 40}/check-runs?per_page=100": [(200, {}, {"check_runs": []})],
                     f"repos/o/r/commits/{'a' * 40}/status": [(200, {}, {"statuses": []})]})
         c = PRS.GH.Client(t, sleep=self.slept.append, clock=lambda: 1000)   # the reader's own client module
         f = PRS.run(root, c, "test", ["o/r"], limit=1, ts="2026-11-03T12:00:00Z")
         cov = f["coverage"]["o/r"]
-        self.assertEqual((cov["listed"], cov["more_available"], cov["prs_read"]), (1, True, 1))
+        self.assertEqual((cov["listed"], cov["more_available"], cov["prs_read"]), (1, False, 1))
         self.assertEqual([(x["number"], x["what"]) for x in cov["partial"]], [(7, "reviews")])
         self.assertEqual(f["revisions"]["o/r"], {"default_branch": "main", "pushed_at": "2026-11-03T01:00:00Z"})
         self.assertEqual(f["client"]["requests"], 5)
@@ -137,6 +149,38 @@ class ClientTests(unittest.TestCase):
         page = (out / "index.html").read_text(encoding="utf-8")
         self.assertIn("not read (the reader couldn&#x27;t get them)", page)
         self.assertIn("1 partial read(s)", page)
+
+
+    def test_partial_and_churn(self):
+        """prs: a PR that can't be read again is a partial read, not a failed repository; an unread part keeps its last value and adds no line"""
+        root = TC.build_root(self.tmp / "r2")
+        def pr(n, state="open"):
+            return {"number": n, "html_url": f"https://github.com/o/r/pull/{n}", "title": "t", "state": state, "user": {"login": "sam"},
+                    "body": "## What\nx", "created_at": "2026-11-02T00:00:00Z", "updated_at": "2026-11-03T00:00:00Z",
+                    "base": {"ref": "main"}, "head": {"ref": "b", "sha": "a" * 40}}
+        ok = {"repos/o/r": [(200, {}, {"default_branch": "main"})],
+              "repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=31&page=1": [(200, {}, [pr(7), pr(8)])],
+              "repos/o/r/pulls/7/reviews?per_page=100": [(200, {}, [{"user": {"login": "x"}, "state": "APPROVED", "body": ""}])],
+              "repos/o/r/pulls/8/reviews?per_page=100": [(200, {}, [])],
+              f"repos/o/r/commits/{'a' * 40}/check-runs?per_page=100": [(200, {}, {"check_runs": []})],
+              f"repos/o/r/commits/{'a' * 40}/status": [(200, {}, {"statuses": []})]}
+        mk = lambda answers: PRS.GH.Client(Script(answers), sleep=self.slept.append, clock=lambda: 1000)
+        PRS.run(root, mk(ok), "test", ["o/r"], ts="2026-11-03T12:00:00Z")
+        flaky = dict(ok)
+        flaky["repos/o/r/pulls/7/reviews?per_page=100"] = [(502, {}, "bad")]
+        f = PRS.run(root, mk(flaky), "test", ["o/r"], ts="2026-11-03T13:00:00Z")
+        self.assertEqual(f["appended"], 0)                            # reviews unread: the last value stands, no new line
+        self.assertEqual([x["what"] for x in f["coverage"]["o/r"]["partial"]], ["reviews"])
+        gone = dict(ok)
+        gone["repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=31&page=1"] = [(200, {}, [pr(8)])]
+        gone["repos/o/r/pulls/7"] = [(404, {}, {"message": "Not Found"})]
+        f = PRS.run(root, mk(gone), "test", ["o/r"], ts="2026-11-03T14:00:00Z")
+        self.assertEqual((f["ok"], f["failed"]), (["o/r"], {}))
+        self.assertEqual([(x["number"], x["what"]) for x in f["coverage"]["o/r"]["partial"]], [(7, "pull request")])
+        # a client loaded from another copy of github.py: its Refused still marks the repository failed
+        other = GH.Client(Script({"*": [(404, {}, {"message": "Not Found"})]}), sleep=self.slept.append, clock=lambda: 1000)
+        f = PRS.run(root, other, "test", ["o/r"], ts="2026-11-03T15:00:00Z")
+        self.assertIn("o/r", f["failed"])
 
 
 if __name__ == "__main__":
