@@ -182,7 +182,9 @@ need you, open challenges, each with Accept / Reject / Defer buttons that only c
 writes nothing), **Topology** (information flows, and
 recorded delegation only, with inferred authority in a closed overlay; SVG), **Budget control** (`governance/budget.jsonl`
 against a weekly allowance; add lines with `relay-kit budget-append`), **Project lanes**, **Run
-commitments** with a Drift panel, and **Review**. `cockpit.json` beside it holds the data. It
+commitments** with a Drift panel, **Review**, and **Pull requests** (each PR's What / Why / How / Authorized in
+its author's words, from `governance/pr-state.jsonl`, which `relay-kit prs` writes at build time; the page never
+fetches). `--theme` restyles it, with an optional light scheme. `cockpit.json` beside it holds the data. It
 refuses to write into the records or a public repository; `--content metadata` leaves the text out.
 Spec and deploying to S3 or Amplify: [docs/cockpit.md](docs/cockpit.md).
 
@@ -205,7 +207,8 @@ Details and threat model: [docs/mcp.md](docs/mcp.md).
 
 - [Conversation schema](docs/conversation-schema.md): the shared format and message ids (`T3a2`).
 - [Export](docs/export.md): `relay-kit/export@1`, the read-only export and its coverage manifest.
-- [Cockpit](docs/cockpit.md): `relay-kit/cockpit@2`, the static control surface over the records.
+- [Cockpit](docs/cockpit.md): `relay-kit/cockpit@3`, the static control surface over the records.
+- [Pull-request reader](docs/prs.md): `relay-kit/prs@1`, build-time GitHub PR state into `governance/pr-state.jsonl`.
 - [MCP server](docs/mcp.md): `relay-kit/mcp@1`, read-only tools and resources over the records.
 - [Marking pasted material](docs/paste-markers.md): phone-friendly `FROM:` … `END FROM` blocks.
 - [Cold catch-up test](docs/cold-test.md): checking whether a fresh assistant can pick up a handoff.

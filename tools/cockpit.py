@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@2.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@3.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
-                             [--allow-public-dest]
+                             [--theme FILE] [--landing SURFACE] [--allow-public-dest]
 
 Writes DIR/index.html (inline CSS and JS, no external resources) and DIR/cockpit.json (the data
 the page was built from). Four surfaces:
@@ -15,6 +15,8 @@ the page was built from). Four surfaces:
   Budget     governance/budget.jsonl (if present) against a weekly allowance.
   Run/Drift  handoffs by status, PR links from threads.md, recent decisions, open challenges,
              drift flags.
+  Pull requests  governance/pr-state.jsonl (written by relay-kit prs): each PR's What / Why / How /
+             Authorized in its author's words, who wrote it, reviews by family, CI.
 
 It reads with the export module's readers (tools/export.py), changes nothing under --root, and
 refuses a destination inside the records or inside a public (or unconfirmed) git repository,
@@ -22,7 +24,7 @@ using the export's guard. Output is deterministic: the only date on the page is 
 timestamp found in the records. Spec: docs/cockpit.md. Standard library only."""
 import argparse, datetime as dt, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@2"
+SCHEMA = "relay-kit/cockpit@3"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -38,7 +40,8 @@ PR_LINK = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 LIMITS = [
     "Nothing on this page writes anywhere. Accept / Reject / Defer only compose text for the owner to paste "
     "(DEC-019: authority stays with the human paste).",
-    "Open pull requests are not fetched (no network). PR links are the ones threads.md lists.",
+    "The page fetches nothing. Pull requests are as fresh as the last relay-kit prs run that wrote "
+    "governance/pr-state.jsonl; their sections are the PR body's own words, not a summary.",
     "The coordinator's status-file cost lines are not parsed; only governance/budget.jsonl counts toward the budget.",
     "The authority diagram shows only recorded delegation (an adopted decision with delegates_to). Text-matched "
     "delegations and the assumed owner -> coordinator -> lane lines are in a closed 'hypothesised authority (inferred)' "
@@ -382,9 +385,109 @@ def compose_extra(kind, cid, owner, proposer, full, text, scope):
     return out
 
 
+# ---------------- pull requests, from relay-kit prs (HO-RK-20261105-SWK5) ----------------
+PRS_FILE = "governance/pr-state.jsonl"
+PRS_SCHEMA = "relay-kit/prs@1"
+PR_SECTIONS = ("what", "why", "how", "authorized")
+APPROVING = {"APPROVED", "COMMENTED", "CHANGES_REQUESTED"}
+
+
+def read_pr_state(root):
+    """The latest line per pull request and per repository fetch in governance/pr-state.jsonl, or None
+    when the file is absent. Lines of another schema version are counted as unreadable, not guessed at."""
+    path = pathlib.Path(root) / PRS_FILE
+    if not path.is_file():
+        return None
+    latest, fetches, bad = {}, {}, 0
+    for ln in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not ln.strip():
+            continue
+        try:
+            x = json.loads(ln)
+        except json.JSONDecodeError:
+            bad += 1
+            continue
+        if not isinstance(x, dict) or x.get("schema") != PRS_SCHEMA:
+            bad += 1
+            continue
+        if x.get("kind") == "pr" and isinstance(x.get("repo"), str) and isinstance(x.get("number"), int):
+            latest[(x["repo"], x["number"])] = x
+        elif x.get("kind") == "fetch":
+            failed = x.get("failed") if isinstance(x.get("failed"), dict) else {}
+            for r in x.get("repos") or []:
+                f = fetches.setdefault(r, {"repo": r, "last_ok": None, "last_try": None, "error": None})
+                f["last_try"] = x.get("ts")
+                if r in (x.get("ok") or []):
+                    f["last_ok"], f["error"] = x.get("ts"), None
+                else:
+                    f["error"] = str(failed.get(r) or "failed")[:200]
+        else:
+            bad += 1
+    return {"latest": latest, "fetches": fetches, "unreadable": bad}
+
+
+def review_family(name, families):
+    """A reviewer's or author's family: governance/cockpit.json 'review_families' by login or name (case-
+    insensitive, then the first word), else the part before ':' of an actor (claude:relay-kit -> claude)."""
+    if not name:
+        return None
+    n = str(name).strip().lower()
+    for k in (n, re.split(r"[\s(#]", n, maxsplit=1)[0]):
+        if k in families:
+            return families[k]
+    return n.split(":", 1)[0] if re.match(r"[a-z][\w.-]*:", n) else None
+
+
+def pr_items(ps, owner, settings, full):
+    fams = {str(k).lower(): str(v) for k, v in (settings.get("review_families") or {}).items()} \
+        if isinstance(settings.get("review_families"), dict) else {}
+    owners = {owner} | {str(x).lower() for x in settings.get("owner_names") or [] if isinstance(x, str)}
+    items = []
+    for (repo, num), x in ps["latest"].items():
+        line = x.get("author_line") if isinstance(x.get("author_line"), str) else None
+        if line is None:
+            written = "unstated"
+        else:
+            written = "owner" if line.strip().lower() in owners or line.strip().lower().split()[0] in owners else "agent"
+        afam = review_family(line or x.get("author"), fams)
+        last = {}
+        for r in sorted((r for r in x.get("reviews") or [] if isinstance(r, dict)), key=lambda r: str(r.get("at") or "")):
+            who = r.get("signed") or r.get("by") or "?"
+            last[who.lower()] = {"who": who, "login": r.get("by"), "verdict": r.get("verdict"), "at": r.get("at"),
+                                 "stated": r.get("stated") if isinstance(r.get("stated"), str) else None,
+                                 "family": review_family(r.get("signed"), fams) or review_family(r.get("by"), fams)}
+        reviews = sorted(last.values(), key=lambda r: str(r["at"] or ""))
+        counted = [r for r in reviews if r["verdict"] in APPROVING and (r["who"] or "").lower() != (line or "").lower()]
+        if not counted:
+            other = False
+        elif afam and any(r["family"] and r["family"] != afam for r in counted):
+            other = True
+        else:
+            other = None if (not afam or any(not r["family"] for r in counted)) else False
+        secs = x.get("body_sections") if isinstance(x.get("body_sections"), dict) else {}
+        url = x.get("url") if isinstance(x.get("url"), str) and x["url"].startswith("https://github.com/") else None
+        ci = x.get("ci") if isinstance(x.get("ci"), dict) else {}
+        items.append({
+            "repo": repo, "number": num, "url": url, "title": x.get("title") if full else None,
+            "state": x.get("state"), "draft": bool(x.get("draft")), "updated_at": x.get("updated_at"),
+            "merged_at": x.get("merged_at"), "opened_by": x.get("author"), "author_line": line if full else None,
+            "written_by": written, "author_family": afam, "line_ts": x.get("ts"),
+            "sections": {k: secs[k] for k in PR_SECTIONS if isinstance(secs.get(k), str)} if full else {},
+            "present": [k for k in PR_SECTIONS if isinstance(secs.get(k), str)],
+            "missing": [k for k in PR_SECTIONS if not isinstance(secs.get(k), str)],
+            "truncated": list(x.get("truncated") or []),
+            "reviews": reviews, "reviewers_counted": len(counted), "other_family": other,
+            "ci": {"state": ci.get("state") or "none", "failing": list(ci.get("failing") or [])}})
+    group = {"open": 0, "merged": 2, "closed": 3}
+    items.sort(key=lambda i: (i["repo"], i["number"]))
+    items.sort(key=lambda i: str(i["updated_at"] or ""), reverse=True)      # newest first within a group
+    items.sort(key=lambda i: group.get(i["state"], 4) + (1 if i["draft"] and i["state"] == "open" else 0))
+    return items
+
+
 # ---------------- collecting ----------------
 def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None, brand=None,
-            pr_lookup=None, pr_fetched_at=None):
+            pr_lookup=None, pr_fetched_at=None, landing=None):
     """pr_lookup(owner, repo, number) -> 'merged' | 'closed' | 'open' | None, at build time only (--pr-state);
     None leaves pull request states out. Nothing here touches the network otherwise."""
     root = pathlib.Path(root)
@@ -406,6 +509,17 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         drift_days = settings["drift_days"] if isinstance(settings.get("drift_days"), int) else 3
     if brand is None:
         brand = settings["brand"] if isinstance(settings.get("brand"), str) else "relay-kit"
+    if landing is None:
+        landing = settings["landing"] if isinstance(settings.get("landing"), str) else "overview"
+    if landing not in {k for k, _, _ in SURFACES}:
+        raise Refused(f"landing {landing!r} isn't a surface ({', '.join(k for k, _, _ in SURFACES)})")
+    ps = read_pr_state(rd.root)
+    # one reader: PR states come from relay-kit prs's file; --pr-state (gh at build time) only fills in
+    # pull requests the file doesn't hold
+    file_states = {f"{r}#{n}".lower(): x.get("state") for (r, n), x in (ps or {"latest": {}})["latest"].items()}
+    gh_lookup = pr_lookup
+    if file_states:
+        pr_lookup = lambda o_, r_, n_: file_states.get(f"{o_}/{r_}#{n_}".lower()) or (gh_lookup(o_, r_, n_) if gh_lookup else None)
     tpath, threads = ex.parse_threads(rd)
     _, decisions = ex.ledger_records(rd, "decisions.jsonl", "decision")
     _, challenges = ex.ledger_records(rd, "challenges.jsonl", "challenge")
@@ -861,19 +975,26 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
               "pending_authorization": sum(1 for h in handoffs if run_class(h) == "pending"),
               "drift_flags": len([c for c in drift_ch if c["open"]]) + len(stale),
               "delegations_inferred": len(delegations), "delegations_recorded": len(rec_edges),
-              "questions_open": len(questions), "possibly_overtaken": sum(1 for c in choices if c["possibly_overtaken"])}
+              "questions_open": len(questions), "possibly_overtaken": sum(1 for c in choices if c["possibly_overtaken"]),
+              "prs_open": sum(1 for (r, n), x in (ps or {"latest": {}})["latest"].items() if x.get("state") == "open")}
     return {
         "schema": SCHEMA,
         "generator": {"tool": "relay-kit cockpit (tools/cockpit.py)", "kit_version": __version__,
                       "reads_with": "tools/export.py (relay-kit/export@1 readers)"},
         "as_of": as_of, "owner": owner,
         "query": {"lane": lane, "content": content, "weekly_tokens": weekly_tokens, "drift_days": drift_days,
-                  "coordinator": coords, "brand": brand},
+                  "coordinator": coords, "brand": brand, "landing": landing},
         "counts": counts,
         "choices": choices,
         "questions": questions,
-        "pr_state": ({"looked_up": True, "fetched_at": pr_fetched_at, "via": "gh api (build time)", "states": pr_states}
+        "pr_state": ({"looked_up": True, "states": pr_states,
+                      "fetched_at": pr_fetched_at or max((f["last_ok"] for f in ps["fetches"].values() if f["last_ok"]), default=None) if ps else pr_fetched_at,
+                      "via": " and ".join(v for v in [PRS_FILE + " (relay-kit prs)" if file_states else None,
+                                                      "gh api (build time)" if gh_lookup else None] if v)}
                      if pr_lookup else {"looked_up": False}),
+        "pull_requests": ({"present": True, "file": PRS_FILE, "items": pr_items(ps, owner, settings, full),
+                           "fetches": sorted(ps["fetches"].values(), key=lambda f: f["repo"]), "unreadable": ps["unreadable"]}
+                          if ps is not None else {"present": False, "file": PRS_FILE, "items": [], "fetches": [], "unreadable": 0}),
         "topology": {"information": info, "authority": authority},
         "budget": b,
         "run": run,
@@ -1134,6 +1255,42 @@ def ask_block(c, pr_fetched_at=None):
             f'<ul class="effects">{effects}</ul>{dflt}{theirs}{dl(facts)}{over}</div>')
 
 
+CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running", "none": "no CI"}
+VERDICT = {"APPROVED": "approved", "COMMENTED": "commented", "CHANGES_REQUESTED": "changes requested", "DISMISSED": "dismissed"}
+
+
+def pr_card(x, full):
+    st = "draft" if x["draft"] and x["state"] == "open" else (x["state"] or "?")
+    ref = f'{x["repo"]}#{x["number"]}'
+    link = f'<a class="subtle-link" href="{e(x["url"])}" rel="noreferrer noopener">{e(ref)} ↗</a>' if x["url"] else f"<b>{e(ref)}</b>"
+    title = f'<p class="pr-title">{e(x["title"])}</p>' if full and x.get("title") else ""
+    if x["written_by"] == "agent":
+        by = f'<span class="tag agent">written by {e(x["author_line"]) if full else "an agent"}, not the owner</span>'
+    elif x["written_by"] == "owner":
+        by = '<span class="tag">written by the owner</span>'
+    else:
+        by = f'<span class="tag warn">no Author: line · opened by {e(x["opened_by"] or "?")}</span>'
+    missing = (f'<span class="tag warn">sections missing: {e(", ".join(x["missing"]))}</span>' if x["missing"] else "")
+    secs = ""
+    if full and x["sections"]:
+        secs = "<dl class=\"pr-secs\">" + "".join(
+            f'<dt>{k.title()}</dt><dd class="txt">{e(x["sections"][k])}{" <i>(cut at 4000 characters)</i>" if k in x["truncated"] else ""}</dd>'
+            for k in PR_SECTIONS if k in x["sections"]) + "</dl>"
+    elif not full:
+        secs = f'<p class="hint">Sections present: {e(", ".join(x["present"]) or "none")} (text left out: --content metadata)</p>'
+    revs = ", ".join(f'{r["who"]} ({VERDICT.get(r["verdict"], str(r["verdict"]).lower())}'
+                     + (f', body says “{r["stated"]}”' if r.get("stated") else "")
+                     + f'; {r["family"] or "family unknown"})' for r in x["reviews"]) or "none yet"
+    other = ("no reviews yet" if not x["reviewers_counted"] else
+             {True: "yes", False: "no", None: "can't tell (a family is unknown)"}[x["other_family"]])
+    ci = CI_WORD.get(x["ci"]["state"], x["ci"]["state"]) + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] else "")
+    return (f'<article class="card pr pr-{e(st)}"><header><span class="badge pr-st">{e(st)}</span>{link}'
+            f'<span class="date">updated {e((x["updated_at"] or "?")[:16].replace("T", " "))}</span></header>{title}'
+            f'<div class="btns">{by}{missing}</div>{secs}'
+            f'<dl><dt>Reviews</dt><dd>{e(revs)}</dd><dt>Other family</dt><dd>{e(other)} · author family '
+            f'{e(x["author_family"] or "unknown")}</dd><dt>CI</dt><dd>{e(ci)}</dd><dt>Read</dt><dd>{e(x["line_ts"] or "?")}</dd></dl></article>')
+
+
 def table(head, rows, cls=""):
     if not rows:
         return '<p class="empty">none</p>'
@@ -1144,7 +1301,8 @@ def table(head, rows, cls=""):
 
 SURFACES = [("overview", "◈", "Overview"), ("intake", "✳", "Idea intake"), ("questions", "❖", "Questions"),
             ("choices", "⌁", "Choices"), ("topology", "◎", "Topology"), ("budget", "◉", "Budget control"),
-            ("lanes", "▦", "Project lanes"), ("run", "◇", "Run commitments"), ("review", "◷", "Review")]
+            ("lanes", "▦", "Project lanes"), ("run", "◇", "Run commitments"), ("review", "◷", "Review"),
+            ("prs", "⇄", "Pull requests")]
 CREDIT = "design after the Cockpit v0.4 prototype (2026-11-04)"
 
 
@@ -1389,6 +1547,33 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 {table(["id", "date", "raised by"] + (["concern"] if full else []), [[x["id"], x["date"], x["raised_by"]] + ([trunc(x.get("text"), 160)] if full else []) for x in run["challenges_open"]])}</div>
 </section>"""
 
+    prd = data.get("pull_requests") or {"present": False, "items": [], "fetches": [], "unreadable": 0, "file": PRS_FILE}
+    if not prd["present"]:
+        pr_body = (f'<div class="notice">No <code>{e(prd["file"])}</code> in the records yet. Run <code>relay-kit prs --root RECORDS '
+                   '--repo OWNER/NAME</code> (or list the repositories under <code>"repos"</code> in handoffs/.ledger.json), then '
+                   'rebuild this page. The page itself never fetches.</div>')
+    else:
+        fetch_rows = [[f["repo"], (f'<span class="age" data-ts="{e(f["last_ok"])}">{e(f["last_ok"])}</span>' if f["last_ok"] else "never"),
+                       e(f["error"] or "")] for f in prd["fetches"]]
+        fetch_tbl = ('<div class="tw"><table><thead><tr><th>repository</th><th>last read</th><th>last error</th></tr></thead><tbody>'
+                     + "".join("<tr>" + "".join(f'<td data-h="{h}">{v}</td>' for h, v in zip(("repository", "last read", "last error"), r))
+                               + "</tr>" for r in fetch_rows) + "</tbody></table></div>")
+        groups = [("Open", [x for x in prd["items"] if x["state"] == "open"]),
+                  ("Merged or closed recently", [x for x in prd["items"] if x["state"] != "open"])]
+        pr_body = (f'<div class="panel pad"><p class="eyebrow dark">WHERE THIS COMES FROM</p><p class="hint">Read from '
+                   f'<code>{e(prd["file"])}</code>, written by <code>relay-kit prs</code> at build time. Sections are the PR body\'s '
+                   'own words (## What / ## Why / ## How / ## Authorized); nothing here is summarised. Ages are counted in your '
+                   'browser from the read time; the page fetches nothing.'
+                   + (f' {prd["unreadable"]} line(s) of the file were unreadable.' if prd["unreadable"] else "") + f'</p>{fetch_tbl}</div>'
+                   + "".join(f'<p class="eyebrow dark">{e(g.upper())} · {len(xs)}</p><div class="cards">'
+                             + ("".join(pr_card(x, full) for x in xs) or '<p class="empty">None.</p>') + "</div>"
+                             for g, xs in groups))
+    s_prs = f"""
+<section class="section surface" id="prs">
+{head(10, "PULL REQUESTS", "Pull requests", "What each pull request changes, why, how and on whose authority, in its author's words, with its reviews and CI.", "FROM RECORDS · READ AT BUILD TIME")}
+{pr_body}
+</section>"""
+
     nav = "".join(f'<a class="nav-link" href="#{k}" data-goto="{k}" data-name="{e(t)}"><span class="nav-icon">{i}</span>{e(t)}'
                   f'<span class="nav-kbd">{n:02d}</span></a>' for n, (k, i, t) in enumerate(SURFACES, 1))
     limits = "".join(f"<li>{e(x)}</li>" for x in data["limits"])
@@ -1398,12 +1583,17 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 <dialog id="settle" aria-labelledby="settle-title" aria-describedby="settle-body"><form method="dialog"><p class="eyebrow dark" id="settle-eyebrow">SETTLE THIS CHOICE?</p><h2 id="settle-title"></h2>
 <p class="hint" id="settle-body"></p><pre id="settle-line"></pre><div class="btns"><button value="ok" class="primary small" id="settle-ok">Add to To apply</button>
 <button value="cancel" class="secondary small">Cancel</button></div></form></dialog>"""
+    theme = data.get("theme")
+    dflt = (theme or {}).get("default", "auto")
+    html_theme = f' data-theme="{dflt}"' if theme and dflt != "auto" else ""
+    toggle = ('<button type="button" class="secondary small" id="theme-toggle" aria-live="polite" '
+              f'data-default="{e(dflt)}">Theme: {e(dflt)}</button>') if theme and "light" in theme else ""
     return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="en"{html_theme}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
-<title>{e(brand.title())} · Cockpit</title><style>{CSS}</style></head>
-<body data-owner="{e(data["owner"])}" data-asof="{e(data["as_of"] or "")}"><div class="shell">
+<title>{e(brand.title())} · Cockpit</title><style>{CSS}{theme_css(theme)}</style></head>
+<body data-owner="{e(data["owner"])}" data-asof="{e(data["as_of"] or "")}" data-landing="{e(q["landing"])}"><div class="shell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="19" fill="none" stroke="currentColor"/>
 <circle cx="22" cy="22" r="11" fill="none" stroke="currentColor" opacity=".5"/><circle cx="22" cy="22" r="3" fill="currentColor"/></svg></span>
 <span class="brand-word"><b>{e(brand)}</b><small>COCKPIT / {e(SCHEMA.split("/")[1])}</small></span></div>
@@ -1416,8 +1606,8 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 <div class="content-shell"><header class="topbar"><div class="breadcrumb"><span>{e(brand.upper())} COCKPIT</span><span class="slash">/</span>
 <span id="crumb">OVERVIEW</span></div><div class="topbar-right"><span class="offline-tag"><span class="light light-warn"></span>LOCAL-FIRST PREVIEW</span>
 <span class="date-label">generated from records as of {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
-<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
-<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}</main>
+{toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
+<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}</main>
 <footer class="section"><p class="mini-label">WHAT THIS PAGE CAN'T TELL YOU</p><ul>{limits}</ul>{unread}
 <p class="hint">{e(SCHEMA)} · relay-kit {e(data["generator"]["kit_version"])} · owner {e(data["owner"])} · data: cockpit.json beside this page ·
 {e(CREDIT)}.</p>
@@ -1428,152 +1618,230 @@ index.html and cockpit.json; <code>noindex</code> is not access control.</p></fo
 """
 
 
+# ---------------- themes (HO-RK-20261105-SWK5) ----------------
+FONT_VARS = {"display", "mono", "heading"}
+THEME_VALUE = re.compile(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?(?:[0-9a-fA-F]{2})?|var\(--[a-z][a-z0-9-]*\)")
+FONT_VALUE = re.compile(r"[\w \t,\"'.-]{1,200}")
+# a neutral light palette; a theme's "light" block is laid over it, so a theme may name only what it changes
+LIGHT_DEFAULTS = {
+    "bg": "#f3f1ea", "sunk": "#ebe8df", "panel": "#fffdf8", "panel-2": "#f8f5ee", "field": "#f0ede5", "field-hover": "#e6e2d8",
+    "border": "#cfd2cc", "border-strong": "#87949a", "border-hover": "#5b6e73", "line": "#dfdcd3",
+    "text": "#182832", "text-2": "#34474e", "muted": "#4f6366", "soft": "#66777b",
+    "teal": "#1f6b62", "teal-hi": "#2a8a7f", "on-teal": "#ffffff", "teal-bg": "#dcefe9", "teal-deep": "#8fc2b7",
+    "gold": "#7a5710", "gold-deep": "#b89a5a", "gold-bg": "#f3ead2", "purple": "#5c4587", "purple-deep": "#a796c9",
+    "purple-bg": "#ece6f5", "coral": "#a0383a", "blue": "#315f87", "blue-bg": "#e0eaf4", "ok": "#3f7a3a",
+    "mark": "var(--teal)", "mark-word": "var(--text)", "focus": "#1a5690"}
+
+
+def theme_vars():
+    root = CSS[CSS.index(":root{") + 6:CSS.index("}")]
+    return set(re.findall(r"--([\w-]+):", root))
+
+
+def load_theme(path):
+    """A theme file: {"name": str, "dark": {var: value}, "light": {var: value} (optional),
+    "default": "auto" | "dark" | "light"}. Variables are the Cockpit's own (without --): colours as #hex or
+    var(--other); display, mono and heading as font lists. Anything else is refused, so a theme can't
+    carry markup or other CSS into the page."""
+    try:
+        t = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as x:
+        raise Refused(f"--theme {path}: {x}")
+    if not isinstance(t, dict):
+        raise Refused(f"--theme {path}: not a JSON object")
+    known, out = theme_vars(), {"name": str(t.get("name") or pathlib.Path(path).stem)[:60]}
+    bad_keys = set(t) - {"name", "dark", "light", "default", "_meta"}
+    if bad_keys:
+        raise Refused(f"--theme {path}: unknown keys {sorted(bad_keys)}")
+    for mode in ("dark", "light"):
+        block = t.get(mode)
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            raise Refused(f"--theme {path}: {mode} isn't an object")
+        clean = {}
+        for k, v in block.items():
+            if k not in known:
+                raise Refused(f"--theme {path}: {mode}.{k} isn't a Cockpit variable ({', '.join(sorted(known))})")
+            ok = FONT_VALUE.fullmatch(str(v)) if k in FONT_VARS else THEME_VALUE.fullmatch(str(v))
+            if not isinstance(v, str) or not ok:
+                raise Refused(f"--theme {path}: {mode}.{k} = {v!r} isn't a {'font list' if k in FONT_VARS else '#hex colour or var(--name)'}")
+            clean[k] = v
+        out[mode] = clean
+    d = t.get("default", "auto")
+    if d not in ("auto", "dark", "light") or (d == "light" and "light" not in out):
+        raise Refused(f"--theme {path}: default must be auto, dark or light (light needs a light block)")
+    out["default"] = d
+    return out
+
+
+def theme_css(t):
+    if not t:
+        return ""
+    decl = lambda m: ";".join(f"--{k}:{v}" for k, v in sorted(m.items()))
+    css = f":root{{{decl(t.get('dark') or {})};color-scheme:dark}}"
+    if "light" in t:
+        light = decl({**LIGHT_DEFAULTS, **t["light"]})
+        css += (f"@media (prefers-color-scheme: light){{:root:not([data-theme=dark]){{{light};color-scheme:light}}}}"
+                f":root[data-theme=light]{{{light};color-scheme:light}}")
+    return css
+
 CSS = """
-:root{--bg:#0b1015;--panel:#121b22;--panel-2:#162128;--border:#26343d;--line:#203039;--text:#f0f0e9;--muted:#96a5a8;--soft:#71818b;
---teal:#9bd5c8;--teal-deep:#254b46;--gold:#dcc28c;--purple:#ac9dd7;--coral:#dfa696;--blue:#90b4d7;
+:root{--bg:#0b1015;--sunk:#0c1418;--panel:#121b22;--panel-2:#162128;--field:#152026;--field-hover:#1d2e34;
+--border:#26343d;--border-strong:#39474b;--border-hover:#59766c;--line:#203039;
+--text:#f0f0e9;--text-2:#b2c5bd;--muted:#96a5a8;--soft:#6f8487;
+--teal:#9bd5c8;--teal-hi:#c3ede0;--on-teal:#122820;--teal-bg:#183a33;--teal-deep:#25423a;
+--gold:#dcc28c;--gold-deep:#7a6a3d;--gold-bg:#3a3220;--purple:#ac9dd7;--purple-deep:#5b4a73;--purple-bg:#2a2540;
+--coral:#dfa696;--blue:#90b4d7;--blue-bg:#1a2c3d;--ok:#8fccad;--mark:var(--teal);--mark-word:var(--text);--focus:var(--teal);
+--heading:var(--display);
 --display:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Arial,sans-serif;--mono:ui-monospace,"SFMono-Regular",Consolas,monospace}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 var(--display);-webkit-font-smoothing:antialiased}
 button,input,textarea,select{font:inherit}a{color:inherit;text-decoration:none}button{cursor:pointer}
-button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--teal);outline-offset:3px}
+button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--focus);outline-offset:3px}
 code{font-family:var(--mono);font-size:.9em;color:var(--teal)}h1,h2,h3,p{margin-top:0}
 .shell{min-height:100vh;display:grid;grid-template-columns:248px minmax(0,1fr)}
-.sidebar{height:100vh;position:sticky;top:0;display:flex;flex-direction:column;border-right:1px solid #1d2a32;padding:24px 16px 18px;background:#0c1318;overflow-y:auto}
-.brand{display:flex;align-items:center;gap:9px;padding:0 13px;margin-bottom:36px}.brand-mark{width:40px;height:40px;color:var(--teal);display:flex}
-.brand-word b{font-weight:660;font-size:22px;letter-spacing:-1px;line-height:1}.brand-word small{display:block;color:#6f8487;font:9px var(--mono);letter-spacing:1.45px;margin-top:6px}
-.nav-title{font:10px var(--mono);letter-spacing:1.75px;color:#647880;padding-left:13px;margin:0 0 10px}
+.sidebar{height:100vh;position:sticky;top:0;display:flex;flex-direction:column;border-right:1px solid var(--line);padding:24px 16px 18px;background:var(--sunk);overflow-y:auto}
+.brand{display:flex;align-items:center;gap:9px;padding:0 13px;margin-bottom:36px}.brand-mark{width:40px;height:40px;color:var(--mark);display:flex}
+.brand-word b{color:var(--mark-word);font-weight:660;font-size:22px;letter-spacing:-1px;line-height:1}.brand-word small{display:block;color:var(--soft);font:9px var(--mono);letter-spacing:1.45px;margin-top:6px}
+.nav-title{font:10px var(--mono);letter-spacing:1.75px;color:var(--soft);padding-left:13px;margin:0 0 10px}
 .nav-links{display:flex;flex-direction:column;gap:3px}
-.nav-link{display:flex;align-items:center;gap:13px;font-size:13px;color:#a3b2b6;padding:11px 13px;border-radius:7px;border:1px solid transparent}
-.nav-link:hover{color:#fff;background:#17232a}.nav-link.active{color:#d7f3ea;background:#152923;border-color:#25423a}
-.nav-icon{width:17px;text-align:center;font-size:16px;color:#9bb4b5}.nav-link.active .nav-icon{color:var(--teal)}
-.nav-kbd{margin-left:auto;font:10px var(--mono);color:#6f8988}
-.sidebar-section{margin-top:32px}.system-badges{display:grid;gap:10px;padding:5px 13px;color:#9fb0af;font:11px var(--mono)}
+.nav-link{display:flex;align-items:center;gap:13px;font-size:13px;color:var(--text-2);padding:11px 13px;border-radius:7px;border:1px solid transparent}
+.nav-link:hover{color:var(--text);background:var(--field)}.nav-link.active{color:var(--text);background:var(--teal-bg);border-color:var(--teal-deep)}
+.nav-icon{width:17px;text-align:center;font-size:16px;color:var(--muted)}.nav-link.active .nav-icon{color:var(--teal)}
+.nav-kbd{margin-left:auto;font:10px var(--mono);color:var(--soft)}
+.sidebar-section{margin-top:32px}.system-badges{display:grid;gap:10px;padding:5px 13px;color:var(--muted);font:11px var(--mono)}
 .system-badges>div{display:flex;align-items:center;gap:9px}
-.light{display:inline-block;width:6px;height:6px;border-radius:50%;flex-shrink:0}.light-good{background:#8fccad;box-shadow:0 0 9px #85cba34a}.light-warn{background:#d5b675}
-.side-quote{margin:26px 12px 0;border-top:1px solid var(--border);padding-top:18px}.small-caps,.mini-label{font:10px var(--mono);letter-spacing:1.5px;color:#9ab0ad;text-transform:uppercase}
-.side-quote p:last-child{font-size:13px;line-height:1.6;color:#b4c4bd;margin:8px 0 0}
-.version{display:flex;justify-content:space-between;gap:8px;color:#6a7f88;font:9px var(--mono);padding:24px 3px 0;margin-top:auto}
+.light{display:inline-block;width:6px;height:6px;border-radius:50%;flex-shrink:0}.light-good{background:var(--ok);box-shadow:0 0 9px var(--ok)}.light-warn{background:var(--gold)}
+.side-quote{margin:26px 12px 0;border-top:1px solid var(--border);padding-top:18px}.small-caps,.mini-label{font:10px var(--mono);letter-spacing:1.5px;color:var(--muted);text-transform:uppercase}
+.side-quote p:last-child{font-size:13px;line-height:1.6;color:var(--text-2);margin:8px 0 0}
+.version{display:flex;justify-content:space-between;gap:8px;color:var(--soft);font:9px var(--mono);padding:24px 3px 0;margin-top:auto}
 .content-shell{min-width:0}
 .topbar{position:relative;z-index:15;min-height:64px;padding:10px 40px;display:flex;flex-wrap:wrap;gap:8px 20px;align-items:center;justify-content:space-between;
-border-bottom:1px solid #1e2c34;background:#0b1015ee;backdrop-filter:blur(15px)}
-.breadcrumb{display:flex;gap:12px;align-items:center;letter-spacing:1.1px;font:11px var(--mono);color:#d3e0dc}.slash{color:#63777d}
+border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--bg) 93%,transparent);backdrop-filter:blur(15px)}
+.breadcrumb{display:flex;gap:12px;align-items:center;letter-spacing:1.1px;font:11px var(--mono);color:var(--text)}.slash{color:var(--soft)}
 .topbar-right{display:flex;flex-wrap:wrap;align-items:center;gap:8px 20px}
-.offline-tag{color:#cbb88a;font:10px var(--mono);letter-spacing:.8px;display:flex;align-items:center;gap:8px}.date-label{color:#a0b1b4;font:11px var(--mono)}
+.offline-tag{color:var(--gold);font:10px var(--mono);letter-spacing:.8px;display:flex;align-items:center;gap:8px}.date-label{color:var(--text-2);font:11px var(--mono)}
 .primary,.secondary{border:1px solid transparent;display:inline-flex;align-items:center;justify-content:center;gap:6px;border-radius:5px;min-height:40px;padding:9px 16px;font-size:12px;font-weight:650;white-space:nowrap}
-.primary{color:#122820;background:var(--teal)}.primary:hover{background:#c3ede0}.small{min-height:36px;padding:7px 13px;font-size:12px}
-.secondary{border-color:#39474b;color:#d9e2db;background:#152026}.secondary:hover{background:#1d2e34;border-color:#59766c}
+.primary{color:var(--on-teal);background:var(--teal)}.primary:hover{background:var(--teal-hi)}.small{min-height:36px;padding:7px 13px;font-size:12px}
+.secondary{border-color:var(--border-strong);color:var(--text);background:var(--field)}.secondary:hover{background:var(--field-hover);border-color:var(--border-hover)}
 .section{padding:32px 40px 8px}.js .surface[hidden]{display:none}
 .sec-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:20px}
-.eyebrow{font:10px var(--mono);letter-spacing:1.6px;color:#a7d1c0;text-transform:uppercase;margin-bottom:8px}.eyebrow.dark{color:#9ab8b3}
-.sec-head h1{font-size:clamp(30px,3.6vw,46px);line-height:1.1;letter-spacing:-1.8px;font-weight:580;margin:4px 0 8px}.sec-head h1 em{font-style:normal;color:var(--teal)}
-.lede{color:#b2c5bd;font-size:14px;max-width:620px;margin:0}
-.tag{font:10px var(--mono);letter-spacing:.3px;color:#b1c0be;border:1px solid #3a4a4d;border-radius:3px;padding:5px 8px;white-space:nowrap}
-.tag.hot{border-color:#5c6b4b;color:#e6c891;background:#3a352620}
+.eyebrow{font:10px var(--mono);letter-spacing:1.6px;color:var(--teal);text-transform:uppercase;margin-bottom:8px}.eyebrow.dark{color:var(--muted)}
+.sec-head h1{font-family:var(--heading);font-size:clamp(30px,3.6vw,46px);line-height:1.1;letter-spacing:-1.8px;font-weight:580;margin:4px 0 8px}.sec-head h1 em{font-style:normal;color:var(--mark)}
+.lede{color:var(--text-2);font-size:14px;max-width:620px;margin:0}
+.tag{font:10px var(--mono);letter-spacing:.3px;color:var(--text-2);border:1px solid var(--border-strong);border-radius:3px;padding:5px 8px;white-space:nowrap}
+.tag.hot{border-color:var(--gold-deep);color:var(--gold);background:transparent}
 .panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;min-width:0}.pad{padding:18px 20px;margin-bottom:16px}
 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.panel h2{font-size:18px;font-weight:560;letter-spacing:-.3px;margin:6px 0 12px}
-.subtle-link{font-size:12px;color:#a9d2c2;overflow-wrap:anywhere}.subtle-link:hover{color:#effff5}
+.subtle-link{font-size:12px;color:var(--teal);overflow-wrap:anywhere}.subtle-link:hover{color:var(--text)}
 .dials{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
-.gauge{margin:0;background:#121b21;border:1px solid var(--border);border-radius:7px;padding:12px 12px 14px;text-align:center}
+.gauge{margin:0;background:var(--panel);border:1px solid var(--border);border-radius:7px;padding:12px 12px 14px;text-align:center}
 .gauge svg{width:100%;max-width:170px;height:auto;display:block;margin:0 auto}
-.g-track{fill:none;stroke:#1f2d33;stroke-width:9}.g-fill{fill:none;stroke-width:9}
+.g-track{fill:none;stroke:var(--line);stroke-width:9}.g-fill{fill:none;stroke-width:9}
 .g-fill.ok{stroke:var(--teal)}.g-fill.warn{stroke:var(--gold)}.g-fill.bad{stroke:var(--coral)}.g-fill.muted{stroke:var(--soft)}
-.g-ticks line{stroke:#5d7279;stroke-width:1.2}.g-needle{stroke:var(--text);stroke-width:2.5;stroke-linecap:round}.g-hub{fill:var(--text)}
+.g-ticks line{stroke:var(--soft);stroke-width:1.2}.g-needle{stroke:var(--text);stroke-width:2.5;stroke-linecap:round}.g-hub{fill:var(--text)}
 .gauge figcaption{display:flex;flex-direction:column}.gauge figcaption b{font:560 26px/1.3 var(--display);letter-spacing:-1px}
-.gauge figcaption span{font:10px var(--mono);letter-spacing:1px;text-transform:uppercase;color:#9fb3af}.gauge small{font-size:12px;color:#8ea4a3}
+.gauge figcaption span{font:10px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.gauge small{font-size:12px;color:var(--muted)}
 b.ok{color:var(--teal)}b.warn{color:var(--gold)}b.bad{color:var(--coral)}b.muted{color:var(--muted)}
 .stats-row{margin:0 0 18px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
-.stat{background:#121b21;border:1px solid var(--border);border-radius:7px;padding:16px 18px}
-.stat-label{font:10px var(--mono);letter-spacing:1px;color:#9fb3af;margin:0}.stat strong{display:block;font-size:24px;font-weight:560;letter-spacing:-.6px;line-height:1.5;color:#e5f1e8;overflow-wrap:anywhere}
-.stat small{font-size:12px;color:#8ea4a3}
+.stat{background:var(--panel);border:1px solid var(--border);border-radius:7px;padding:16px 18px}
+.stat-label{font:10px var(--mono);letter-spacing:1px;color:var(--muted);margin:0}.stat strong{display:block;font-size:24px;font-weight:560;letter-spacing:-.6px;line-height:1.5;color:var(--text);overflow-wrap:anywhere}
+.stat small{font-size:12px;color:var(--muted)}
 .overview-grid{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(280px,1fr);gap:16px}
-.direction-list{display:flex;flex-direction:column}.direction{padding:12px 0;border-top:1px solid #25343b;display:flex;align-items:flex-start;gap:13px}
-.direction-num{font:11px var(--mono);color:#86aaa5;margin-top:2px;min-width:26px}.direction-body{flex:1;min-width:0}
-.direction-body strong{font:600 13px var(--mono)}.direction-body p{font-size:13px;color:#9db0ae;margin:3px 0 0;line-height:1.5;overflow-wrap:anywhere}
+.direction-list{display:flex;flex-direction:column}.direction{padding:12px 0;border-top:1px solid var(--line);display:flex;align-items:flex-start;gap:13px}
+.direction-num{font:11px var(--mono);color:var(--muted);margin-top:2px;min-width:26px}.direction-body{flex:1;min-width:0}
+.direction-body strong{font:600 13px var(--mono)}.direction-body p{font-size:13px;color:var(--text-2);margin:3px 0 0;line-height:1.5;overflow-wrap:anywhere}
 a.direction:hover strong{color:var(--teal)}
-.principle-panel{background:linear-gradient(155deg,#14241f,#121d22 70%)}.split-concept{display:flex;flex-direction:column;gap:12px;margin-top:10px}
-.concept{border-left:2px solid #68988d;padding:1px 0 1px 15px}.concept span{font:10px var(--mono);letter-spacing:1.2px;color:var(--teal)}
-.concept strong{font-size:15px;font-weight:600;display:block;margin:6px 0}.concept p{font-size:13px;color:#a8bab4;margin:4px 0 0}
-.run-concept{border-left-color:#c9b17d}.run-concept span{color:#d9be8f}.concept-divider{color:#536a65;margin-left:14px}
-.principle-footer{border-top:1px solid #293f39;margin:18px 0 0;padding-top:14px;font-size:13px;color:#cbb88a}
+.principle-panel{background:linear-gradient(155deg,var(--teal-bg),var(--panel) 70%)}.split-concept{display:flex;flex-direction:column;gap:12px;margin-top:10px}
+.concept{border-left:2px solid var(--teal-deep);padding:1px 0 1px 15px}.concept span{font:10px var(--mono);letter-spacing:1.2px;color:var(--teal)}
+.concept strong{font-size:15px;font-weight:600;display:block;margin:6px 0}.concept p{font-size:13px;color:var(--text-2);margin:4px 0 0}
+.run-concept{border-left-color:var(--gold)}.run-concept span{color:var(--gold)}.concept-divider{color:var(--soft);margin-left:14px}
+.principle-footer{border-top:1px solid var(--line);margin:18px 0 0;padding-top:14px;font-size:13px;color:var(--gold)}
 .notwired h2{margin-top:12px}.links{padding-left:18px}
-.notice{border-left:2px solid var(--gold);background:#1b1a14;padding:12px 14px;border-radius:4px;margin-bottom:16px;font-size:14px;color:#d8d4c4}
+.notice{border-left:2px solid var(--gold);background:color-mix(in srgb,var(--gold) 8%,var(--bg));padding:12px 14px;border-radius:4px;margin-bottom:16px;font-size:14px;color:var(--text)}
 .choices-grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;align-items:start}.cards{display:grid;gap:10px}
 .card{background:var(--panel-2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;min-width:0}
-.card.flash{border-color:var(--teal);box-shadow:0 0 0 2px #9bd5c855}
+.card.flash{border-color:var(--teal);box-shadow:0 0 0 2px color-mix(in srgb,var(--teal) 33%,transparent)}
 .card.picked-accept{border-color:var(--teal)}.card.picked-reject{border-color:var(--coral)}.card.picked-defer{border-color:var(--soft)}
 .card header{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.card header b{font-family:var(--mono)}
-.badge{font:10px var(--mono);text-transform:uppercase;letter-spacing:1px;padding:3px 7px;border-radius:3px;border:1px solid #3a4a4d}
+.badge{font:10px var(--mono);text-transform:uppercase;letter-spacing:1px;padding:3px 7px;border-radius:3px;border:1px solid var(--border-strong)}
 .badge.decision{color:var(--gold)}.badge.handoff{color:var(--blue)}.badge.challenge{color:var(--purple)}
-.st,.date{font:12px var(--mono);color:#92a7a6}.date{margin-left:auto}
+.st,.date{font:12px var(--mono);color:var(--muted)}.date{margin-left:auto}
 .txt{margin:8px 0;white-space:pre-wrap;overflow-wrap:anywhere}
-dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 12px;margin:6px 0;font-size:13px}dt{color:#92a7a6}dd{margin:0;overflow-wrap:anywhere}
-.hint{color:#9fb1b1;font-size:13px;margin:6px 0}.empty{color:#8ea4a3;font-style:italic}
+dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 12px;margin:6px 0;font-size:13px}dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}
+.hint{color:var(--muted);font-size:13px;margin:6px 0}.empty{color:var(--muted);font-style:italic}
 .btns{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
-.act{min-height:36px;padding:7px 14px;border-radius:5px;border:1px solid #39474b;background:#152026;font:600 12px var(--mono)}
-.act.accept{color:var(--teal)}.act.reject{color:var(--coral)}.act.defer{color:var(--muted)}.act:hover{border-color:#59766c}
-.act.amend{color:var(--gold)}.act.overtaken{color:#e3c27d;border-style:dotted;border-color:#7a6a3d}
-.act.clarify{color:var(--purple);border-color:#5b4a73}.act.clarify::after{content:" · on record";font-weight:400;color:#a99bbf}
-.offrec{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px;padding-top:8px;border-top:1px dashed #33444a;color:#8ea4a3;font-size:12px}
-.act.inquire{border-style:dashed;background:transparent;color:var(--blue)}.act.inquire::after{content:" · off record";font-weight:400;color:#8ea4a3}
-.onrec-note{color:#a99bbf;font-size:12px;margin:6px 0 0}
-.words{margin:8px 0 0;padding:8px 0 0;border-top:1px solid #26353a}.words label{display:block;font-size:12px;color:#9fb1b1}
+.act{min-height:36px;padding:7px 14px;border-radius:5px;border:1px solid var(--border-strong);background:var(--field);font:600 12px var(--mono)}
+.act.accept{color:var(--teal)}.act.reject{color:var(--coral)}.act.defer{color:var(--muted)}.act:hover{border-color:var(--border-hover)}
+.act.amend{color:var(--gold)}.act.overtaken{color:var(--gold);border-style:dotted;border-color:var(--gold-deep)}
+.act.clarify{color:var(--purple);border-color:var(--purple-deep)}.act.clarify::after{content:" · on record";font-weight:400;color:var(--purple)}
+.offrec{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px;padding-top:8px;border-top:1px dashed var(--line);color:var(--muted);font-size:12px}
+.act.inquire{border-style:dashed;background:transparent;color:var(--blue)}.act.inquire::after{content:" · off record";font-weight:400;color:var(--muted)}
+.onrec-note{color:var(--purple);font-size:12px;margin:6px 0 0}
+.words{margin:8px 0 0;padding:8px 0 0;border-top:1px solid var(--line)}.words label{display:block;font-size:12px;color:var(--muted)}
 .words .who{display:flex;flex-wrap:wrap;gap:8px}.words .who label{flex:1 1 180px}
-.words input,.words textarea{display:block;width:100%;box-sizing:border-box;margin:3px 0 6px;min-height:0;height:auto;background:#0d1519;color:inherit;border:1px solid #39474b;border-radius:5px;padding:6px 8px;font:13px/1.4 var(--sans,inherit)}
-.words .req{color:#e3c27d;font-size:11px}.words-note{color:#e3c27d;font-size:12px;margin-left:8px}
-.editor{margin-top:8px}.editor label{display:block;font-size:12px;color:#9fb1b1}
-.editor textarea{display:block;width:100%;min-height:0;height:auto;resize:vertical;box-sizing:border-box;margin:4px 0 6px;background:#0d1519;color:inherit;border:1px solid #39474b;border-radius:5px;padding:8px;font:13px/1.4 var(--sans,inherit)}
+.words input,.words textarea{display:block;width:100%;box-sizing:border-box;margin:3px 0 6px;min-height:0;height:auto;background:var(--sunk);color:inherit;border:1px solid var(--border-strong);border-radius:5px;padding:6px 8px;font:13px/1.4 var(--sans,inherit)}
+.words .req{color:var(--gold);font-size:11px}.words-note{color:var(--gold);font-size:12px;margin-left:8px}
+.editor{margin-top:8px}.editor label{display:block;font-size:12px;color:var(--muted)}
+.editor textarea{display:block;width:100%;min-height:0;height:auto;resize:vertical;box-sizing:border-box;margin:4px 0 6px;background:var(--sunk);color:inherit;border:1px solid var(--border-strong);border-radius:5px;padding:8px;font:13px/1.4 var(--sans,inherit)}
 .ask{border-left:3px solid var(--teal);padding:4px 0 4px 10px;margin:10px 0}
 .ask .q{font-size:15px;font-weight:600;margin:4px 0 6px}.ask .effects{margin:0 0 6px;padding-left:18px;font-size:13px}
-.ask .whose.derived{font-style:italic;color:#c9a96e}.ask .theirs{color:#b3a4c9}.ask .dflt{font-size:12px;color:#9fb1b1;margin:2px 0}
-.overtaken-flag{font-size:12px;color:#e3c27d;margin:6px 0}.tag.warn{color:#e3c27d;border-color:#7a6a3d}
-.apply{position:sticky;top:80px;padding:14px;border-color:#5c6b4b}
-textarea,input,select{width:100%;background:#0a1013;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px}
+.ask .whose.derived{font-style:italic;color:var(--gold)}.ask .theirs{color:var(--purple)}.ask .dflt{font-size:12px;color:var(--muted);margin:2px 0}
+.overtaken-flag{font-size:12px;color:var(--gold);margin:6px 0}.tag.warn{color:var(--gold);border-color:var(--gold-deep)}
+.apply{position:sticky;top:80px;padding:14px;border-color:var(--gold-deep)}
+textarea,input,select{width:100%;background:var(--sunk);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px}
 textarea{min-height:260px;color:var(--teal);font:12px/1.45 var(--mono);resize:vertical}input,select{margin:4px 0 12px}
 #copied{font-size:12px;color:var(--teal)}
 .selector{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px}.sel[aria-pressed=true]{border-color:var(--teal);color:var(--teal)}
-.scroll{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:#0c1418;margin-bottom:12px}svg.topo{display:block}
-.band{fill:#0e161b}.band.alt{fill:#111b21}.band-label{fill:#a0b4b1;font:600 12px var(--mono);letter-spacing:.06em}
-.n-actor{fill:#183a33;stroke:var(--teal);stroke-width:2}.n-owner{fill:#3a3220;stroke:var(--gold);stroke-width:2}
-.n-thread{fill:#1a2c3d;stroke:var(--blue);stroke-width:1.5}.n-capture{fill:#2a2540;stroke:var(--purple);stroke-width:1.5}
+.scroll{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--sunk);margin-bottom:12px}svg.topo{display:block}
+.band{fill:var(--sunk)}.band.alt{fill:var(--panel)}.band-label{fill:var(--text-2);font:600 12px var(--mono);letter-spacing:.06em}
+.n-actor{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.n-owner{fill:var(--gold-bg);stroke:var(--gold);stroke-width:2}
+.n-thread{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.n-capture{fill:var(--purple-bg);stroke:var(--purple);stroke-width:1.5}
 .n-label,.a-label{fill:var(--text);font:11px var(--mono);text-anchor:middle}
 .e-handoff{fill:none;stroke:var(--gold);opacity:.85}.e-captured,.e-capture-of{fill:none;stroke:var(--purple);stroke-dasharray:3 3}
 .m-handoff{fill:var(--gold)}.m-captured,.m-capture-of{fill:var(--purple)}
-.e-count{fill:var(--gold);font:700 11px var(--mono);text-anchor:middle;paint-order:stroke;stroke:#0c1418;stroke-width:3}
-.n-coord{fill:#183a33;stroke:var(--teal);stroke-width:2}.n-lane{fill:#1a2c3d;stroke:var(--blue);stroke-width:1.5}
-.a-structure{fill:none;stroke:#6f858c;stroke-dasharray:5 4;stroke-width:1.5}.m-structure{fill:#6f858c}
+.e-count{fill:var(--gold);font:700 11px var(--mono);text-anchor:middle;paint-order:stroke;stroke:var(--sunk);stroke-width:3}
+.n-coord{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.n-lane{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}
+.a-structure{fill:none;stroke:var(--soft);stroke-dasharray:5 4;stroke-width:1.5}.m-structure{fill:var(--soft)}
 .a-delegation{fill:none;stroke:var(--gold);stroke-width:1.8}.m-delegation{fill:var(--gold)}
-.e-dec{fill:var(--gold);font:600 10px var(--mono);text-anchor:middle;paint-order:stroke;stroke:#0c1418;stroke-width:3}
-.legend{font-size:13px;color:#a7b8b6}
+.e-dec{fill:var(--gold);font:600 10px var(--mono);text-anchor:middle;paint-order:stroke;stroke:var(--sunk);stroke-width:3}
+.legend{font-size:13px;color:var(--text-2)}
 .a-recorded{fill:none;stroke:var(--teal);stroke-width:2.2}.m-recorded{fill:var(--teal)}
 .k-recorded{height:3px;width:22px;border-radius:0;background:var(--teal);vertical-align:3px}
-.hyp{border:1px dashed #6b5f45;border-radius:8px;padding:12px;margin-top:10px;background:repeating-linear-gradient(135deg,#14181b,#14181b 8px,#161b1d 8px,#161b1d 16px)}
+.hyp{border:1px dashed var(--gold-deep);border-radius:8px;padding:12px;margin-top:10px;background:repeating-linear-gradient(135deg,var(--sunk),var(--sunk) 8px,var(--panel) 8px,var(--panel) 16px)}
 .hyp summary{color:var(--gold);font:600 12px var(--mono);letter-spacing:.06em}.hyp[open] summary{margin-bottom:10px}
 .k{display:inline-block;width:14px;height:14px;vertical-align:-2px;margin:0 4px 0 10px;border-radius:50%}.k:first-child{margin-left:0}
-.k-actor{background:#183a33;border:2px solid var(--teal)}.k-owner{background:#3a3220;border:2px solid var(--gold)}
-.k-thread{background:#1a2c3d;border:2px solid var(--blue);border-radius:2px}.k-capture{background:#2a2540;border:2px solid var(--purple);transform:rotate(45deg);border-radius:1px;width:11px;height:11px}
+.k-actor{background:var(--teal-bg);border:2px solid var(--teal)}.k-owner{background:var(--gold-bg);border:2px solid var(--gold)}
+.k-thread{background:var(--blue-bg);border:2px solid var(--blue);border-radius:2px}.k-capture{background:var(--purple-bg);border:2px solid var(--purple);transform:rotate(45deg);border-radius:1px;width:11px;height:11px}
 .k-handoff,.k-delegation{height:3px;width:22px;border-radius:0;background:var(--gold);vertical-align:3px}
 .k-captured{height:0;width:22px;border-radius:0;border-top:2px dashed var(--purple);vertical-align:3px}
-.k-structure{height:0;width:22px;border-radius:0;border-top:2px dashed #6f858c;vertical-align:3px}
+.k-structure{height:0;width:22px;border-radius:0;border-top:2px dashed var(--soft);vertical-align:3px}
 .tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}
-th{text-align:left;font:10px var(--mono);text-transform:uppercase;letter-spacing:1px;color:#92a7a6;border-bottom:1px solid var(--border);padding:7px 8px}
-td{border-bottom:1px solid #1c2a31;padding:7px 8px;vertical-align:top;overflow-wrap:anywhere}td:first-child{font-family:var(--mono);white-space:nowrap}
+th{text-align:left;font:10px var(--mono);text-transform:uppercase;letter-spacing:1px;color:var(--muted);border-bottom:1px solid var(--border);padding:7px 8px}
+td{border-bottom:1px solid var(--line);padding:7px 8px;vertical-align:top;overflow-wrap:anywhere}td:first-child{font-family:var(--mono);white-space:nowrap}
 details{margin:6px 0}summary{cursor:pointer;font:600 13px var(--mono)}summary b{color:var(--gold)}
 .cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .budget-top{display:grid;grid-template-columns:240px minmax(0,1fr);gap:16px;align-items:start}
 .principles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:6px 0 18px}
 .pf-out{font:12px var(--mono);color:var(--gold);margin-top:12px}
 .lane-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
-dialog{background:var(--panel);color:var(--text);border:1px solid #5c6b4b;border-radius:9px;max-width:560px;width:calc(100% - 32px);padding:20px}
-dialog::backdrop{background:#000a}dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px var(--mono);color:var(--teal);background:#0a1013;padding:10px;border-radius:6px;max-height:40vh;overflow:auto}
-footer{color:#9fb1b1;font-size:13px;border-top:1px solid var(--border);margin:24px 0 0;padding-bottom:30px}footer ul{padding-left:18px}
+dialog{background:var(--panel);color:var(--text);border:1px solid var(--gold-deep);border-radius:9px;max-width:560px;width:calc(100% - 32px);padding:20px}
+dialog::backdrop{background:#000a}dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px var(--mono);color:var(--teal);background:var(--sunk);padding:10px;border-radius:6px;max-height:40vh;overflow:auto}
+footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);margin:24px 0 0;padding-bottom:30px}footer ul{padding-left:18px}
+.card.pr header .subtle-link{font:600 13px var(--mono)}.pr-title{font-weight:600;margin:6px 0 4px}
+.badge.pr-st{color:var(--muted)}.pr-open .badge.pr-st{color:var(--teal);border-color:var(--teal-deep)}.pr-merged .badge.pr-st{color:var(--purple)}
+.pr-draft .badge.pr-st{border-style:dashed}.tag.agent{color:var(--blue);border-color:var(--blue)}.pr-secs dd{margin-bottom:6px}
+.pr-secs dt{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.age.old{color:var(--gold)}
+.cards+.eyebrow{margin-top:18px}
 @media (max-width:1000px){.choices-grid,.cols,.overview-grid,.budget-top{grid-template-columns:1fr}.apply{position:static;order:-1}
  .apply textarea{min-height:120px}
  .dials,.stats-row,.principles{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media (max-width:760px){.shell{display:block}.sidebar{position:static;height:auto;padding:12px 16px;border-right:none;border-bottom:1px solid #1d2a32}
+@media (max-width:760px){.shell{display:block}.sidebar{position:static;height:auto;padding:12px 16px;border-right:none;border-bottom:1px solid var(--line)}
  .brand{margin-bottom:10px;padding:0}.nav-title,.sidebar-section,.side-quote,.version{display:none}
  .nav-links{flex-direction:row;overflow-x:auto;gap:4px;padding-bottom:4px}.nav-link{padding:8px 10px;white-space:nowrap}.nav-kbd{display:none}
  .topbar{position:static;padding:10px 16px}.section{padding:20px 16px 4px}.date-label{font-size:10px}
  table,thead,tbody,tr,td{display:block}thead{display:none}tr{border-bottom:1px solid var(--border);padding:4px 0}
- td{border:none;padding:2px 4px}td::before{content:attr(data-h) ": ";color:#92a7a6;font:10px var(--mono)}td:first-child{white-space:normal}
+ td{border:none;padding:2px 4px}td::before{content:attr(data-h) ": ";color:var(--muted);font:10px var(--mono)}td:first-child{white-space:normal}
  dl{grid-template-columns:1fr}dt{margin-top:4px}}
 @media (max-width:420px){.dials,.stats-row,.principles{grid-template-columns:1fr 1fr;gap:8px}.gauge figcaption b{font-size:20px}.stat strong{font-size:19px}}
 """
@@ -1582,7 +1850,8 @@ JS = """
 (function(){
  var d=document,$=function(s){return [].slice.call(d.querySelectorAll(s))};d.documentElement.classList.add('js');
  var names={};$('.nav-link').forEach(function(a){names[a.getAttribute('data-goto')]=a.getAttribute('data-name')});
- function show(n){if(!names[n])n='overview';$('.surface').forEach(function(s){s.hidden=s.id!==n});
+ var land=(d.body&&d.body.getAttribute&&d.body.getAttribute('data-landing'))||'overview';
+ function show(n){if(!names[n])n=names[land]?land:'overview';$('.surface').forEach(function(s){s.hidden=s.id!==n});
   $('.nav-link').forEach(function(a){a.classList.toggle('active',a.getAttribute('data-goto')===n)});
   d.getElementById('crumb').textContent=names[n].toUpperCase();window.scrollTo(0,0)}
  function go(n){show(n);try{history.replaceState(null,'','#'+n)}catch(e){}}
@@ -1590,6 +1859,12 @@ JS = """
  $('[data-goto]').forEach(function(a){a.addEventListener('click',function(ev){ev.preventDefault();go(a.getAttribute('data-goto'));
   var k=a.getAttribute('data-card');if(k)flash(k)})});
  show((location.hash||'').slice(1));
+ $('.age').forEach(function(a){var t=Date.parse(a.getAttribute('data-ts'));if(isNaN(t))return;var h=(Date.now()-t)/36e5;
+  a.textContent=a.getAttribute('data-ts')+' ('+(h<1?'under an hour':h<48?Math.round(h)+' h':Math.round(h/24)+' days')+' ago)';if(h>24)a.classList.add('old')});
+ var tg=d.getElementById('theme-toggle');if(tg){var root=d.documentElement,modes=['auto','light','dark'],cur=tg.getAttribute('data-default');
+  try{var sv=localStorage.getItem('cockpit-theme');if(modes.indexOf(sv)>=0)cur=sv}catch(e){}
+  var apply=function(m){if(m==='auto')root.removeAttribute('data-theme');else root.setAttribute('data-theme',m);tg.textContent='Theme: '+m};apply(cur);
+  tg.addEventListener('click',function(){cur=modes[(modes.indexOf(cur)+1)%3];apply(cur);try{localStorage.setItem('cockpit-theme',cur)}catch(e){}})}
  $('.sel').forEach(function(b){b.addEventListener('click',function(){var n=b.getAttribute('data-net');
   $('.sel').forEach(function(x){x.setAttribute('aria-pressed',x===b?'true':'false')});$('.net').forEach(function(p){p.hidden=p.getAttribute('data-net')!==n})})});
  $('.net').forEach(function(p){p.hidden=p.getAttribute('data-net')!=='info'});
@@ -1698,8 +1973,9 @@ JS = """
 
 # ---------------- writing ----------------
 def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=None, coordinator=None,
-          allow_public_dest=False, brand=None, pr_state=False, pr_lookup=None):
+          allow_public_dest=False, brand=None, pr_state=False, pr_lookup=None, theme=None, landing=None):
     root, out = pathlib.Path(root), pathlib.Path(out)
+    theme = load_theme(theme) if theme else None
     if not root.is_dir():
         raise Refused(f"--root {root} isn't a folder")
     ex.check_destination(out, root, allow_public_dest)   # the export's guard: not in the records, not in a public repo
@@ -1720,7 +1996,11 @@ def build(root, out, lane=None, content="full", weekly_tokens=None, drift_days=N
             print("note: --pr-state is ignored with --content metadata (no text is read, so no references are found)",
                   file=sys.stderr)
     data = collect(root, lane=lane, content=content, weekly_tokens=weekly_tokens, drift_days=drift_days,
-                   coordinator=coordinator, brand=brand, pr_lookup=pr_lookup if pr_state else None, pr_fetched_at=fetched)
+                   coordinator=coordinator, brand=brand, pr_lookup=pr_lookup if pr_state else None, pr_fetched_at=fetched,
+                   landing=landing)
+    if theme:
+        data["theme"] = theme
+        data["query"]["theme"] = theme["name"]
     page = render(data)
     o.mkdir(parents=True, exist_ok=True)
     for name, text in (("cockpit.json", json.dumps(data, ensure_ascii=False, sort_keys=True, indent=1) + "\n"),
@@ -1744,15 +2024,18 @@ def main(argv=None):
     ap.add_argument("--coordinator", help="the coordinator lane (default: the lane whose name contains 'coord')")
     ap.add_argument("--brand", help="name shown in the header (default relay-kit, or 'brand' in governance/cockpit.json)")
     ap.add_argument("--pr-state", action="store_true",
-                    help="look up the pull requests choices name (gh CLI, at build time) to flag ones already merged or "
-                         "closed; the page records when it looked. Off by default: without it nothing touches the network")
+                    help="also look up, with the gh CLI at build time, pull requests choices name that governance/pr-state.jsonl "
+                         "doesn't hold (relay-kit prs is the reader; this fills gaps). Off by default: without it nothing "
+                         "touches the network")
+    ap.add_argument("--theme", type=pathlib.Path, help="a theme file (JSON: dark and optional light colour variables); see docs/cockpit.md")
+    ap.add_argument("--landing", help="the surface the page opens on (default overview, or 'landing' in governance/cockpit.json), e.g. prs")
     ap.add_argument("--allow-public-dest", action="store_true",
                     help="write even inside a git repository that is public or whose visibility can't be confirmed")
     a = ap.parse_args(argv)
     try:
         d = build(a.root, a.out, lane=a.lane, content=a.content, weekly_tokens=a.weekly_tokens,
                   drift_days=a.drift_days, coordinator=a.coordinator, allow_public_dest=a.allow_public_dest,
-                  brand=a.brand, pr_state=a.pr_state)
+                  brand=a.brand, pr_state=a.pr_state, theme=a.theme, landing=a.landing)
     except Refused as err:
         sys.exit(f"refused: {err}")
     c = d["counts"]

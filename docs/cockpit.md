@@ -1,4 +1,4 @@
-# Cockpit (`relay-kit/cockpit@2`)
+# Cockpit (`relay-kit/cockpit@3`)
 
 One static page over your records: what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
@@ -6,18 +6,26 @@ records store, read with the same readers as [export](export.md).
 
     relay-kit cockpit --root path/to/records --out ~/cockpit [--lane L] [--content full|metadata]
                       [--weekly-tokens N] [--drift-days N] [--coordinator LANE] [--brand NAME] [--pr-state]
+                      [--theme FILE] [--landing SURFACE]
 
 It writes two files into `--out`:
 
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@2"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@3"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
 `inquire`; at the top level `questions`, `pr_state`, and `counts.questions_open` and
 `counts.possibly_overtaken`. Nothing from @1 was removed or changed in meaning.
+
+**@3** (HO-RK-20261105-SWK5) adds the **Pull requests** surface (below), `--theme` and `--landing`;
+in `cockpit.json`, top-level `pull_requests` and `theme`, `query.landing` and `query.theme`, and
+`counts.prs_open`. PR states for the "possibly overtaken" check now come from
+`governance/pr-state.jsonl` when it holds the pull request; `--pr-state` only looks up the ones it
+doesn't. Nothing from @2 was removed or changed in meaning, and without `--theme` the page looks as
+it did.
 
 The page is deterministic: two runs over the same records give byte-identical files. The only
 date on it is "generated from records as of" the latest timestamp found in the records, and
@@ -41,6 +49,53 @@ header (default `relay-kit`; or `brand` in `governance/cockpit.json`).
 | 07 | Project lanes | One card per lane (from .ledger.json and threads.md): code, handoffs open/total, decisions and proposals, open challenges, threads, last activity | all |
 | 08 | Run commitments | **Authorized & in progress** (sent, acknowledged or in_progress, with a filled Authorized section; the only handoffs the gauge counts) apart from **pending authorization** (prepared, or no authorization quote); all handoffs by status; PR links found in threads.md; the Drift panel: proposals older than `--drift-days` (default 3) and challenges that mention drift | handoffs/, threads.md, ledgers |
 | 09 | Review | The last 20 decisions, newest first; open challenges | ledgers |
+| 10 | Pull requests | Each pull request [`relay-kit prs`](prs.md) recorded: open first, then merged or closed recently. Its `## What` / `## Why` / `## How` / `## Authorized` sections **verbatim**; who wrote it (an `Author:` line naming anyone but the owner is tagged "written by …, not the owner"; no line says so, with the GitHub login that opened it); which sections are missing; reviews, latest per reviewer, with their family and a verdict stated in the review body; whether a review comes from another family than the author; CI; when it was read. A table of repositories with their last read time, aged in your browser | governance/pr-state.jsonl, governance/cockpit.json |
+
+### Pull requests: words, not summaries
+
+Nothing on the surface is summarised or generated. Section text is what the author wrote under
+those headings, with HTML comments (template hints) removed; a missing section is shown as missing,
+not filled in. A PR body follows the template in
+[tools/templates/PULL_REQUEST_TEMPLATE.md](../tools/templates/PULL_REQUEST_TEMPLATE.md).
+
+**Families.** A reviewer's or author's family comes from `review_families` in
+`governance/cockpit.json` (`{"login or signed name": "family"}`, case-insensitive; the first word
+of a signed name also matches), else from an actor's prefix (`claude:relay-kit#01AB` is `claude`).
+A review can name its reviewer with a `Reviewer: <name>` line in its body; that matters when several
+reviewers post from one account. "Other family" is yes when a review that approved, commented or
+asked for changes comes from a known family different from the author's; "can't tell" when a family
+is unknown. The page states the facts; any rule about how many reviews are needed is yours.
+`owner_names` in the same file lists other names that mean the owner in an `Author:` line.
+
+**Freshness.** The page never fetches. Each card shows when its line was read; the repository
+table shows each repository's last successful read, and the page counts its age in your browser
+(over a day is marked). Rebuild after `relay-kit prs` for newer state.
+
+## Themes and landing
+
+`--landing SURFACE` (or `"landing"` in `governance/cockpit.json`) opens the page on another surface,
+e.g. `prs`. A `#surface` in the address still wins.
+
+`--theme FILE` restyles the page from a JSON file:
+
+```json
+{"name": "my-theme", "default": "auto",
+ "dark":  {"bg": "#0b1015", "teal": "#9bd5c8", "mark": "#e5a45d", "heading": "Georgia, serif"},
+ "light": {"bg": "#f3f1ea", "text": "#182832"}}
+```
+
+Keys are the page's own colour variables (without `--`): `bg sunk panel panel-2 field field-hover
+border border-strong border-hover line text text-2 muted soft teal teal-hi on-teal teal-bg teal-deep
+gold gold-deep gold-bg purple purple-deep purple-bg coral blue blue-bg ok mark mark-word focus`, and
+the font lists `display mono heading`. Colours are `#hex` or `var(--another)`; font lists are
+names, commas and quotes. Anything else is refused, so a theme cannot carry markup or other CSS
+into the page. `mark` and `mark-word` colour the brand mark and name. Fonts are named, never
+loaded: the page fetches nothing, so a font that isn't installed falls back to the next in the list.
+
+A `light` block adds a light scheme over a neutral light palette (a theme names only what it
+changes): it follows the system setting, and a **Theme** button in the header cycles auto / light /
+dark, remembered in this browser only. `default` (`auto`, `dark` or `light`) is where it starts.
+Without `--theme` the page is the dark palette above, with no light scheme and no button.
 
 ### Choices compose; you apply (DEC-019)
 
