@@ -309,6 +309,8 @@ class Server:
             actors = [x.strip() for x in actors.split(",") if x.strip()]
         out = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-mcp-export-")) / "export"
         try:
+            if ex.git_dirs(out.parent.resolve()):
+                raise ToolError("refused: the temporary directory is inside a Git repository; set TMPDIR outside any repository")
             m = ex.export(self.root, out, lane=a.get("lane"), actors=actors, since=a.get("since"), until=a.get("until"),
                           kinds=[k.strip() for k in kinds.split(",")] if isinstance(kinds, str) else kinds,
                           granularity=a.get("granularity") or "message", content=content,
