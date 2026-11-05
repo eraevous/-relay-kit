@@ -68,6 +68,24 @@
         "export: missing captures, hidden steps, absent timestamps and missing outputs are reported in the manifest",
         "export: a destination inside a public or unconfirmed GitHub repository is refused"
       ]
+    },
+    {
+      "id": "relay-kit/cockpit@1",
+      "what": "Read-only static control surface over a records store: DIR/index.html (one self-contained page: Choices, Topology, Budget, Run/Drift and the other v0.4 surfaces) and DIR/cockpit.json (the data it was built from). Choices compose paste-ready ledger_append / handoff set lines and write nothing (DEC-019). Reads decisions, challenges, handoff@1/@2, threads.md and conversation@1 through the export@1 readers, plus governance/budget.jsonl; changes none of them. Deterministic; the only date is the latest record timestamp.",
+      "spec": "docs/cockpit.md",
+      "implementers": [
+        "tools/cockpit.py"
+      ],
+      "tests": [
+        "cockpit: Choices lists exactly the proposed decision, the owner-waiting handoff and the open challenge",
+        "cockpit: a composed ledger line parses as JSON with the referenced id and the chosen status, and passes the ledger check",
+        "cockpit: --content metadata leaves out decision, challenge and handoff bodies (ids and states only)",
+        "cockpit: a destination inside a public GitHub repository or inside the records is refused",
+        "cockpit: two runs give byte-identical output and leave the records untouched",
+        "cockpit: a composed line pasted unedited is refused by ledger_append (its <<REQUIRED placeholders fail the ledger check)",
+        "cockpit: Run commitments count only authorized handoffs in progress; prepared or unauthorized ones are pending",
+        "cockpit: only an adopted decision with delegates_to draws a recorded delegation edge"
+      ]
     }
   ]
 }

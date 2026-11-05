@@ -23,6 +23,9 @@ challenges.jsonl, one object per line:
   resolution required unless open
   resolves  optional: an earlier CH id this line closes (the earlier line stays as written)
 
+No field of any line may still hold a "<<REQUIRED" placeholder: the cockpit composes lines with
+them where only the owner can supply the words (decider, basis, locator, resolution).
+
 With --git, also checks that both files only grew since the last commit, or since
 --base REF (append-only):
 earlier lines may not be edited or removed. A status change is a new line with the same
@@ -67,8 +70,30 @@ def check_ids(name, rows, prefix):
     return out
 
 
+PLACEHOLDER = "<<REQUIRED"   # the cockpit's composed lines carry these until the owner fills them in
+
+
+def check_placeholders(name, rows):
+    """A line still holding a <<REQUIRED: ...>> placeholder was pasted without the owner's own words."""
+    out = []
+
+    def walk(v):
+        if isinstance(v, str):
+            return PLACEHOLDER in v
+        if isinstance(v, dict):
+            return any(walk(x) for x in v.values())
+        if isinstance(v, list):
+            return any(walk(x) for x in v)
+        return False
+    for n, r in rows:
+        bad = sorted(k for k, v in r.items() if walk(v))
+        if bad:
+            out.append(f"{name}:{n}: {', '.join(bad)} still hold a {PLACEHOLDER}...>> placeholder; replace it with your own words")
+    return out
+
+
 def check_decisions(rows):
-    out = check_ids("decisions.jsonl", rows, "DEC")
+    out = check_ids("decisions.jsonl", rows, "DEC") + check_placeholders("decisions.jsonl", rows)
     ids = {r.get("id") for _, r in rows}
     for n, r in rows:
         where = f"decisions.jsonl:{n}"
@@ -88,7 +113,7 @@ def check_decisions(rows):
 
 
 def check_challenges(rows):
-    out = check_ids("challenges.jsonl", rows, "CH")
+    out = check_ids("challenges.jsonl", rows, "CH") + check_placeholders("challenges.jsonl", rows)
     seen = set()
     for n, r in rows:
         res = r.get("resolves")
