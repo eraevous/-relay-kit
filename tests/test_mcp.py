@@ -177,6 +177,32 @@ class McpTests(unittest.TestCase):
                          ["HO-RS-20261102-CD34"])
         self.assertTrue(c.call("get_decision", id="DEC-999")["isError"])
 
+    def test_tool_arguments_are_validated(self):
+        """mcp: tools/call rejects arguments that violate the advertised input schema"""
+        c = self.client()
+        c.handshake()
+        invalid = [
+            ("list_decisions", {"limit": -1}),
+            ("list_decisions", {"limit": "many"}),
+            ("status", {"unexpected": True}),
+            ("get_decision", {}),
+            ("get_decision", {"id": 1}),
+            ("search", {"query": "valid", "unexpected": False}),
+            ("export", {"content": "unrecognized"}),
+            ("export", {"granularity": "invalid"}),
+            ("export", {"sanitize_manifest": "yes"}),
+        ]
+        for name, arguments in invalid:
+            with self.subTest(name=name, arguments=arguments):
+                response = c.request("tools/call", {"name": name, "arguments": arguments})
+                self.assertEqual(response["error"]["code"], -32602)
+        for arguments in (None, []):
+            with self.subTest(arguments=arguments):
+                response = c.request("tools/call", {"name": "status", "arguments": arguments})
+                self.assertEqual(response["error"]["code"], -32602)
+        schema = next(t["inputSchema"] for t in srv.TOOLS if t["name"] == "export")
+        self.assertIn("arguments.actors[0]", srv.validate_schema([1], schema["properties"]["actors"], "arguments.actors"))
+
     def test_resources(self):
         """mcp: ledgers and handoffs are relaykit:// resources; a read returns the file with its provenance"""
         c = self.client()
