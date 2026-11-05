@@ -21,6 +21,7 @@ today, the telemetry view next), and written with `relay-kit budget-append`.
 | `metric_version` | @2 | the definition the numbers follow (`budget@2`) |
 | `scope` | @2 | what the numbers cover, in words ("Kairos threads only") |
 | `source` | @2 | where the numbers came from (a log location, a capture id, a status file) |
+| `tokens_detail` | @2 | `{input, output, cache_write, cache_read, by_model}`: the split behind `tokens_in` (input + cache_write) and `tokens_out` (output). Cache reads are kept here, never folded into `tokens_in` |
 
 **Corrections.**
 - A correction must name an **earlier** line with the **same window**. Anything else (itself, a later
@@ -66,6 +67,34 @@ relay-kit budget-append --window session --tokens-in N --tokens-out N --method m
 
 The actor comes from `RELAYKIT_ACTOR` and the time is now, unless given. The line's id is computed
 from its content, and the line is printed. Commit it with the records.
+
+## Measured usage from Claude Code
+
+```
+relay-kit usage-ingest --session <session id> [--session ...] [--projects ~/.claude/projects] [--dir governance]
+```
+
+It runs on the machine that ran the session. Claude Code keeps each session's transcript there under
+`~/.claude/projects/<folder>/<session>.jsonl`, with its subagents in `<session>/subagents/agent-*.jsonl`.
+Each assistant message carries the API's `usage` (input, output, cache creation, cache read) and the
+model. For each session it appends one line:
+
+- `method: measured`, `window: session`, with the interval from the first to the last timestamp;
+- the token split under `tokens_detail`, per model too;
+- `includes_children: {"included": true}`, with the number of subagent logs in `agents`;
+- id `cc-<session>`.
+
+**What it counts.** A message split over several log lines is counted once, by its message id. The
+logs' `costUSD` isn't used. Only what is on disk is counted: a transcript compacted mid-session keeps
+only its later part, though subagent logs may reach back further. The line's `scope` says how many
+messages each file gave.
+
+**Running it again** for the same session appends a correction of its previous line, so a session is
+counted once. Nothing but the line leaves the machine, and the line holds no file paths or folder
+names.
+
+**What it can't meter.** It can't see Codex or ChatGPT sessions, or another machine's sessions. Those
+stay `estimate` lines, or absent, and a coverage count says so.
 
 ## Migration
 

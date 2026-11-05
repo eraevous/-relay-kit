@@ -10,6 +10,7 @@
     relay-kit cockpit --root RECORDS --out DIR [--lane L] [--content full|metadata] [...]   tools/cockpit.py (read-only)
     relay-kit budget-append --window session|weekly --tokens-in N --tokens-out N [...]   tools/budget_append.py
     relay-kit mcp --root RECORDS [--content full|metadata]   tools/mcp_server.py (MCP over stdio)
+    relay-kit usage-ingest --session ID [--dir governance]   tools/usage_ingest.py (Claude Code session logs -> measured budget line)
     relay-kit prs --root RECORDS [--repo OWNER/NAME ...]   tools/prs.py (build-time GitHub PR reader; appends pr-state.jsonl)
     relay-kit zips [--out DIR] [--owner NAME --records OWNER/REPO]   one zip per skill (default ./relay-kit-upload)
     relay-kit --version
@@ -37,6 +38,7 @@ SCRIPTS = {
     "cockpit": HERE / "cockpit.py",
     "prs": HERE / "prs.py",
     "budget-append": HERE / "budget_append.py",
+    "usage-ingest": HERE / "usage_ingest.py",
     "mcp": HERE / "mcp_server.py",
     "zips": HERE / "extract.py",
 }
