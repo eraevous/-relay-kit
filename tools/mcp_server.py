@@ -307,7 +307,11 @@ class Server:
         actors = a.get("actors") or []
         if isinstance(actors, str):
             actors = [x.strip() for x in actors.split(",") if x.strip()]
-        out = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-mcp-export-")) / "export"
+        temp_root = pathlib.Path(tempfile.gettempdir()).resolve()
+        records_root = self.root.resolve()
+        if temp_root == records_root or records_root in temp_root.parents:
+            raise ToolError("refused: the temporary directory is inside the records root; set TMPDIR outside it")
+        out = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-mcp-export-", dir=temp_root)) / "export"
         try:
             if ex.git_dirs(out.parent.resolve()):
                 raise ToolError("refused: the temporary directory is inside a Git repository; set TMPDIR outside any repository")
