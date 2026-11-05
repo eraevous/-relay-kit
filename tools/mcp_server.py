@@ -137,8 +137,8 @@ class Server:
     def t_status(self, a):
         s = self.snap()
         led = s.led
-        superseded = {r["fields"].get("supersedes") for r in s.decisions if r["fields"].get("supersedes")}
-        waiting = [r["ledger_id"] for r in s.decisions if r["status"] == "proposed" and r["ledger_id"] not in superseded]
+        # relay-kit/lifecycle@1, as the export readers resolve it: only effective transitions close anything
+        waiting = [r["ledger_id"] for r in s.decisions if r.get("applicability") == "open"]
         unauthorized, open_rows = [], []
         for h in s.handoffs:
             if h["status"] in led.FINAL:
@@ -152,8 +152,7 @@ class Server:
                               "holder": h.get(HOLDER.get(h["status"], "to")), "last_at": last.get("at"),
                               "last_actor": last.get("actor"), "output_filed": bool(h["outputs"])})
         open_rows.sort(key=lambda r: (OPEN_ORDER.index(r["status"]) if r["status"] in OPEN_ORDER else 9, r["id"]))
-        closed = {r["fields"].get("resolves") for r in s.challenges if r["fields"].get("resolves")}
-        open_ch = [r["ledger_id"] for r in s.challenges if r["status"] == "open" and r["ledger_id"] not in closed]
+        open_ch = [r["ledger_id"] for r in s.challenges if r.get("open")]
         body = {"summary": {"waiting_on_owner": {"proposed_decisions": waiting, "handoffs_without_authorization": unauthorized},
                             "open_handoffs": open_rows, "open_challenges": open_ch,
                             "counts": {"decisions": len(s.decisions), "challenges": len(s.challenges),
@@ -165,7 +164,7 @@ class Server:
         if self.content == "full":
             lines = ["== Waiting on the owner"]
             lines.extend(f"{r['ledger_id']}  proposed {r['fields'].get('date', '')}: {r['fields'].get('decision', '')}"
-                         for r in s.decisions if r["status"] == "proposed" and r["ledger_id"] not in superseded)
+                         for r in s.decisions if r.get("applicability") == "open")
             for h in s.handoffs:
                 if h["handoff_id"] in unauthorized:
                     lines.append(f"{h['handoff_id']}  {h['title']} (Authorized not filled: nobody may start it)")
@@ -178,7 +177,7 @@ class Server:
                 lines.append("none")
             lines.extend(["", "== Open challenges"])
             lines.extend(f"{r['ledger_id']}  {r['fields'].get('concern', '')}" for r in s.challenges
-                         if r["status"] == "open" and r["ledger_id"] not in closed)
+                         if r.get("open"))
             if not open_ch:
                 lines.append("none")
             lines.extend(["", "== Coordination index"])

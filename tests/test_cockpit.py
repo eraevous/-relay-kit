@@ -1,4 +1,4 @@
-"""Tests for tools/cockpit.py (relay-kit/cockpit@3). Standard library only; synthetic data only.
+"""Tests for tools/cockpit.py (relay-kit/cockpit@4). Standard library only; synthetic data only.
 
 Run alone with `python3 -m unittest discover -s tests`, or as part of tests/run_tests.py, which
 reports each test by the first line of its docstring ("cockpit: ...")."""
@@ -154,13 +154,13 @@ class CockpitTests(unittest.TestCase):
     def test_page_builds(self):
         """cockpit: the page builds self-contained, with every surface, and its data matches cockpit.json"""
         data, page, js = self.build()
-        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@3")
+        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@4")
         for sid in ("overview", "intake", "questions", "choices", "topology", "budget", "lanes", "run", "review", "prs"):
             self.assertIn(f'id="{sid}"', page)
         for bad in ("<link", "src=\"http", "src='http", "@import", "url(http"):
             self.assertNotIn(bad, page)
         self.assertEqual(page.count("<script"), 1)
-        self.assertIn("generated from records as of 2026-11-03T10:05Z", page)   # the latest record, not the clock
+        self.assertIn("newest record 2026-11-03T10:05Z", page)   # the latest record, not the clock
         self.assertIn("not wired to records yet".upper(), page)
         self.assertIn("https://chatgpt.com/c/00000000-0000-0000-0000-0000000000ff", page)   # intake link from threads.md
         self.assertEqual(data["run"]["pr_links"], ["https://github.com/example/synthetic/pull/7"])
@@ -385,7 +385,7 @@ class CockpitTests(unittest.TestCase):
         self.add_lanes_and_capture()
         data, page, _ = self.build()
         self.assertEqual(data["as_of"], "2026-11-05T09:00Z")
-        self.assertIn("generated from records as of 2026-11-05T09:00Z", page)
+        self.assertIn("newest record 2026-11-05T09:00Z", page)
 
     def test_lane_last_activity(self):
         """cockpit: a lane's last activity includes handoff log updates, closed challenges and capture end times"""
@@ -573,7 +573,7 @@ class AskTests(unittest.TestCase):
                                   locator="synthetic chat", recorded_by="sam")],
                             [dict(clar, id="CH-004", date="2026-11-05", concern="Which pilot sites?", recorded_by="sam")])
         self.assertEqual(filled.returncode, 0, filled.stdout + filled.stderr)
-        self.assertIn("ledger append --dir governance decision", c["compose"]["amend"]["command"])
+        self.assertRegex(c["compose"]["amend"]["command"], r"ledger append --dir governance --expect DEC-\d+=open@[0-9a-f]{12} decision ")
 
     def test_questions_surface(self):
         """cockpit: a Clarify question leaves Choices and shows under Questions until a line resolves it"""

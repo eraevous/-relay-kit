@@ -207,7 +207,8 @@ Details and threat model: [docs/mcp.md](docs/mcp.md).
 
 - [Conversation schema](docs/conversation-schema.md): the shared format and message ids (`T3a2`).
 - [Export](docs/export.md): `relay-kit/export@1`, the read-only export and its coverage manifest.
-- [Cockpit](docs/cockpit.md): `relay-kit/cockpit@3`, the static control surface over the records.
+- [Ledger lifecycle](docs/lifecycle.md): `relay-kit/lifecycle@1`, one resolver for what is open, settled and in force.
+- [Cockpit](docs/cockpit.md): `relay-kit/cockpit@4`, the static control surface over the records.
 - [Pull-request reader](docs/prs.md): `relay-kit/prs@1`, build-time GitHub PR state into `governance/pr-state.jsonl`.
 - [MCP server](docs/mcp.md): `relay-kit/mcp@1`, read-only tools and resources over the records.
 - [Marking pasted material](docs/paste-markers.md): phone-friendly `FROM:` … `END FROM` blocks.

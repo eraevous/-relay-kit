@@ -41,6 +41,13 @@ HOLDER = {"prepared": "from", "sent": "to", "acknowledged": "to", "in_progress":
 _LEDGER = None
 
 
+def load_lifecycle():
+    spec = importlib.util.spec_from_file_location("relaykit_lifecycle", HERE / "lifecycle.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
 def load_ledger():
     """handoff.py, the skill's standalone script, loaded once as a module (its main() is guarded)."""
     global _LEDGER
@@ -480,10 +487,9 @@ def main():
     rows, unauthorized = handoffs(root, gaps, a.stale_hours)
     decs = jsonl(root / "governance" / "decisions.jsonl", gaps)
     chs = jsonl(root / "governance" / "challenges.jsonl", gaps)
-    superseded = {x.get("supersedes") for x in decs if x.get("supersedes")}
-    waiting = [x for x in decs if x.get("status") == "proposed" and x.get("id") not in superseded]
-    closed = {x.get("resolves") for x in chs if x.get("resolves")}
-    open_ch = [x for x in chs if x.get("status") == "open" and x.get("id") not in closed]
+    res = load_lifecycle().resolve(decs, chs)   # relay-kit/lifecycle@1: only effective transitions close anything
+    waiting = [x for x in decs if (res["decisions"].get(x.get("id")) or {}).get("open")]
+    open_ch = [x for x in chs if (res["challenges"].get(x.get("id")) or {}).get("open")]
 
     print("== Copy")
     print(fresh or "unknown (see Not checked)")
@@ -524,7 +530,9 @@ def main():
     if alarm:
         print(alarm)
     for x in waiting:
-        print(f"{x.get('id')}  proposed {x.get('date', '')}: {x.get('decision', '')}")
+        alt = res["decisions"][x.get("id")]["proposed_replacements"]
+        print(f"{x.get('id')}  proposed {x.get('date', '')}: {x.get('decision', '')}"
+              + (f"  [proposed replacement: {', '.join(alt)}]" if alt else ""))
     for u in unauthorized:
         print(f"{u}  (Authorized not filled: nobody may start it)")
     if not waiting and not unauthorized and not alarm:
@@ -544,6 +552,13 @@ def main():
         print(f"{x.get('id')}  {x.get('concern', '')}")
     if not open_ch:
         print("none")
+
+    if res["problems"] or res["conflicts"]:
+        print("\n== Ledger transitions that take no effect, and conflicts")
+        for pr in res["problems"]:
+            print(f"{pr['id']}  {pr['message']}")
+        for c in res["conflicts"]:
+            print(f"{c['id']}  closed by more than one line: {', '.join(c['closed_by'])} ({', '.join(c['statuses'])})")
 
     print("\n== Coordination index")
     idx = root / "threads.md"

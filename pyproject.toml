@@ -36,5 +36,5 @@ relaykit = "tools"
 "relaykit.skills" = "skills"
 
 [tool.setuptools.package-data]
-relaykit = ["templates/records/*", "templates/records/**/*"]
+relaykit = ["templates/*.md", "templates/records/*", "templates/records/**/*"]
 "relaykit.skills" = ["*/SKILL.md", "*/scripts/*.py"]

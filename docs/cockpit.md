@@ -1,4 +1,4 @@
-# Cockpit (`relay-kit/cockpit@3`)
+# Cockpit (`relay-kit/cockpit@4`)
 
 One static page over your records: what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
@@ -13,7 +13,7 @@ It writes two files into `--out`:
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@3"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@4"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
@@ -29,9 +29,21 @@ and the file answers the rest. Nothing from @2 was removed or changed in meaning
 the page keeps its dark palette and layout; moving about a hundred literal colours onto thirty-odd
 variables merged near-identical shades, so some text and borders differ slightly in tone.
 
-The page is deterministic: two runs over the same records give byte-identical files. The only
-date on it is "generated from records as of" the latest timestamp found in the records, and
-"last 7 days" and "older than N days" are measured back from that timestamp, never from today.
+**@4** (HO-RK-20261105-8DTW, CH-035 findings 1, 5 and 6) reads the ledgers through
+[`relay-kit/lifecycle@1`](lifecycle.md), as status, export and the MCP server do: a proposal leaves
+Choices only when a settled line closes it (a proposed replacement is shown on its card instead), a
+challenge only when a resolved or accepted-risk line resolves it, and transitions that take no effect
+or conflict are listed on Review. Every line it composes for a decision or challenge carries
+`--expect ID=STATE@HASH`, so applying it after the records have moved on is refused with what changed
+(below). The header shows the records' **revision and its commit time** (aged in your browser)
+apart from the **newest record**; `cockpit.json` gains `snapshot`, `transitions` and, on a choice,
+`proposed_replacements`. Nothing from @3 was removed.
+
+The page is deterministic: two runs over the same records give byte-identical files. It shows two
+times, kept apart: the records' git revision and when it was committed (fixed for a revision; the
+browser counts its age, so an old page shows as old), and the newest record's own timestamp. "Last
+7 days" and "older than N days" are measured back from the newest record, never from today.
+Uncommitted changes in the records are flagged beside the revision.
 
 The layout follows the Cockpit v0.4 prototype (2026-11-04): a left rail of numbered surfaces,
 the dark instrument-panel palette, and its vocabulary ("Inquiry is not authority. Capture is not
@@ -111,8 +123,9 @@ Without `--theme` the page is the dark palette above, with no light scheme and n
 The buttons write nothing. Accept and Reject ask "Settle this choice?" and then put a line into
 the **To apply** box; Defer puts a comment there. **The owner supplies the justification**: each
 line carries `<<REQUIRED: ...>>` placeholders for the decider, the basis (your words) and the
-locator (where you said them), or for a challenge's resolution or a handoff note. The page never
-fills in who decided or why, and never sets `recorded_by` (ledger_append takes it from
+locator (where you said them), or for a challenge's resolution or a handoff note. The page fills a
+placeholder only from what you type on the card (the decider, which it remembers in this browser; the
+locator; your words, which it never defaults), and never sets `recorded_by` (ledger_append takes it from
 `RELAYKIT_ACTOR`; handoff.py takes the actor the same way). `check_ledgers.py` refuses any line
 still holding `<<REQUIRED`, so a line pasted unedited is taken back out by ledger_append. Replace
 the placeholders, copy, and run the lines in your records with `RELAYKIT_ACTOR=<owner>`:
@@ -122,6 +135,12 @@ the placeholders, copy, and run the lines in your records with `RELAYKIT_ACTOR=<
 | proposed decision | `relay-kit ledger append --dir governance decision '{"status":"adopted","supersedes":"DEC-N",...}'` | same with `"status":"rejected"` | `# DEC-N: deferred ...` (nothing to append) |
 | open challenge | `... challenge '{"status":"accepted-risk","resolves":"CH-N",...}'` | `... '{"status":"resolved","resolves":"CH-N",...}'` | comment |
 | handoff | `relay-kit handoff --dir handoffs set HO-... <next>`, after you fill its Authorized section | `... set HO-... cancelled` | comment |
+
+**Applying from an old page.** Decision and challenge lines carry `--expect DEC-N=open@<hash>`
+(the item's state when the page was built, and the first 12 hex digits of its line's sha256).
+`ledger_append` checks it against the records you are appending to and, if the item has since been
+settled or its line changed, refuses, appends nothing, and lists the later lines that mention it.
+Handoff lines already carry `--expect` for their state.
 
 ### So what is this asking?
 
@@ -256,14 +275,16 @@ unknown, not unlimited. Nothing enforces it.
 
 - Write to the records, the ledgers, the handoffs or any capture. It reads them and writes only
   the two files in `--out`.
-- Fetch anything: no GitHub calls for pull requests, no provider usage, no fonts. (The destination
-  guard below may ask GitHub whether a repository is public, as export does.)
+- Fetch anything from the page: no GitHub calls, no provider usage, no fonts. At build time,
+  `--pr-state` (opt-in) asks gh about pull requests choices name, and the destination guard below
+  may ask GitHub whether a repository is public, as export does. Pull-request data otherwise comes
+  from `governance/pr-state.jsonl`, which `relay-kit prs` writes.
 - Decide: the authority diagram shows only recorded delegation (`delegates_to`); text-matched
   edges and the owner → coordinator → lane lines live in a closed overlay labelled hypothesised.
   Nothing executable (permissions, routing, commands) is derived from either graph.
 - Supply a justification: decider, basis and locator are always left for the owner.
-- Show idea intake or question stewards it can't read: those surfaces say "not wired to records
-  yet" instead of showing placeholder content.
+- Show idea intake it can't read: that surface says "not wired to records yet" instead of showing
+  placeholder content. (Questions is wired since @2: open challenges with `"kind": "question"`.)
 
 ## `--content metadata`
 

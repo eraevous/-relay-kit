@@ -12,9 +12,16 @@ decisions.jsonl, one object per line:
   decider   who decided ("owner" or a name); required unless proposed
   basis     the owner's words or the option they chose, quoted; required unless proposed
   locator   where those words are (thread, date, time)
-  supersedes / evidence  optional
-  amends    optional, informational: on a line that supersedes a proposal with the owner's edited
-            text (the cockpit's Amend), the proposal it amends
+  supersedes optional: an earlier DEC id. Takes effect only from a settled line (relay-kit/lifecycle@1,
+            docs/lifecycle.md): adopted closes any earlier decision; rejected and superseded settle a
+            proposal only and can't retire an adopted decision; a proposed line is a proposed
+            replacement. Self, forward and unknown references are problems.
+  revokes   optional: earlier DEC id(s) an adopted line ends (from its effective_from, else its date)
+  amends    optional: an earlier DEC id, or {"id": "DEC-N", "clauses": ["2"]}: a partial amendment
+            (the target stays in force). The cockpit's Amend uses it on a line that supersedes a
+            proposal with the owner's edited text.
+  effective_from / effective_until  optional: YYYY-MM-DD or an ISO time in UTC
+  evidence  optional
   ask       optional, on a proposal: what it asks of the owner, in the proposer's words (checked
             when it's an object; question, at least one option and the default are required):
             {"question": "...?", "options": [{"label": "Accept", "effect": "what happens"}, ...],
@@ -27,7 +34,8 @@ challenges.jsonl, one object per line:
   concern   the objection
   raised_by who raised it
   resolution required unless open
-  resolves  optional: an earlier CH id this line closes (the earlier line stays as written)
+  resolves  optional: an earlier CH id this line closes (the earlier line stays as written); only a
+            resolved or accepted-risk line closes anything
   ask       optional, as on decisions
   kind      optional: "question" for a question asked on the record (the cockpit's Clarify); it then
             needs about (the DEC, CH or HO id it asks about) and addressed_to (who it's for). Other
@@ -44,7 +52,17 @@ subject, not an edit. It also checks that the ledgers aren't set to git's `merge
 (which would join two branches' lines silently, duplicate ids included), and that every
 line added since --base has `recorded_by`: the owner's name, or an agent with its session
 (`"claude:aec#01N4"`: a lane is not an actor)."""
-import argparse, json, pathlib, re, subprocess, sys
+import argparse, importlib.util, json, pathlib, re, subprocess, sys
+
+
+def _lifecycle():
+    spec = importlib.util.spec_from_file_location("relaykit_lifecycle", pathlib.Path(__file__).resolve().parent / "lifecycle.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+LC = _lifecycle()
 
 DEC_STATUS = {"proposed", "adopted", "rejected", "superseded"}
 CH_STATUS = {"open", "resolved", "accepted-risk"}
@@ -173,6 +191,29 @@ def check_challenges(rows):
     return out
 
 
+def check_transitions(dec_rows, ch_rows):
+    """relay-kit/lifecycle@1: transitions that would take no effect (self, forward, a proposal or an open
+    challenge closing something, a rejected/superseded line retiring an adopted decision, a malformed
+    date). Unknown decision targets and every bad challenge target are already reported above."""
+    res = LC.resolve([r for _, r in dec_rows], [r for _, r in ch_rows])
+    line = {("decisions.jsonl", r.get("id")): n for n, r in dec_rows}
+    line.update({("challenges.jsonl", r.get("id")): n for n, r in ch_rows})
+    out = []
+    for p in res["problems"]:
+        name = "challenges.jsonl" if str(p["id"]).startswith("CH-") else "decisions.jsonl"
+        if p["rule"] == "unknown" and p["field"] == "supersedes":
+            continue
+        if name == "challenges.jsonl" and p["rule"] in ("unknown", "forward", "self"):
+            continue
+        out.append(f"{name}:{line.get((name, p['id']), '?')}: {p['message']}")
+    for n, r in dec_rows:
+        for f in ("revokes", "amends"):
+            v = r.get(f)
+            if v is not None and not LC.refs(v):
+                out.append(f"decisions.jsonl:{n}: {f} must be a DEC id, a list of them, or {{\"id\": ..., \"clauses\": [...]}}")
+    return out
+
+
 def check_merge_attr(path):
     p = subprocess.run(["git", "-C", str(path.parent), "check-attr", "merge", "--", path.name],
                        capture_output=True, text=True)
@@ -230,7 +271,7 @@ def main():
     problems = []
     dec_rows, p = load(a.dir / "decisions.jsonl"); problems += p
     ch_rows, p = load(a.dir / "challenges.jsonl"); problems += p
-    problems += check_decisions(dec_rows) + check_challenges(ch_rows)
+    problems += check_decisions(dec_rows) + check_challenges(ch_rows) + check_transitions(dec_rows, ch_rows)
     if a.git:
         for f in ("decisions.jsonl", "challenges.jsonl"):
             if (a.dir / f).exists():
