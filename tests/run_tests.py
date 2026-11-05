@@ -925,6 +925,7 @@ def learning_tests():
     g(c2, "commit", "-qam", "news\n\nSee session_ME123's earlier work.\n\nClaude-Session: https://claude.ai/code/session_xsession_ME123")   # a mention, and an id that merely ends in ours
     g(c2, "push", "-q")
     news = run(st_, "--root", c1, "--no-ci", env={"RELAYKIT_ACTOR": "claude:rk#session_ME123"})[1]   # fetched, not pulled
+    # (the earlier decision "d2" must not be listed: matched as a whole line, since a commit hash in the header can contain "d2")
     sec = lambda o: o.split("== Changed")[1].split("\n== ")[0] if "== Changed" in o else ""
     g(c1, "pull", "-q")
     pulled = run(st_, "--root", c1, "--no-fetch", "--no-ci", env={"RELAYKIT_ACTOR": "claude:rk#session_ME123"})[1]
@@ -937,7 +938,7 @@ def learning_tests():
     rc_e, out_e, err_e = run(st_, "--root", empty, "--no-fetch", "--no-ci", env={"RELAYKIT_ACTOR": "claude:rk#s1"})
     case("changed since: lists what other lanes pushed after this session's last commit (fetched, not yet pulled), "
          "not earlier lines, and isn't fooled by a commit that only mentions the session id; an empty repo doesn't crash",
-         "nothing new" in sec(quiet) and "other lane's news" in sec(news) and "d2" not in sec(news)
+         "nothing new" in sec(quiet) and "other lane's news" in sec(news) and not re.search(r": d2$", sec(news), re.M)
          and "other lane's news" in sec(pulled) and "indented line" in sec(pulled) and "DEC-001" in sec(only) and rc_e == 0 and "== Not checked" in out_e, sec(quiet) + "\n--\n" + sec(news) + err_e[-300:])
 
     # review handoffs
@@ -1367,7 +1368,7 @@ def export_tests(module="test_export"):
 
 
 def cockpit_tests():
-    """relay-kit/cockpit@1: the unittest cases in tests/test_cockpit.py, each reported by its docstring."""
+    """relay-kit/cockpit@2: the unittest cases in tests/test_cockpit.py, each reported by its docstring."""
     import unittest
     mod = load("test_cockpit", KIT / "tests" / "test_cockpit.py")
     for t in unittest.defaultTestLoader.loadTestsFromModule(mod):

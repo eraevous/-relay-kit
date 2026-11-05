@@ -205,7 +205,7 @@ Details and threat model: [docs/mcp.md](docs/mcp.md).
 
 - [Conversation schema](docs/conversation-schema.md): the shared format and message ids (`T3a2`).
 - [Export](docs/export.md): `relay-kit/export@1`, the read-only export and its coverage manifest.
-- [Cockpit](docs/cockpit.md): `relay-kit/cockpit@1`, the static control surface over the records.
+- [Cockpit](docs/cockpit.md): `relay-kit/cockpit@2`, the static control surface over the records.
 - [MCP server](docs/mcp.md): `relay-kit/mcp@1`, read-only tools and resources over the records.
 - [Marking pasted material](docs/paste-markers.md): phone-friendly `FROM:` … `END FROM` blocks.
 - [Cold catch-up test](docs/cold-test.md): checking whether a fresh assistant can pick up a handoff.

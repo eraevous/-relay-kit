@@ -1,4 +1,4 @@
-"""Tests for tools/cockpit.py (relay-kit/cockpit@1). Standard library only; synthetic data only.
+"""Tests for tools/cockpit.py (relay-kit/cockpit@2). Standard library only; synthetic data only.
 
 Run alone with `python3 -m unittest discover -s tests`, or as part of tests/run_tests.py, which
 reports each test by the first line of its docstring ("cockpit: ...")."""
@@ -154,7 +154,7 @@ class CockpitTests(unittest.TestCase):
     def test_page_builds(self):
         """cockpit: the page builds self-contained, with every surface, and its data matches cockpit.json"""
         data, page, js = self.build()
-        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@1")
+        self.assertEqual(json.loads(js)["schema"], "relay-kit/cockpit@2")
         for sid in ("overview", "intake", "questions", "choices", "topology", "budget", "lanes", "run", "review"):
             self.assertIn(f'id="{sid}"', page)
         for bad in ("<link", "src=\"http", "src='http", "@import", "url(http"):
@@ -441,6 +441,232 @@ class CockpitTests(unittest.TestCase):
         self.assertEqual((p1, j1), (p2, j2))
         self.assertEqual(before, tree_hash(self.root))
 
+
+ASKED = {"id": "DEC-006", "date": "2026-11-03", "status": "proposed", "decision": "Use the weekly survey.", "scope": "research",
+         "proposed_by": "claude:research#SESSA1", "recorded_by": "claude:research#SESSA1",
+         "ask": {"question": "Run the survey weekly instead of monthly?",
+                 "options": [{"label": "Accept", "effect": "the survey runs every Monday"},
+                             {"label": "Reject", "effect": "it stays monthly"}],
+                 "default_if_unanswered": "it stays monthly"}}
+CITED = {"id": "DEC-007", "date": "2026-11-03", "status": "proposed", "decision": "Merge https://github.com/example/synthetic/pull/7 first.",
+         "scope": "research", "recorded_by": "claude:research#SESSA1"}
+CITER = {"id": "DEC-008", "date": "2026-11-04", "status": "adopted", "decision": "The merge order in DEC-007 was carried out.",
+         "scope": "research", "decider": "sam", "basis": "\"done\"", "locator": "synthetic chat", "recorded_by": "sam"}
+
+
+class AskTests(unittest.TestCase):
+    """HO-RK-20261105-VZH4: what each choice asks, staleness, and Amend / Clarify / Inquire."""
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-cockpit-ask-"))
+        self.root = build_root(self.tmp, recorded=True)   # DEC-001..005, so the new lines continue at DEC-006
+        with open(self.root / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
+            for d in (ASKED, CITED, CITER):
+                f.write(json.dumps(d) + "\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def build(self, name="out", **kw):
+        out = self.tmp / name
+        data = ck.build(self.root, out, **kw)
+        return data, (out / "index.html").read_text(encoding="utf-8")
+
+    def item(self, data, cid):
+        return next(c for c in data["choices"] if c["id"] == cid)
+
+    def check(self, decisions=(), challenges=()):
+        g = self.tmp / f"gov{len(list(self.tmp.iterdir()))}"
+        g.mkdir()
+        base_d = [json.loads(x) for x in (self.root / "governance" / "decisions.jsonl").read_text().splitlines()]
+        base_c = [json.loads(x) for x in (self.root / "governance" / "challenges.jsonl").read_text().splitlines()]
+        (g / "decisions.jsonl").write_text("".join(json.dumps(d) + "\n" for d in base_d + list(decisions)), encoding="utf-8")
+        (g / "challenges.jsonl").write_text("".join(json.dumps(c) + "\n" for c in base_c + list(challenges)), encoding="utf-8")
+        return subprocess.run([sys.executable, "-I", str(KIT / "tools" / "check_ledgers.py"), "--dir", str(g)], capture_output=True, text=True)
+
+    def test_ask_written_or_derived(self):
+        """cockpit: every choice says what it asks; the proposer's ask is shown as theirs, anything else is labelled derived"""
+        data, page = self.build()
+        a = self.item(data, "DEC-006")["ask"]
+        self.assertEqual((a["source"], a["question"], a["by"]), ("proposer", "Run the survey weekly instead of monthly?", "claude:research#SESSA1"))
+        self.assertEqual([o["label"] for o in a["proposer_options"]], ["Accept", "Reject"])
+        # what the buttons do is the page's own description, whatever the proposer wrote
+        self.assertIn("supersedes DEC-006", next(o["effect"] for o in self.item(data, "DEC-006")["effects"] if o["label"] == "Accept"))
+        self.assertIn("THE PROPOSER'S EXPLANATION", page)
+        d = self.item(data, "DEC-002")["ask"]
+        self.assertEqual(d["source"], "derived")
+        self.assertTrue(d["question"].endswith("?"))
+        self.assertIn("Amend", [o["label"] for o in self.item(data, "DEC-002")["effects"]])
+        for c in data["choices"]:
+            self.assertTrue(c["ask"]["question"].endswith("?"), c["id"])
+        self.assertIn("not written by the proposer", page)
+        self.assertIn("written by claude:research#SESSA1", page)
+        meta, mpage = self.build("meta", content="metadata")
+        self.assertEqual(self.item(meta, "DEC-002")["ask"]["question"], "Should DEC-002 be adopted?")
+        mjson = (self.tmp / "meta" / "cockpit.json").read_text(encoding="utf-8")
+        for secret in ("Use the weekly survey.", "Run the survey weekly", "the survey runs every Monday", "it stays monthly"):
+            self.assertNotIn(secret, mpage)   # the proposer's ask is free text: left out in metadata mode
+            self.assertNotIn(secret, mjson)
+        self.assertEqual(self.item(meta, "DEC-006")["ask"]["source"], "derived")
+
+    def test_overtaken_by_later_citation(self):
+        """cockpit: a later record that cites a choice flags it possibly overtaken, with the reason; an open one is listed as waiting on it"""
+        data, page = self.build()
+        c = self.item(data, "DEC-007")
+        self.assertEqual(len(c["possibly_overtaken"]), 1)
+        self.assertTrue(c["possibly_overtaken"][0].startswith("decision DEC-008 (adopted): “"), c["possibly_overtaken"])
+        self.assertIn("carried out", c["possibly_overtaken"][0])   # the words that triggered it are shown
+        self.assertIn("POSSIBLY OVERTAKEN", page)
+        self.assertIn("Close as overtaken", page)
+        self.assertEqual(self.item(data, "DEC-006")["possibly_overtaken"], [])
+        over = json.loads(shlex.split(c["compose"]["overtaken"]["command"])[-1])
+        self.assertEqual((over["status"], over["supersedes"]), ("superseded", "DEC-007"))   # closes it; adopts nothing
+        self.assertIn("<<REQUIRED", over["decision"])   # the owner says what overtook it
+        self.assertEqual(data["counts"]["possibly_overtaken"], 1)
+
+    def test_pr_state_is_opt_in(self):
+        """cockpit: pull request states are looked up only with --pr-state, at build time; a merged PR flags the choice and the page says when it looked"""
+        calls = []
+        def fake(owner, repo, n):
+            calls.append((owner, repo, n))
+            return "merged"
+        data, _ = self.build()
+        self.assertEqual((calls, self.item(data, "DEC-007")["prs"], data["pr_state"]),
+                         ([], [{"pr": "example/synthetic#7", "state": None}], {"looked_up": False}))   # named, not looked up
+        self.assertEqual(len(self.item(data, "DEC-007")["possibly_overtaken"]), 1)
+        data, _ = self.build("pr", pr_state=True, pr_lookup=fake)
+        self.assertEqual(calls, [("example", "synthetic", 7)])
+        c = self.item(data, "DEC-007")
+        self.assertEqual(c["prs"], [{"pr": "example/synthetic#7", "state": "merged"}])
+        self.assertIn("example/synthetic#7 is merged", c["possibly_overtaken"])
+        self.assertIn("Close as overtaken", [o["label"] for o in c["effects"]])
+        self.assertTrue(data["pr_state"]["looked_up"] and data["pr_state"]["fetched_at"])
+        # a bare "<repo> PR #N" counts only for a repository the records spell out as owner/repo
+        self.assertEqual(ck.pr_refs("see library PR #71 and Telosmith PR #5", "sam", {"telosmith"}), [("sam", "Telosmith", 5)])
+        # a PR named only in the proposer's ask (or the scope) is found too
+        with open(self.root / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": "DEC-009", "date": "2026-11-05", "status": "proposed", "decision": "Ship it.", "scope": "release",
+                                "recorded_by": "claude:research#SESSA1",
+                                "ask": {"question": "Merge https://github.com/example/synthetic/pull/9?",
+                                        "options": [{"label": "Accept", "effect": "merged"}], "default_if_unanswered": "open"}}) + "\n")
+        data, _ = self.build("pr-ask", pr_state=True, pr_lookup=fake)
+        self.assertEqual(self.item(data, "DEC-009")["prs"], [{"pr": "example/synthetic#9", "state": "merged"}])
+        self.assertEqual(ck.pr_refs("https://github.com/../../pull/1 and telosmith pr #9", "sam", {"telosmith"}), [])
+        before = len(calls)
+        meta, _ = self.build("pr-meta", content="metadata", pr_state=True, pr_lookup=fake)
+        self.assertEqual((meta["pr_state"], len(calls)), ({"looked_up": False}, before))   # metadata reads no text, looks nothing up
+
+    def test_amend_clarify_lines(self):
+        """cockpit: Amend and Clarify compose ledger lines that pass the check once filled in, and are refused while placeholders remain"""
+        data, _ = self.build()
+        c = self.item(data, "DEC-002")
+        amend = dict(c["compose"]["amend"]["json"], decision="Use the survey, but only for the pilot.")
+        clar = c["compose"]["clarify"]["json"]
+        self.assertEqual((amend["status"], amend["supersedes"], amend["amends"]), ("adopted", "DEC-002", "DEC-002"))
+        self.assertEqual((clar["kind"], clar["about"], clar["addressed_to"], clar["status"]),
+                         ("question", "DEC-002", "claude:research#SESSA1", "open"))
+        unfilled = self.check([dict(amend, id="DEC-009", date="2026-11-05", recorded_by="sam")],
+                              [dict(clar, id="CH-004", date="2026-11-05", recorded_by="sam")])
+        self.assertNotEqual(unfilled.returncode, 0)
+        self.assertIn("REQUIRED", unfilled.stdout)
+        filled = self.check([dict(amend, id="DEC-009", date="2026-11-05", decider="sam", basis='"pilot only"',
+                                  locator="synthetic chat", recorded_by="sam")],
+                            [dict(clar, id="CH-004", date="2026-11-05", concern="Which pilot sites?", recorded_by="sam")])
+        self.assertEqual(filled.returncode, 0, filled.stdout + filled.stderr)
+        self.assertIn("ledger append --dir governance decision", c["compose"]["amend"]["command"])
+
+    def test_questions_surface(self):
+        """cockpit: a Clarify question leaves Choices and shows under Questions until a line resolves it"""
+        q = {"id": "CH-004", "date": "2026-11-05", "status": "open", "kind": "question", "about": "DEC-002",
+             "addressed_to": "claude:research#SESSA1", "concern": "Which pilot sites?", "raised_by": "sam", "recorded_by": "sam"}
+        with open(self.root / "governance" / "challenges.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(q) + "\n")
+        data, page = self.build()
+        self.assertNotIn("CH-004", [c["id"] for c in data["choices"]])
+        self.assertEqual([(x["id"], x["about"], x["addressed_to"]) for x in data["questions"]], [("CH-004", "DEC-002", "claude:research#SESSA1")])
+        self.assertIn("Which pilot sites?", page)
+        self.assertNotIn("NOT WIRED TO RECORDS YET</span><h2>Question stewards", page)
+        with open(self.root / "governance" / "challenges.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": "CH-005", "date": "2026-11-05", "status": "resolved", "resolves": "CH-004", "concern": "Which pilot sites?",
+                                "raised_by": "sam", "resolution": "Sites A and B.", "recorded_by": "claude:research#SESSA1"}) + "\n")
+        data, _ = self.build("again")
+        self.assertEqual(data["questions"], [])
+        # the answer names DEC-002, but answering a question doesn't overtake what it was about
+        self.assertEqual(self.item(data, "DEC-002")["possibly_overtaken"], [])
+
+    def test_overtaken_needs_unnegated_words_in_text(self):
+        """cockpit: closure words count only in record text, not negated, and 'amended' counts; an open question about it is waiting"""
+        lines = [
+            {"id": "DEC-009", "date": "2026-11-04", "status": "adopted", "decision": "Keep DEC-006 open; it is not done yet.",
+             "scope": "research", "decider": "sam", "basis": "\"wait\"", "locator": "synthetic chat", "recorded_by": "sam"},
+            {"id": "DEC-010", "date": "2026-11-04", "status": "rejected", "supersedes": "DEC-002", "decision": "Unrelated; see DEC-001 for context.",
+             "scope": "research", "decider": "sam", "basis": "\"no\"", "locator": "synthetic chat", "recorded_by": "sam"},
+        ]
+        with open(self.root / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
+            for d in lines:
+                f.write(json.dumps(d) + "\n")
+        q = {"id": "CH-004", "date": "2026-11-05", "status": "open", "kind": "question", "about": "DEC-006",
+             "addressed_to": "claude:research#SESSA1", "concern": "Which day?", "raised_by": "sam", "recorded_by": "sam"}
+        with open(self.root / "governance" / "challenges.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(q) + "\n")
+        data, _ = self.build()
+        c = self.item(data, "DEC-006")
+        self.assertEqual(c["possibly_overtaken"], [])   # "not done yet" / "keep ... open" are negations
+        self.assertEqual([w["id"] for w in c["waiting_on_it"]], ["CH-004"])   # the open question about it
+        with open(self.root / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": "DEC-011", "date": "2026-11-05", "status": "adopted", "decision": "DEC-006 amended: fortnightly.",
+                                "scope": "research", "decider": "sam", "basis": "\"ok\"", "locator": "synthetic chat",
+                                "recorded_by": "sam"}) + "\n")
+        data, _ = self.build("again")
+        self.assertEqual(len(self.item(data, "DEC-006")["possibly_overtaken"]), 1)
+        self.assertIn("amended", self.item(data, "DEC-006")["possibly_overtaken"][0])
+
+    def test_settled_records_dont_wait(self):
+        """cockpit: a superseded decision or resolved challenge that cites a choice is neither waiting on it nor evidence about it"""
+        later = {"id": "DEC-009", "date": "2026-11-05", "status": "proposed", "decision": "Follow DEC-006 next month.",
+                 "scope": "research", "recorded_by": "claude:research#SESSA1"}
+        settle = {"id": "DEC-010", "date": "2026-11-05", "status": "rejected", "supersedes": "DEC-009", "decision": "No.",
+                  "scope": "research", "decider": "sam", "basis": "\"no\"", "locator": "synthetic chat", "recorded_by": "sam"}
+        with open(self.root / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(later) + "\n")
+        data, _ = self.build()
+        self.assertEqual([w["id"] for w in self.item(data, "DEC-006")["waiting_on_it"]], ["DEC-009"])
+        with open(self.root / "governance" / "decisions.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(settle) + "\n")
+        data, _ = self.build("again")
+        self.assertEqual(self.item(data, "DEC-006")["waiting_on_it"], [])
+
+    def test_inquire_writes_nothing(self):
+        """cockpit: Inquire is off the record: no command, no ledger line, only a prompt naming the item"""
+        data, page = self.build()
+        for c in data["choices"]:
+            inq = c["compose"]["inquire"]
+            self.assertIsNone(inq["command"])
+            self.assertIsNone(inq["json"])
+            self.assertIn(str(c["id"]), inq["prompt"])
+        self.assertIn("off record", page)
+        self.assertIn("Clarify is on the record", page)
+
+    def test_ledger_check_new_fields(self):
+        """ledger check: ask, kind 'question' (with about and addressed_to) and amends are checked when present"""
+        bad = [
+            ([dict(ASKED, id="DEC-009", ask={"question": "No question mark", "options": []})], [], "ending in '?'"),
+            ([dict(ASKED, id="DEC-009", ask={"question": "Ok?", "options": [{"label": "Accept"}]})], [], "label, effect"),
+            ([dict(ASKED, id="DEC-009", ask={"question": "Ok?", "surprise": 1})], [], "unknown key"),
+            ([dict(ASKED, id="DEC-009", ask={"question": "Ok?", "options": [], "default_if_unanswered": "x"})], [], "non-empty list"),
+            ([dict(ASKED, id="DEC-009", ask={"question": "Ok?", "options": [{"label": "A", "effect": "b"}]})], [], "if nobody answers"),
+            ([], [{"id": "CH-004", "date": "2026-11-05", "status": "open", "kind": "question", "concern": "x", "raised_by": "sam"}], "needs 'about'"),
+            ([], [{"id": "CH-004", "date": "2026-11-05", "status": "open", "kind": "question", "about": "DEC-001",
+                   "addressed_to": None, "concern": "x", "raised_by": "sam"}], "needs 'addressed_to'"),
+        ]
+        for decs, chs, msg in bad:
+            r = self.check(decs, chs)
+            self.assertNotEqual(r.returncode, 0, msg)
+            self.assertIn(msg, r.stdout, msg)
+        self.assertEqual(self.check([]).returncode, 0)
+        # lines that were valid before stay valid: other kinds, a non-object ask, amends on its own
+        ok = self.check([dict(ASKED, id="DEC-009", ask="Should we?"), dict(CITER, id="DEC-010", amends="DEC-006")],
+                        [{"id": "CH-004", "date": "2026-11-05", "status": "open", "kind": "risk", "concern": "x", "raised_by": "sam"}])
+        self.assertEqual(ok.returncode, 0, ok.stdout)
 
 if __name__ == "__main__":
     unittest.main()

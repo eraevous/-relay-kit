@@ -51,9 +51,9 @@ TEXT_FIELDS = {
 LEDGER_STRUCTURAL = {"id", "date", "status", "decider", "recorded_by", "raised_by", "proposed_by", "supersedes", "resolves"}
 KNOWN_FIELDS = {
     "decision": {"id", "date", "status", "decision", "scope", "decider", "basis", "locator", "evidence",
-                 "proposed_by", "note", "recorded_by", "not_covered", "supersedes"},
+                 "proposed_by", "note", "recorded_by", "not_covered", "supersedes", "ask", "amends"},
     "challenge": {"id", "date", "status", "concern", "raised_by", "resolution", "check", "fix", "resolves",
-                  "scope", "evidence", "recorded_by"},
+                  "scope", "evidence", "recorded_by", "ask", "kind", "about", "addressed_to"},
     # conversation@1 as chat-capture's renderer writes it, plus the optional actor/lane this export reads
     "conversation": {"schema", "meta", "hidden_counts", "turns"},
     "conversation.meta": {"title", "platform", "kind", "source_url", "conversation_id", "share_id", "record_created",

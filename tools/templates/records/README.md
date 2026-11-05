@@ -26,6 +26,12 @@ with whom, and what other lanes decided since this session last committed.
     relay-kit ledger append --dir governance decision '{"status": "proposed", "decision": "...", "scope": "..."}'
     relay-kit status --root . --touching <files or thread link>    # before changing shared things
 
+When you propose, say what you are asking the owner, so their cockpit can show it plainly:
+
+    relay-kit ledger append --dir governance decision '{"status": "proposed", "decision": "...", "scope": "...",
+      "ask": {"question": "Adopt X for Y?", "options": [{"label": "Accept", "effect": "X becomes the rule for Y"},
+      {"label": "Reject", "effect": "Y keeps the current rule"}], "default_if_unanswered": "nothing changes"}}'
+
 ## Checks
 
 The same checks run in three places:
