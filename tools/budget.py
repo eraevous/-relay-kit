@@ -95,6 +95,23 @@ def problems(obj):
     return out
 
 
+def row_problems(obj):
+    """Everything wrong with one line, @1 fields and @2 alike: every reader rejects the same lines."""
+    out = []
+    if not when(obj.get("ts")):
+        out.append("ts isn't an ISO time with a zone")
+    if obj.get("window") not in ("weekly", "session"):
+        out.append("window must be weekly or session")
+    for f in ("tokens_in", "tokens_out"):
+        if not isinstance(obj.get(f), int) or isinstance(obj.get(f), bool) or obj[f] < 0:
+            out.append(f"{f} must be an integer >= 0")
+    for f in ("agents", "human_minutes", "merges"):
+        v = obj.get(f)
+        if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v < 0):
+            out.append(f"{f} must be an integer >= 0")
+    return out + problems(obj)
+
+
 def effective(rows):
     """rows: [(line_no, raw, obj)] in file order. Returns (kept, report).
     kept = [(line_no, id, obj, at)]: the lines whose numbers count, each with `at`, the time it is counted

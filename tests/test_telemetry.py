@@ -44,7 +44,7 @@ class TelemetryTests(unittest.TestCase):
             self.assertTrue(x["definition"] and x["label"] and x["version"].startswith(x["metric"] + "@"), x["metric"])
         self.assertEqual(self.m(v, "delivery_throughput")["unknown"], "no governance/pr-state.jsonl: run relay-kit prs")
         self.assertIsNone(self.m(v, "lead_time")["hours"]["median"])
-        self.assertIsNone(self.m(v, "human_intervention")["minutes_reported"])
+        self.assertIsNone(self.m(v, "human_intervention")["minutes_recorded"])
         self.assertEqual(self.m(v, "compute_consumption")["label"], "unknown")
 
     def test_prs(self):
@@ -61,35 +61,50 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual((d["merged"], d["abandoned"], d["merged_per_week"]), (3, 1, {"2026-W45": {"o/r": 3}}))
 
     def test_remediation(self):
-        """telemetry: remediation is counted only over cohorts old enough; a linked fix within the window counts"""
+        """telemetry: remediation is counted only over cohorts old enough; only a fix or revert wording right before this repository's reference counts"""
         self.write_prs(pr(1, "2026-11-01T00:00:00Z", "2026-11-01T01:00:00Z"),
                        pr(2, "2026-11-01T00:00:00Z", "2026-11-01T02:00:00Z"),
                        pr(3, "2026-11-05T00:00:00Z", "2026-11-05T01:00:00Z", title="Fix regression from #1"),
-                       pr(4, "2026-11-28T00:00:00Z", "2026-11-28T01:00:00Z"))
+                       pr(4, "2026-11-28T00:00:00Z", "2026-11-28T01:00:00Z"),
+                       # decoys: a fix word and a reference that aren't linked, another repository's #2, #20 for #2
+                       pr(5, "2026-11-05T00:00:00Z", "2026-11-05T02:00:00Z", title="fixes typo", sections={"why": "Stacked on #2"}),
+                       pr(6, "2026-11-05T00:00:00Z", "2026-11-05T03:00:00Z", title="other/lib#2 fixed upstream; fixes #20"),
+                       pr(7, "2026-11-05T00:00:00Z", "2026-11-05T04:00:00Z", title="Same authority as #2"))
         v = TEL.derive(self.root)          # as of 2026-12-01: PRs 1-3 are 14 days old, PR 4 isn't
         w = self.m(v, "post_merge_remediation")["windows"]
-        self.assertEqual((w["14d"]["cohort"], w["14d"]["remediated"]), (3, 1))
+        self.assertEqual((w["14d"]["cohort"], w["14d"]["remediated"]), (6, 1))     # only #1, by #3
         self.assertEqual((w["30d"]["cohort"], w["30d"]["share"]), (0, None))
-        self.assertEqual(self.m(v, "surviving_changes")["count"], 2)
+        self.assertEqual(self.m(v, "surviving_changes")["count"], 5)
+        x = {"number": 2, "repo": "o/r"}
+        for text, linked in (("Reverts o/r#2", True), ("revert #2", True), ("hotfix for #2", True), ("fixes o/r#2", True),
+                             ("fixes other/lib#2", False), ("fix #20", False), ("#2 then a fix", False)):
+            self.assertEqual(TEL.remediation_link({"title": text}, x), linked, text)
 
     def test_compute_and_coverage(self):
-        """telemetry: corrections and child runs are applied before compute is summed; coverage lists unmeasured agent sessions"""
-        rows = [{"id": "a", "ts": "2026-11-03T09:00:00Z", "actor": "claude:research#SESSA1", "window": "session", "tokens_in": 100, "tokens_out": 0},
+        """telemetry: corrections and child runs are applied before compute is summed; a malformed line is counted invalid, as the cockpit counts it, and breaks nothing"""
+        rows = [{"id": "kid", "ts": "2026-11-03T09:10:00Z", "actor": "claude:review#SESSR9", "window": "session", "tokens_in": 30, "tokens_out": 0,
+                 "method": "measured"},
+                {"id": "a", "ts": "2026-11-03T09:00:00Z", "actor": "claude:research#SESSA1", "window": "session", "tokens_in": 100, "tokens_out": 0},
                 {"id": "b", "ts": "2026-11-03T09:00:00Z", "actor": "claude:research#SESSA1", "window": "session", "tokens_in": 100, "tokens_out": 0,
                  "method": "estimate", "correction_of": "a"},
                 {"id": "c", "ts": "2026-11-03T10:00:00Z", "actor": "claude:review#SESSR9", "window": "session", "tokens_in": 40, "tokens_out": 2,
-                 "method": "measured", "tokens_detail": {"input": 4, "output": 2, "cache_write": 36, "cache_read": 900}}]
+                 "method": "measured", "tokens_detail": {"input": 4, "output": 2, "cache_write": 36, "cache_read": 900},
+                 "includes_children": {"included": True, "ids": ["kid"]}},
+                {"id": "bad", "ts": "2026-11-03T10:00:00Z", "actor": "sam", "window": "session", "tokens_in": "12k", "tokens_out": 0}]
         (self.root / "governance" / "budget.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
         v = TEL.derive(self.root)
         c = self.m(v, "compute_consumption")
         self.assertEqual((c["tokens_by_method"], c["label"], c["corrections_applied"]), ({"estimate": 100, "measured": 42}, "estimate+measured", 1))
-        self.assertEqual(c["categories_from_measured_detail"]["cache_read"], 900)
+        self.assertEqual(c["categories_from_measured_lines"]["cache_read"], 900)
+        self.assertEqual([x["line"] for x in c["invalid_lines"]], [5])                   # the same line the cockpit rejects
+        data = CK.collect(self.root)                                                    # and the build doesn't fall over
+        self.assertEqual([x["line"] for x in data["budget"]["invalid_lines"]], [5])
         cov = self.m(v, "measurement_coverage")
         self.assertIn("claude:research#SESSA1", cov["unmeasured_sessions"])
         self.assertNotIn("claude:review#SESSR9", cov["unmeasured_sessions"])
 
     def test_panel(self):
-        """telemetry: the cockpit's Review panel shows each metric with its label and definition, and no score"""
+        """telemetry: the cockpit's Review panel shows each metric with its label and definition, no score or target, at the page's as of"""
         self.write_prs(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z"))
         out = self.tmp / "o"
         data = CK.build(self.root, out)
@@ -97,8 +112,10 @@ class TelemetryTests(unittest.TestCase):
         self.assertIn("TELEMETRY (relay-kit/telemetry@1, DERIVED", page)
         for x in data["telemetry"]["metrics"]:
             self.assertIn(f'>{x["metric"]}<', page)
-        self.assertNotIn("score:", page.lower())
-        self.assertNotIn("2-3 points", page.split("DEC-100")[0])   # only mentioned to say there is no target
+        panel = page.split("TELEMETRY (relay-kit/telemetry@1")[1].split("</section>")[0]
+        for word in ("score", "target"):
+            self.assertEqual([l for l in panel.lower().split(".") if word in l and "no composite score and no targets" not in l], [])
+        self.assertEqual(data["telemetry"]["as_of"].replace(":00Z", "Z")[:16], (data["as_of"] or "")[:16])    # one clock for page and panel
 
     def test_not_a_record(self):
         """telemetry: the view is derived and is never written into the records"""
@@ -110,6 +127,28 @@ class TelemetryTests(unittest.TestCase):
                             "--out", str(self.tmp / "view.json")], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(json.loads((self.tmp / "view.json").read_text())["schema"], "relay-kit/telemetry@1")
+
+
+    def test_metadata_and_lane(self):
+        """telemetry: --content metadata reads no free text (claims and remediation are unknown); --lane keeps other lanes' handoffs and sessions out"""
+        self.write_prs(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z"))
+        v = TEL.derive(self.root, content="metadata")
+        cl = self.m(v, "coordination_loss")
+        self.assertIsNone(cl["overlapping_claims"])
+        self.assertEqual(self.m(v, "post_merge_remediation")["windows"]["14d"]["unknown"], "--content metadata: pull-request text isn't read")
+        everyone = self.m(TEL.derive(self.root), "measurement_coverage")["unmeasured_sessions"]
+        research = self.m(TEL.derive(self.root, lane="research"), "measurement_coverage")["unmeasured_sessions"]
+        self.assertTrue(any(s_.startswith("claude:review#") for s_ in everyone))
+        self.assertFalse(any(s_.startswith("claude:review#") for s_ in research))
+
+    def test_future(self):
+        """telemetry: a time after the last pull-request read doesn't move as_of; it is flagged instead"""
+        self.write_prs(pr(1, "2026-11-02T00:00:00Z", "2026-11-02T02:00:00Z"))
+        (self.root / "governance" / "budget.jsonl").write_text(json.dumps(
+            {"ts": "2027-06-01T00:00:00Z", "actor": "sam", "window": "session", "tokens_in": 1, "tokens_out": 0}) + "\n", encoding="utf-8")
+        v = TEL.derive(self.root)
+        self.assertTrue(v["as_of"] < "2027")
+        self.assertTrue(any("2027-06-01" in n for n in v["notes"]))
 
 
 if __name__ == "__main__":

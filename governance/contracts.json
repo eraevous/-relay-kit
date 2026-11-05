@@ -175,7 +175,7 @@
     },
     {
       "id": "relay-kit/telemetry@1",
-      "what": "A derived view (tools/telemetry.py, relay-kit telemetry), rebuilt from the records and never stored in them: compute_consumption, delivery_throughput, lead_time, review_burden, post_merge_remediation (14 and 30 days, mature cohorts only), surviving_changes, human_intervention, measurement_coverage and coordination_loss, each with a frozen definition, a version, a measured/proxy/estimate/unknown label, distributions (median, p90, n) and 'unknown' with a reason in place of zero. No composite score, no targets. The cockpit's Review surface shows it.",
+      "what": "A derived view (tools/telemetry.py, relay-kit telemetry), rebuilt from the records and never stored in them: compute_consumption, delivery_throughput, lead_time, review_burden, post_merge_remediation (14 and 30 days, mature cohorts only), surviving_changes, human_intervention, measurement_coverage and coordination_loss, each with a frozen definition, a version, a measured/proxy/estimate/derived/unknown label, --lane and --content metadata as the cockpit applies them, distributions (median, p90, n) and 'unknown' with a reason in place of zero. No composite score, no targets. The cockpit's Review surface shows it.",
       "spec": "docs/telemetry.md",
       "implementers": [
         "tools/telemetry.py",
@@ -184,10 +184,12 @@
       "tests": [
         "telemetry: every metric carries its definition, version and label; with no records each says unknown, never zero",
         "telemetry: lead time and review burden are distributions from pr-state; abandoned PRs are counted apart",
-        "telemetry: remediation is counted only over cohorts old enough; a linked fix within the window counts",
-        "telemetry: corrections and child runs are applied before compute is summed; coverage lists unmeasured agent sessions",
-        "telemetry: the cockpit's Review panel shows each metric with its label and definition, and no score",
-        "telemetry: the view is derived and is never written into the records"
+        "telemetry: remediation is counted only over cohorts old enough; only a fix or revert wording right before this repository's reference counts",
+        "telemetry: corrections and child runs are applied before compute is summed; a malformed line is counted invalid, as the cockpit counts it, and breaks nothing",
+        "telemetry: the cockpit's Review panel shows each metric with its label and definition, no score or target, at the page's as of",
+        "telemetry: the view is derived and is never written into the records",
+        "telemetry: --content metadata reads no free text (claims and remediation are unknown); --lane keeps other lanes' handoffs and sessions out",
+        "telemetry: a time after the last pull-request read doesn't move as_of; it is flagged instead"
       ]
     },
     {
