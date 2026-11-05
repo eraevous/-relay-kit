@@ -31,7 +31,7 @@ is not DORA's Change Failure Rate.
 | `delivery_throughput` | Merged pull requests per ISO calendar week, by repository; abandoned (closed, not merged) counted apart | proxy (for delivered value) |
 | `lead_time` | Wall-clock hours from pull request creation to merge. Never human work time | measured |
 | `review_burden` | Change-request review rounds per merged pull request: GitHub's verdict, or a verdict stated at the start of a review posted as a comment | measured |
-| `post_merge_remediation` | Share of merged pull requests with an explicitly linked later revert or fix (same repository; the PR referenced with fix, revert or hotfix wording) within 14 days (DEC-123) and 30 days (Kate's round 11), counted only over cohorts at least that old | proxy |
+| `post_merge_remediation` | Share of merged pull requests with an explicitly linked later revert or fix (same repository; the PR referenced with fix, revert or hotfix wording) within 14 days (DEC-123) and 30 days (the other-family review's recommendation), counted only over cohorts at least that old | proxy |
 | `surviving_changes` | Merged pull requests not reverted or fixed by an explicitly linked change within 14 days (DEC-123's unit of output; ">50% rewritten" can't be told from pr-state and isn't applied) | proxy |
 | `human_intervention` | Self-reported active owner minutes (`human_minutes` on budget lines); unknown otherwise, never inferred from session spans | proxy or unknown |
 | `measurement_coverage` | The agent sessions named in the handoffs that have a measured budget line, budget lines by method, repositories read, and pull-request lines with unread parts | measured |

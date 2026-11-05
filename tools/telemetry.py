@@ -101,7 +101,9 @@ def derive(root):
     prs = read_prs(root)
     bpath = root / "governance" / "budget.jsonl"
     brows, bbad = BG.parse(bpath.read_text(encoding="utf-8")) if bpath.is_file() and not bpath.is_symlink() else ([], [])
-    kept, corr = BG.effective(brows) if brows else ([], {"replaced": {}, "children_included": {}, "conflicts": [], "unknown_targets": [], "methods": {}})
+    kept4, corr = BG.effective(brows) if brows else ([], {"replaced": {}, "children": {}, "conflicts": [], "invalid": [], "duplicates": [], "methods": {}})
+    kept4 = BG.exclude_children(kept4, corr)            # all-time view: a child inside a counted parent isn't added again
+    kept = [(n, i, dict(o, ts=at or o.get("ts"))) for n, i, o, at in kept4]   # counted at the replaced line's time
 
     # as of: the newest time anywhere in what was read, never the clock
     stamps = [t(x.get("ts")) for x in (prs or {"latest": {}})["latest"].values()]
@@ -151,6 +153,7 @@ def derive(root):
                     categories_from_measured_detail=cats, lines_without_category_split=unknown_split,
                     active_days=len(days), lines=len([1 for _, _, o in kept if o.get("window") == "session"]),
                     corrections_applied=len(corr["replaced"]), correction_conflicts=corr["conflicts"],
+                    budget_lines_taking_no_effect=corr["invalid"],
                     unknown=None if by_method else "no budget lines"))
 
     # ---- pull-request metrics ----
