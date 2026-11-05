@@ -366,7 +366,7 @@ def compose_extra(kind, cid, owner, proposer, full, text, scope):
         over = {"status": "superseded", "supersedes": cid, "decision": f"{cid} is closed as overtaken, not adopted: <<REQUIRED: what overtook it (a merged PR, a later decision)>>",
                 "scope": scope if full and scope else f"As in {cid}.",
                 "decider": REQ["decider"], "basis": REQ["basis"], "locator": REQ["locator"]}
-        out["overtaken"] = {"json": over, "command": ledger_cmd("decision", over)}
+        out["overtaken"] = {"json": over, "command": ledger_cmd("decision", over), "edit_field": "decision"}
     elif kind == "challenge":
         over = {"status": "resolved", "resolves": cid, "concern": f"As raised in {cid}.",
                 "raised_by": proposer or owner, "resolution": f"Overtaken: <<REQUIRED: what made {cid} moot, in your words>>"}
@@ -579,9 +579,14 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             if not later:
                 continue
             cited.append(ref)
-            # strong: a settled later record that, near the id, says it closed, replaced, amended or carried it
-            # out (not a question about it: those are open and listed as waiting above)
-            phrase = closure_phrase(txt, m.start(), m.end()) if (k2, i2) not in question_ids else None
+            # strong: a settled later record that, near any mention of the id, says it closed, replaced, amended
+            # or carried it out (not a question about it: those are open and listed as waiting above)
+            phrase = None
+            if (k2, i2) not in question_ids:
+                for mm in pat.finditer(txt):
+                    phrase = closure_phrase(txt, mm.start(), mm.end())
+                    if phrase:
+                        break
             if phrase:
                 strong.append(dict(ref, phrase=phrase))
         item["waiting_on_it"] = sorted(waiting, key=lambda r: str(r["id"]))
@@ -1053,7 +1058,7 @@ def choice_card(c, pr_fetched_at=None):
         return (f' data-template="{e(dumps(x["json"]))}" data-kind="{ledger_kind}"' if x.get("json") and ledger_kind else "")
     btns = "".join(f'<button type="button" class="act {a}" data-key="{e(key)}" data-act="{a}" '
                    f'data-line="{e(comp[a]["command"])}"{tmpl(a)}>{a.title()}</button>' for a in ("accept", "reject", "defer"))
-    if "overtaken" in comp and c.get("possibly_overtaken"):
+    if "overtaken" in comp and c.get("possibly_overtaken") and c["kind"] == "challenge":   # its resolution is your words
         btns += (f'<button type="button" class="act overtaken" data-key="{e(key)}" data-act="overtaken" '
                  f'data-line="{e(comp["overtaken"]["command"])}"{tmpl("overtaken")}>Close as overtaken</button>')
     # Your words, decider and locator (DEC-113 part 3): the page fills them into the line when you click.
@@ -1069,17 +1074,18 @@ def choice_card(c, pr_fetched_at=None):
              f'<button type="button" class="secondary small same-last">Same as last</button>'
              f'<span class="words-note" role="status"></span></div>')
     edits = ""
-    for a, label, what in (("amend", "Amend", "Your text for the decision (it replaces the proposal's in the adopted line):"),
+    for a, label, what in (("overtaken", "Close as overtaken", "What overtook it (a merged PR, a later decision)? It goes into the closing line's text; your words above are the basis:"),
+                           ("amend", "Amend", "Your text for the decision (it replaces the proposal's in the adopted line):"),
                            ("clarify", "Clarify", "Your question to " + (str(comp.get("clarify", {}).get("json", {}).get("addressed_to")) if comp.get("clarify") else "the proposer") + ":")):
-        if a not in comp:
+        if a not in comp or (a == "overtaken" and not (c["kind"] == "decision" and c.get("possibly_overtaken"))):
             continue
         x = comp[a]
-        cls = "act amend" if a == "amend" else "act clarify onrec"
+        cls = {"amend": "act amend", "overtaken": "act overtaken"}.get(a, "act clarify onrec")
         btns += f'<button type="button" class="{cls}" data-key="{e(key)}" data-open="{a}" aria-expanded="false">{label}</button>'
         pre = (c.get("text") or "") if a == "amend" else ""
         edits += (f'<div class="editor" data-for="{a}" hidden><label>{e(what)}<textarea rows="{4 if a == "amend" else 3}">{e(pre)}</textarea></label>'
                   f'<button type="button" class="primary small compose" data-key="{e(key)}" data-act="{a}" '
-                  f'data-kind="{"decision" if a == "amend" else "challenge"}" data-field="{e(x["edit_field"])}" '
+                  f'data-kind="{"challenge" if a == "clarify" else "decision"}" data-field="{e(x["edit_field"])}" '
                   f'data-template="{e(dumps(x["json"]))}">Add to To apply</button></div>')
     off = ""
     if "inquire" in comp:
@@ -1608,19 +1614,27 @@ JS = """
  var B=d.body,owner=(B&&B.getAttribute&&B.getAttribute('data-owner'))||'',asof=(B&&B.getAttribute&&B.getAttribute('data-asof'))||'';
  function now(){var t=new Date(),z=function(n){return(n<10?'0':'')+n};return t.getFullYear()+'-'+z(t.getMonth()+1)+'-'+z(t.getDate())+' '+z(t.getHours())+':'+z(t.getMinutes())}
  $('.in-decider').forEach(function(i){i.value=ls('decider')||owner;i.addEventListener('change',function(){ls('decider',i.value)})});
- $('.in-locator').forEach(function(i){i.value=ls('locator')||('Cockpit Choices, records as of '+asof+', '+now());i.addEventListener('change',function(){ls('locator',i.value)})});
+ $('.in-locator').forEach(function(i){i.value='Cockpit Choices, records as of '+asof+', '+now()});   // fresh each time: it carries the time
  $('.same-last').forEach(function(b){b.addEventListener('click',function(){var w=b.closest('.words'),v=ls('words');
   w.querySelector('.words-note').textContent=v?'':'no earlier words in this browser';if(v){w.querySelector('.in-words').value=v}})});
  var RQ=/<<REQUIRED[^>]*>>/g;
- function filled(b,card,obj){var w=(card.querySelector('.in-words')||{}).value||'',dec=card.querySelector('.in-decider'),loc=card.querySelector('.in-locator');
-  w=w.trim();if(!w){var n=card.querySelector('.words-note');if(n)n.textContent='Write your words first: a settled line carries them, and the page never invents them.';
-   var ta=card.querySelector('.in-words');if(ta)ta.focus();return null}
-  if(obj){Object.keys(obj).forEach(function(f){if(typeof obj[f]!=='string')return;
-    var v=f==='decider'?(dec&&dec.value.trim()):f==='locator'?(loc&&loc.value.trim()):w;if(v)obj[f]=obj[f].replace(RQ,function(){return v})});return obj}
+ function say(card,msg,el){var n=card.querySelector('.words-note');if(n)n.textContent=msg;if(el&&el.focus)el.focus();return null}
+ // Only the owner's own fields are filled: decider, locator, and the words (basis, or a challenge's resolution).
+ // Any other placeholder (a decision's text) comes from its own editor, never from the words.
+ var OWN={decider:'decider',locator:'locator',basis:'words',resolution:'words'};
+ function filled(b,card,obj){var wi=card.querySelector('.in-words'),w=((wi||{}).value||'').trim(),dec=card.querySelector('.in-decider'),loc=card.querySelector('.in-locator');
+  if(!w)return say(card,'Write your words first: a settled line carries them, and the page never invents them.',wi);
+  if(obj){var miss=null;Object.keys(obj).forEach(function(f){if(typeof obj[f]!=='string'||!OWN[f]||!RQ.test(obj[f]))return;RQ.lastIndex=0;
+    var v=OWN[f]==='decider'?(dec&&dec.value.trim()):OWN[f]==='locator'?(loc&&loc.value.trim()):w;
+    if(!v){miss=miss||f;return}obj[f]=obj[f].replace(RQ,function(){return v})});RQ.lastIndex=0;
+   if(miss)return say(card,'Fill in the '+miss+' first (it is empty).',miss==='decider'?dec:loc);return obj}
   return w}
  function lineFor(b){var card=b.closest('.card'),t=b.getAttribute('data-template');
   if(t){var o=filled(b,card,JSON.parse(t));return o&&('relay-kit ledger append --dir governance '+b.getAttribute('data-kind')+' '+shq(JSON.stringify(o)))}
-  var w=filled(b,card,null);if(w===null)return null;return b.getAttribute('data-line').replace(/--note '[^']*'/,function(){return '--note '+shq(w)})}
+  var raw=b.getAttribute('data-line');if(!/--note '/.test(raw))return raw;   // a comment line: nothing to fill
+  var w=filled(b,card,null);if(w===null)return null;
+  w=w.split(/\\s*\\n\\s*/).join(' / ');   // handoff.py takes a one-line note
+  return raw.replace(/--note '[^']*'/,function(){return '--note '+shq(w)})}
  function remember(card){var w=card.querySelector('.in-words');if(w&&w.value.trim())ls('words',w.value.trim())}
  $('button[data-line]').forEach(function(b){b.addEventListener('click',function(){var a=b.getAttribute('data-act');
   if(a==='defer'){pick(b);return}
@@ -1644,14 +1658,18 @@ JS = """
    var o=c.querySelector('[data-open="'+ed.getAttribute('data-for')+'"]');if(o)o.setAttribute('aria-expanded',on?'true':'false');
    if(on){var ta=ed.querySelector('textarea');if(ta)ta.focus()}})})});
  $('.compose').forEach(function(b){b.addEventListener('click',function(){var a=b.getAttribute('data-act'),k=b.getAttribute('data-key'),
-  o=JSON.parse(b.getAttribute('data-template')),f=b.getAttribute('data-field'),v=b.closest('.editor').querySelector('textarea').value.trim();
-  if(v)o[f]=v;if(a==='amend'){o=filled(b,b.closest('.card'),o);if(!o)return}
+  o=JSON.parse(b.getAttribute('data-template')),f=b.getAttribute('data-field'),ed=b.closest('.editor').querySelector('textarea'),v=ed.value.trim();
+  if(a==='overtaken'){if(!v)return say(b.closest('.card'),'Say what overtook it first.',ed);o[f]=o[f].replace(RQ,function(){return v});RQ.lastIndex=0}
+  else if(v){o[f]=v}
+  if(a==='amend'&&RQ.test(o[f])){RQ.lastIndex=0;return say(b.closest('.card'),'Write the decision text for your amendment first.',ed)}
+  if(a==='amend'||a==='overtaken'){o=filled(b,b.closest('.card'),o);if(!o)return}
   var line='relay-kit ledger append --dir governance '+b.getAttribute('data-kind')+' '+shq(JSON.stringify(o));
   var pk={getAttribute:function(n){return n==='data-key'?(a==='clarify'?k+'|question':k):n==='data-act'?a:n==='data-line'?line:null},
    closest:function(s){return b.closest(s)}};
-  ask(a==='amend'?'AMEND THIS DECISION?':'ASK ON THE RECORD?',
-   (a==='amend'?'Adopt '+k.split(':')[1]+' with your text?':'Ask about '+k.split(':')[1]+' on the record?'),
-   a==='amend'?'This adds an adopted line that supersedes the proposal, with your edited text. You still fill in decider, basis and locator.'
+  ask(a==='amend'?'AMEND THIS DECISION?':a==='overtaken'?'CLOSE AS OVERTAKEN?':'ASK ON THE RECORD?',
+   (a==='amend'?'Adopt '+k.split(':')[1]+' with your text?':a==='overtaken'?'Close '+k.split(':')[1]+' without adopting it?':'Ask about '+k.split(':')[1]+' on the record?'),
+   a==='amend'?'This adds an adopted line that supersedes the proposal, with your edited text, your words as the basis, and your decider and locator.'
+    :a==='overtaken'?'This adds a superseded line: the proposal is closed and nothing is adopted. What overtook it goes in the decision text; your words are the basis.'
     :'This adds an open question (a challenge of kind question), listed under Questions until a line resolves it. Recording it delivers nothing: tell the person it is addressed to.',
    line,'Add to To apply',function(){pick(pk)})})});
  // Inquire: off the record. Copies a prompt; no line, no record, no obligation

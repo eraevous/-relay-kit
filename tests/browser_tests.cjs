@@ -243,10 +243,10 @@ async function fill(els = null) {
     dlg.showModal = () => { dlg.open = true; };
     const close = (v) => { dlg.open = false; dlg.returnValue = v; dlg.fire('close'); };
     // a card holding the owner's words (DEC-113 part 3); without them a settling line is refused
-    const words = el({}), note = el({});
-    words.value = 'Owner words, quoted.';
+    const words = el({}), note = el({}), decider = el({}), locator = el({});
+    words.value = 'Owner words, quoted.'; decider.value = 'sam'; locator.value = 'synthetic chat';
     const card = el();
-    card.querySelector = (s) => (s === '.in-words' ? words : s === '.words-note' ? note : null);
+    card.querySelector = (s) => ({ '.in-words': words, '.words-note': note, '.in-decider': decider, '.in-locator': locator }[s] || null);
     const attr = (rest, name) => { const m = rest.match(new RegExp(name + '="([^"]*)"')); return m ? unesc(m[1]) : undefined; };
     const buttons = [...page.matchAll(/<button type="button" class="act (\w+)" data-key="([^"]*)" data-act="\w+" data-line="([^"]*)"([^>]*)>/g)]
       .map(([, act, key, line, rest]) => {
@@ -276,7 +276,7 @@ async function fill(els = null) {
       choose(A, 'accept');
       choose(A, 'reject');   // unedited: a new pick for the same item replaces its line
       check('cockpit To apply: an unedited box is rebuilt from the picks', box.value === lineOf(A, 'reject') + '\n', box.value);
-      box.value = box.value.replace('<<REQUIRED: your name>>', 'OWNER-EDIT');
+      box.value = box.value.replace('"decider":"sam"', '"decider":"OWNER-EDIT"');
       box.fire('input');
       const edited = box.value;
       choose(B, 'accept');
@@ -304,6 +304,10 @@ async function fill(els = null) {
       dlg.open = false; btn(A, 'accept').fire('click');
       check('cockpit words: settling without your words composes nothing and says why', dlg.open !== true && /Write your words first/.test(note.textContent), { open: dlg.open, note: note.textContent });
       words.value = 'Owner words, quoted.';
+      check('cockpit words: decider and locator are filled from their inputs', obj.decider === 'sam' && obj.locator === 'synthetic chat', obj);
+      locator.value = ''; dlg.open = false; note.textContent = ''; btn(A, 'accept').fire('click');
+      check('cockpit words: a cleared locator composes nothing and says so', dlg.open !== true && /locator/.test(note.textContent), note.textContent);
+      locator.value = 'synthetic chat';
       check('cockpit dialog: named and described by its title and body',
         /<dialog id="settle" aria-labelledby="settle-title" aria-describedby="settle-body">/.test(page));
     }
