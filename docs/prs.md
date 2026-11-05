@@ -9,23 +9,30 @@ file too, so there is one GitHub reader, not one per tool.
                   [--via gh|token] [--token-env NAME] [--max-wait 60] [--cache DIR] [--dry-run]
 
 **@2** (HO-RK-20261105-TXRM step 1) reads GitHub through [tools/github.py](../tools/github.py), the
-kit's one GitHub client, and records what was asked for against what came back, so a partial read
-shows as partial, never as zero. @1 lines stay readable; the first @2 run appends a fresh line for
-every pull request it reads.
+kit's client for pull-request reads, and records what was asked for against what came back, so a
+partial read shows as partial, never as zero. @1 lines stay readable and are compared with @2 reads
+apart from the schema, so upgrading appends nothing for unchanged pull requests.
 
 ## The client
 
-Read-only: it only ever sends GET. Shared by every reader that needs GitHub; everything else reads
-the file this tool writes.
+Read-only: it only ever sends GET. Pull-request data is read through it once, and everything else
+reads the file this tool writes. (Export's public-repository check, status's CI read and the
+cockpit's opt-in `--pr-state` lookup still call GitHub their own way; routing them through it is open.)
 
 - **Pagination:** list endpoints are walked page by page (100 a page) up to `--limit`; whether more
   were available is recorded.
 - **Retries:** network errors and HTTP 500/502/503/504 are retried three times, waiting 1, 2 and 4 s.
-- **Rate limits:** a 429, or a 403 with no requests left, waits for GitHub's reset when that is at
-  most `--max-wait` seconds (default 60); otherwise that repository fails with the reset time.
+- **Rate limits:** a 429, a 403 with no requests left, or a 403 with `retry-after` (GitHub's
+  secondary limit) waits for the reset when that is at most `--max-wait` seconds (default 60);
+  otherwise that repository fails with the reset time. A failure gh reports without any HTTP
+  response (not signed in) isn't retried.
+- **Partial reads:** reviews or CI that can't be read keep their last known value and are marked
+  `unread`; a pull request that can't be read again is a partial read, not a failed repository.
 - **Caching:** each path is fetched once per run. `--cache DIR` keeps responses with their ETags and
   revalidates them, so an unchanged resource costs a 304. The cache holds PR text from private
-  repositories, so it is off unless you ask for it; keep the folder private.
+  repositories, so it is off unless you ask for it; its files are readable by you only (0600 in a
+  0700 folder), keyed by transport as well as path. A token is never sent past a redirect away from
+  api.github.com.
 
 - **Which repositories:** `--repo` (repeatable), else `"repos": ["owner/name", ...]` in
   `handoffs/.ledger.json`. Anything that isn't `OWNER/NAME` is refused.

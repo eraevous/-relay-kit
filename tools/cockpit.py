@@ -1695,8 +1695,9 @@ more than one line is shown with all of them.</p>
         okd = [f["last_ok"] for f in prd["fetches"] if f["last_ok"]]
         nfail = sum(1 for f in prd["fetches"] if f["error"])
         npart = sum(f.get("partial") or 0 for f in prd["fetches"])
+        nmore = sum(1 for f in prd["fetches"] if f.get("more_available"))
         fetch_sum = (f'{len(prd["fetches"])} repositories, last read <span class="age" data-ts="{e(max(okd))}">{e(max(okd)[:16].replace("T", " "))}</span>'
-                     if okd else f'{len(prd["fetches"])} repositories, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "") + (f' · <b class="warn">{npart} partial read(s)</b>' if npart else "")
+                     if okd else f'{len(prd["fetches"])} repositories, never read') + (f' · <b class="warn">{nfail} failed</b>' if nfail else "") + (f' · <b class="warn">{npart} partial read(s)</b>' if npart else "") + (f' · <b class="warn">{nmore} repo(s) had more pull requests than were read</b>' if nmore else "")
         days = sorted({f["since_days"] for f in prd["fetches"] if f.get("since_days")}) or [14]
         older = sum(1 for x in prd["items"] if not x["recent"])
         groups = [("Open", [x for x in prd["items"] if x["state"] == "open"]),
