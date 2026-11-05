@@ -52,7 +52,16 @@ the placeholders, copy, and run the lines in your records with `RELAYKIT_ACTOR=<
 | --- | --- | --- | --- |
 | proposed decision | `relay-kit ledger append --dir governance decision '{"status":"adopted","supersedes":"DEC-N",...}'` | same with `"status":"rejected"` | `# DEC-N: deferred ...` (nothing to append) |
 | open challenge | `... challenge '{"status":"accepted-risk","resolves":"CH-N",...}'` | `... '{"status":"resolved","resolves":"CH-N",...}'` | comment |
-| handoff | `relay-kit handoff --dir handoffs set HO-... sent` (or the next state), after you fill its Authorized section | `... set HO-... cancelled` | comment |
+| handoff | `relay-kit handoff --dir handoffs set HO-... <next>`, after you fill its Authorized section | `... set HO-... cancelled` | comment |
+
+The handoff's `<next>` follows handoff.py's rules: prepared → sent, sent → acknowledged, acknowledged
+→ in_progress, in_progress → completed (with a reminder to write `handoffs/outputs/HO-....md` first,
+since handoff.py refuses completed without it), and blocked → the state it was blocked from, read from
+its log.
+
+**Your edits in To apply are kept.** Until you type in the box, each choice rebuilds it from the picks.
+Once you have edited it, a new choice is added at the end (or replaces that item's earlier line if you
+left that line untouched), and Clear asks before discarding your text.
 
 `ledger_append.py` fills the id, date and recorded_by and runs the ledger check, which refuses an
 adopted line without decider, basis and locator, and any line with a `<<REQUIRED` placeholder.
@@ -137,17 +146,31 @@ access control**. Serving the folder from a domain requires authentication on **
 `index.html` and `cockpit.json` (the JSON holds everything the page shows). `--content metadata`
 reduces what is exposed (see above); it does not make the folder safe to publish.
 
+In both recipes access control is on, and checked, **before** any records go up.
+
 AWS S3 (private bucket; serve it through CloudFront with access control, or open it with a
 presigned link):
 
+    # all four settings must be true before anything is synced
+    aws s3api get-public-access-block --bucket YOUR-PRIVATE-BUCKET
     relay-kit cockpit --root ~/records --out ~/cockpit --brand Kairos
     aws s3 sync ~/cockpit s3://YOUR-PRIVATE-BUCKET/cockpit/ --delete
     aws s3 presign s3://YOUR-PRIVATE-BUCKET/cockpit/index.html --expires-in 3600
 
-AWS Amplify Hosting (manual deploy, then turn on password protection under Access control):
+AWS Amplify Hosting (password protection is set per branch, so the branch has to exist first;
+give it a placeholder that holds no records):
 
+    # 1. a placeholder, no records in it
+    mkdir -p ~/cockpit-placeholder && printf '<!doctype html><title>placeholder</title>\n' > ~/cockpit-placeholder/index.html
+    (cd ~/cockpit-placeholder && zip -r ../placeholder.zip .)
+    # Amplify console > Deploy without Git > drag placeholder.zip
+    # 2. App settings > Access control > Manage access: password-protect the branch
+    # 3. verify: both paths must answer 401 without the password
+    curl -s -o /dev/null -w '%{http_code}\n' https://BRANCH.APP-ID.amplifyapp.com/index.html
+    curl -s -o /dev/null -w '%{http_code}\n' https://BRANCH.APP-ID.amplifyapp.com/cockpit.json
+    # 4. only then build and upload the records
     relay-kit cockpit --root ~/records --out ~/cockpit && (cd ~/cockpit && zip -r ../cockpit.zip .)
-    # Amplify console > Deploy without Git > drag cockpit.zip; then App settings > Access control
+    # Amplify console > the same branch > Deploy updates > drag cockpit.zip
 
 Rebuild and redeploy whenever the records change; the page never updates itself.
 

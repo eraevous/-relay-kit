@@ -2,7 +2,7 @@
 
 Run alone with `python3 -m unittest discover -s tests`, or as part of tests/run_tests.py, which
 reports each test by the first line of its docstring ("cockpit: ...")."""
-import hashlib, importlib.util, json, os, pathlib, shlex, shutil, subprocess, sys, tempfile, unittest
+import hashlib, importlib.util, json, os, pathlib, re, shlex, shutil, subprocess, sys, tempfile, unittest
 
 KIT = pathlib.Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("relaykit_cockpit_under_test", KIT / "tools" / "cockpit.py")
@@ -330,6 +330,108 @@ class CockpitTests(unittest.TestCase):
         self.assertFalse((repo / "site").exists())
         with self.assertRaises(ck.Refused):
             ck.build(self.root, self.root / "site")
+
+    def test_handoff_accept_is_legal(self):
+        """cockpit: a handoff's Accept is the next legal state (handoff.py rules): owner-addressed running handoffs move on, a blocked one returns to the state it left"""
+        q = '- Quote: "go" (sam, synthetic, 2026-11-04)'
+        planted = {   # id: (status, log states after prepared/sent, recipient, expected Accept state)
+            "HO-RV-20261104-AA01": ("acknowledged", ["acknowledged"], "sam", "in_progress"),
+            "HO-RV-20261104-AA02": ("in_progress", ["acknowledged", "in_progress"], "sam", "completed"),
+            "HO-RV-20261104-AA03": ("blocked", ["blocked"], "claude:research", "sent"),
+            "HO-RV-20261104-AA04": ("blocked", ["acknowledged", "blocked"], "claude:research", "acknowledged"),
+            "HO-RV-20261104-AA05": ("blocked", ["acknowledged", "in_progress", "blocked"], "claude:research", "in_progress"),
+        }
+        for hid, (st, states, to, _) in planted.items():
+            log = [("2026-11-04T09:00Z", "prepared", "claude:review#SESSR9", "drafted"),
+                   ("2026-11-04T09:01Z", "sent", "claude:review#SESSR9", "pasted")]
+            log += [(f"2026-11-04T09:1{i}Z", s, "sam", "synthetic step") for i, s in enumerate(states)]
+            (self.root / "handoffs" / f"{hid}.md").write_text(handoff(hid, st, "claude:review", to, "Synthetic", q, log), encoding="utf-8")
+        data, _, _ = self.build()
+        led = ck.ex.load_ledger()
+        got = {c["id"]: c for c in data["choices"] if c["kind"] == "handoff"}
+        for hid, (st, states, _, want) in planted.items():
+            acc = got[hid]["compose"]["accept"]
+            self.assertEqual(acc["state"], want, hid)
+            self.assertIsNone(led.legal(["prepared", "sent"] + states, acc["state"]), hid)
+            self.assertIn(f"set {hid} {want} --note", acc["command"])
+        # completing needs the output file first: the line says so until it exists
+        self.assertIn("handoffs/outputs/HO-RV-20261104-AA02.md", got["HO-RV-20261104-AA02"]["compose"]["accept"]["command"])
+        (self.root / "handoffs" / "outputs" / "HO-RV-20261104-AA02.md").write_text("HO-RV-20261104-AA02\n\nok\n", encoding="utf-8")
+        data, _, _ = self.build("again")
+        acc = next(c for c in data["choices"] if c["id"] == "HO-RV-20261104-AA02")["compose"]["accept"]
+        self.assertNotIn("# first write the result", acc["command"])
+
+    def add_lanes_and_capture(self):
+        """Plant a lane whose only activity is a closed challenge, and a capture whose last message is the newest record."""
+        cfg = self.root / "handoffs" / ".ledger.json"
+        cfg.write_text(json.dumps({"owner": "sam", "lanes": {"research": "RS", "review": "RV", "audit": "AU", "notes": "NT"}}), encoding="utf-8")
+        with open(self.root / "governance" / "challenges.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": "CH-010", "date": "2026-11-02", "status": "open", "concern": "Audit gap.", "raised_by": "claude:audit#SESSAU"}) + "\n")
+            f.write(json.dumps({"id": "CH-011", "date": "2026-11-04", "status": "resolved", "resolves": "CH-010", "concern": "Audit gap.",
+                                "raised_by": "claude:audit#SESSAU", "resolution": "fixed", "recorded_by": "claude:audit#SESSAU"}) + "\n")
+        msgs = lambda role, mid, ts, text: {"n": 1, "role": role, "label": role, "messages": [
+            {"mid": mid, "id": mid.lower(), "ts": ts, "model": None, "dictated": False, "text": text, "sources": []}]}
+        (self.root / "captures").mkdir()
+        (self.root / "captures" / "notes.json").write_text(json.dumps({
+            "schema": "relay-kit/conversation@1",
+            "meta": {"title": "Synthetic notes", "platform": "chatgpt", "conversation_id": "00000000-0000-0000-0000-0000000000c1",
+                     "source_url": "https://chatgpt.com/c/00000000-0000-0000-0000-0000000000c1", "checks": ["ok"],
+                     "actor": "claude:notes#SESSNT", "lane": "notes", "raw_sha256": "0" * 64},
+            "hidden_counts": {}, "turns": [msgs("user", "T1u", "2026-11-01T08:00:00Z", "Start."),
+                                           msgs("assistant", "T1a", "2026-11-05T09:00:00Z", "Much later.")]}), encoding="utf-8")
+
+    def test_as_of_capture_end(self):
+        """cockpit: the as-of date includes a capture's last message, not only its first"""
+        self.add_lanes_and_capture()
+        data, page, _ = self.build()
+        self.assertEqual(data["as_of"], "2026-11-05T09:00Z")
+        self.assertIn("generated from records as of 2026-11-05T09:00Z", page)
+
+    def test_lane_last_activity(self):
+        """cockpit: a lane's last activity includes handoff log updates, closed challenges and capture end times"""
+        self.add_lanes_and_capture()
+        data, _, _ = self.build()
+        last = {r["lane"]: r["last_activity"] for r in data["lanes"]}
+        self.assertEqual(last["review"], "2026-11-03T10:05Z")   # HO-RV-...-EF56 was sent at 10:05, created at 10:00
+        self.assertEqual(last["audit"], "2026-11-04T00:00Z")    # its challenge was closed on 2026-11-04
+        self.assertEqual(last["notes"], "2026-11-05T09:00Z")    # the capture's last message
+
+    def test_lane_filter_keeps_settled(self):
+        """cockpit: with --lane, a proposal superseded or a challenge resolved from another lane stays settled (not in Choices or Drift)"""
+        with open(self.root / "governance" / "challenges.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": "CH-020", "date": "2026-10-20", "status": "open", "concern": "drift in research", "raised_by": "claude:research#SESSA1"}) + "\n")
+            f.write(json.dumps({"id": "CH-021", "date": "2026-11-03", "status": "resolved", "resolves": "CH-020", "concern": "drift in research",
+                                "raised_by": "claude:review#SESSR9", "resolution": "fixed", "recorded_by": "claude:review#SESSR9"}) + "\n")
+        data, _, _ = self.build(lane="research", drift_days=0)
+        ids = {c["id"] for c in data["choices"]}
+        self.assertNotIn("DEC-003", ids)   # superseded by DEC-004, recorded by the owner (no lane)
+        self.assertNotIn("CH-020", ids)    # resolved by CH-021, recorded in the review lane
+        self.assertIn("DEC-002", ids)
+        drift = data["run"]["drift"]
+        self.assertNotIn("DEC-003", [x["id"] for x in drift["stale_proposals"]])
+        self.assertEqual([x["id"] for x in drift["challenges_mentioning_drift"] if x["open"]], [])
+        self.assertEqual(data["counts"]["drift_flags"], len(drift["stale_proposals"]))
+
+    def test_dialog_accessible_name(self):
+        """cockpit: the confirmation dialog is named and described by its dynamic title and body"""
+        _, page, _ = self.build()
+        m = re.search(r"<dialog [^>]*>", page)
+        self.assertIsNotNone(m)
+        self.assertIn('aria-labelledby="settle-title"', m.group(0))
+        self.assertIn('aria-describedby="settle-body"', m.group(0))
+        self.assertIn('id="settle-title"', page)
+        self.assertIn('id="settle-body"', page)
+
+    def test_deploy_order(self):
+        """cockpit: the deploy steps in docs/cockpit.md turn on and verify access control before any records are uploaded"""
+        doc = (KIT / "docs" / "cockpit.md").read_text(encoding="utf-8")
+        amp = doc[doc.index("AWS Amplify Hosting"):doc.index("Rebuild and redeploy")]
+        upload = amp.index("drag cockpit.zip")
+        self.assertLess(amp.index("placeholder.zip"), amp.index("Access control"))
+        self.assertLess(amp.index("Access control"), upload)
+        self.assertLess(amp.index("401"), upload)   # verified, not just switched on
+        s3 = doc[doc.index("AWS S3"):doc.index("AWS Amplify Hosting")]
+        self.assertLess(s3.index("get-public-access-block"), s3.index("aws s3 sync"))
 
     def test_deterministic(self):
         """cockpit: two runs give byte-identical output and leave the records untouched"""

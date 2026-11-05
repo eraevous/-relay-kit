@@ -184,10 +184,33 @@ def compose_challenge(rec, owner, full):
     return out
 
 
-def compose_handoff(h, owner, unauthorized):
+def next_state(h, led):
+    """The state Accept moves a handoff to, by handoff.py's own rules (led.NEXT, led.legal): a
+    blocked handoff returns to the last non-blocked state in its log; otherwise the earliest of
+    NEXT[status] (acknowledged -> in_progress, in_progress -> completed)."""
+    st = h["status"]
+    states = [e["state"] for e in h["log"] if e.get("state")] or [st]
+    if states[-1] != st:   # header and log disagree; trust the header's status as the current state
+        states.append(st)
+    if st == "blocked":
+        nxt = next((s for s in reversed(states) if s != "blocked"), "prepared")
+    else:
+        nxt = min(led.NEXT.get(st, set()), key=STATE_ORDER.index, default=None)
+    return nxt if nxt and led.legal(states, nxt) is None else None
+
+
+def compose_handoff(h, owner, unauthorized, nxt, output_exists):
     hid, st = h["handoff_id"], h["status"]
-    nxt = {"prepared": "sent", "sent": "acknowledged", "blocked": "in_progress"}.get(st, "acknowledged")
     pre = f"# first write your words under '## Authorized' in handoffs/{hid}.md\n" if unauthorized else ""
+    if nxt == "completed" and not output_exists:   # handoff.py refuses completed without the output file
+        pre += f"# first write the result to handoffs/outputs/{hid}.md (completed needs it); the note says where it is\n"
+    if nxt is None:
+        acc = f"# {hid}: no legal next state from {st}; only Reject (cancel) applies."
+        return {"accept": {"command": acc, "json": None, "state": None},
+                "reject": {"command": (f"relay-kit handoff --dir handoffs set {hid} cancelled "
+                                       f"--note {shlex.quote('<<REQUIRED: why it is cancelled, in your words>>')}"),
+                           "json": None, "state": "cancelled"},
+                "defer": {"command": f"# {hid}: deferred. Nothing to run; it stays {st}.", "json": None}}
     # no --by: handoff.py takes the actor from $RELAYKIT_ACTOR, i.e. whoever runs the line
     acc = pre + (f"relay-kit handoff --dir handoffs set {hid} {nxt} "
                  f"--note {shlex.quote('<<REQUIRED: your words>>')}")
@@ -231,6 +254,10 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         ls = [l for l in (r.get("lanes") or [r.get("lane")]) if l]
         return lane is None or any(rd.lanes.matches(lane, l) for l in ls)
 
+    # settled ids come from the complete ledgers: a line in another lane (or by the owner, in none)
+    # that supersedes a proposal or resolves a challenge still settles it under --lane
+    superseded = {d["fields"].get("supersedes") for d in decisions if d["fields"].get("supersedes")}
+    closed = {c["fields"].get("resolves") for c in challenges if c["fields"].get("resolves")}
     decisions = [d for d in decisions if lane_ok(d)]
     challenges = [c for c in challenges if lane_ok(c)]
     handoffs = [h for h in handoffs if lane_ok(h)]
@@ -238,6 +265,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
 
     # as of: the latest timestamp in what was read (never the clock)
     stamps = [ex.span(r.get("ts")) for r in decisions + challenges + handoffs + convs]
+    stamps += [ex.span(c.get("last_message_at")) for c in convs]   # a capture runs until its last message
     stamps += [ex.span(e["at"]) for h in handoffs for e in h["log"]]
     if budget:
         stamps += [(t, t) for _, t, _ in budget["rows"]]
@@ -245,9 +273,6 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     as_of_dt = stamps[-1] if stamps else None
     as_of = iso(as_of_dt) if as_of_dt else None
 
-    all_dec = [d["fields"] for d in decisions]
-    superseded = {x.get("supersedes") for x in all_dec if x.get("supersedes")}
-    closed = {c["fields"].get("resolves") for c in challenges if c["fields"].get("resolves")}
 
     # ---- Choices ----
     choices = []
@@ -296,7 +321,8 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             continue
         item = {"kind": "handoff", "id": h["handoff_id"], "status": st, "date": h["created"], "from": h["from"],
                 "to": h["to"], "why": why, "source": h["source_path"],
-                "compose": compose_handoff(h, owner, unauth)}
+                "compose": compose_handoff(h, owner, unauth, next_state(h, led),
+                                           (rd.root / "handoffs" / "outputs" / f"{h['handoff_id']}.md").is_file())}
         if full:
             item["title"] = h["title"]
         waiting_handoffs.append(item["id"])
@@ -527,7 +553,11 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         hs = [h for h in handoffs if mine(h)]
         ds = [d for d in decisions if mine(d)]
         cs = [c for c in challenges if mine(c) and c["status"] == "open" and c["fields"].get("id") not in closed]
-        ts = sorted(s[0] for s in [ex.span(r.get("ts")) for r in hs + ds + cs] if s)
+        # activity: records' own times, handoff log steps, every challenge line (closing ones too), capture ends
+        cv = [c for c in convs if mine(c)]
+        acts = [ex.span(r.get("ts")) for r in hs + ds + cv + [c for c in challenges if mine(c)]]
+        acts += [ex.span(e["at"]) for h in hs for e in h["log"]] + [ex.span(c.get("last_message_at")) for c in cv]
+        ts = sorted(s[0] for s in acts if s)
         lane_rows.append({"lane": l, "code": rd.lanes.codes.get(l), "coordinator": l in coords,
                           "handoffs": len(hs), "open_handoffs": sum(1 for h in hs if h["status"] not in led.FINAL),
                           "decisions": len(ds), "proposed": sum(1 for d in ds if d["status"] == "proposed"
@@ -727,7 +757,9 @@ def choice_card(c):
     elif c["kind"] == "handoff":
         body = (f'<p class="txt">{e(c.get("title"))}</p>' if c.get("title") else "") + dl(
             [("from", c.get("from")), ("to", c.get("to")), ("needs the owner", "; ".join(c["why"])), ("source", c["source"])])
-        hint = f'Accept moves it to {c["compose"]["accept"]["state"]}; Reject cancels it (owner only). These are handoff.py commands; your words go in the note.'
+        nxt = c["compose"]["accept"]["state"]
+        hint = (f'Accept moves it to {nxt}' if nxt else f'No legal next state from {c["status"]}') + \
+            '; Reject cancels it (owner only). These are handoff.py commands; your words go in the note.'
     else:
         body = (f'<p class="txt">{e(c.get("text"))}</p>' if c.get("text") else "") + dl(
             [("raised by", c.get("raised_by")), ("affects", c.get("affects")), ("proposed test", c.get("proposed_test")),
@@ -987,7 +1019,7 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
     unread = (f'<p class="hint">Unreadable: {e(", ".join(str(u["path"]) for u in data["unreadable"]))}</p>' if data["unreadable"] else "")
     q = data["query"]
     modal = """
-<dialog id="settle"><form method="dialog"><p class="eyebrow dark" id="settle-eyebrow">SETTLE THIS CHOICE?</p><h2 id="settle-title"></h2>
+<dialog id="settle" aria-labelledby="settle-title" aria-describedby="settle-body"><form method="dialog"><p class="eyebrow dark" id="settle-eyebrow">SETTLE THIS CHOICE?</p><h2 id="settle-title"></h2>
 <p class="hint" id="settle-body"></p><pre id="settle-line"></pre><div class="btns"><button value="ok" class="primary small" id="settle-ok">Add to To apply</button>
 <button value="cancel" class="secondary small">Cancel</button></div></form></dialog>"""
     return f"""<!doctype html>
@@ -1171,9 +1203,15 @@ JS = """
   $('.sel').forEach(function(x){x.setAttribute('aria-pressed',x===b?'true':'false')});$('.net').forEach(function(p){p.hidden=p.getAttribute('data-net')!==n})})});
  $('.net').forEach(function(p){p.hidden=p.getAttribute('data-net')!=='info'});
  var picks={},box=d.getElementById('apply'),note=d.getElementById('copied'),dlg=d.getElementById('settle'),pending=null;
- function draw(){var k=Object.keys(picks).sort();box.value=k.map(function(x){return picks[x]}).join('\\n\\n')+(k.length?'\\n':'')}
- function pick(b){var k=b.getAttribute('data-key'),a=b.getAttribute('data-act');picks[k]=b.getAttribute('data-line');draw();
-  var c=b.closest('.card');c.classList.remove('picked-accept','picked-reject','picked-defer');c.classList.add('picked-'+a);note.textContent=''}
+ var drawn='';box.addEventListener('input',function(){if(box.value===drawn)return;note.textContent='edited: later picks are added, your text is kept'});
+ function draw(){var k=Object.keys(picks).sort();drawn=k.map(function(x){return picks[x]}).join('\\n\\n')+(k.length?'\\n':'');box.value=drawn}
+ function pick(b){var k=b.getAttribute('data-key'),a=b.getAttribute('data-act'),line=b.getAttribute('data-line'),old=picks[k],msg='';
+  if(box.value===drawn){picks[k]=line;draw()}
+  else{var v=box.value;picks[k]=line;
+   if(old!==undefined&&v.indexOf(old)>=0){v=v.replace(old,function(){return line})}
+   else{v=v.replace(/\\s*$/,'');v=(v?v+'\\n\\n':'')+line+'\\n';if(old!==undefined)msg='your edited line for '+k.split(':')[1]+' is kept above'}
+   box.value=v;drawn=null}
+  var c=b.closest('.card');c.classList.remove('picked-accept','picked-reject','picked-defer');c.classList.add('picked-'+a);note.textContent=msg}
  function ask(eyebrow,title,body,line,ok,cb){if(!dlg||!dlg.showModal){cb();return}
   d.getElementById('settle-eyebrow').textContent=eyebrow;d.getElementById('settle-title').textContent=title;
   d.getElementById('settle-body').textContent=body;d.getElementById('settle-line').textContent=line||'';
@@ -1187,8 +1225,12 @@ JS = """
  $('.torun').forEach(function(b){b.addEventListener('click',function(){var k=b.getAttribute('data-card');
   ask('MOVE FROM DRIFT TO RUN?',k.split(':')[1]+' is still a proposal.','A commitment needs your explicit authorization and a concrete next action. Nothing moves from here: open its card in Choices and compose the ledger line.',
    '','Open in Choices',function(){go('choices');flash(k)})})});
- d.getElementById('clear').addEventListener('click',function(){picks={};draw();note.textContent='';
-  $('.card').forEach(function(c){c.classList.remove('picked-accept','picked-reject','picked-defer')})});
+ function clear(){picks={};draw();note.textContent='';
+  $('.card').forEach(function(c){c.classList.remove('picked-accept','picked-reject','picked-defer')})}
+ d.getElementById('clear').addEventListener('click',function(){if(box.value===drawn){clear();return}
+  var t='Discard your edits?',body='To apply holds text you edited. Clearing removes it; copy it first if you want to keep it.';
+  if(!dlg||!dlg.showModal){if(window.confirm(t+' '+body))clear();return}
+  ask('CLEAR TO APPLY?',t,body,'','Clear',clear)});
  d.getElementById('copy').addEventListener('click',function(){var t=box.value;function done(){note.textContent='copied'}
   function fb(){box.focus();box.select();try{d.execCommand('copy');done()}catch(e){note.textContent='select and copy by hand'}}
   if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done,fb)}else{fb()}});
