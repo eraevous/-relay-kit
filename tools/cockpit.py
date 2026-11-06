@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@4.
+"""Cockpit: one static, self-contained page over a records store: relay-kit/cockpit@5.
 
     python3 tools/cockpit.py --root RECORDS --out DIR [--lane L] [--content full|metadata]
                              [--weekly-tokens N] [--drift-days N] [--coordinator LANE]
@@ -16,7 +16,12 @@ the page was built from). Four surfaces:
   Run/Drift  handoffs by status, PR links from threads.md, recent decisions, open challenges,
              drift flags.
   Pull requests  governance/pr-state.jsonl (written by relay-kit prs): each PR's What / Why / How /
-             Authorized in its author's words, who wrote it, reviews by family, CI.
+             Authorized in its author's words, who wrote it, reviews by family with their bodies
+             verbatim (@5), CI.
+  Status     status/<date>-<edition>.md (relay-kit/status@1): the newest coordinator-authored
+             narrative edition rendered verbatim from a markdown subset; older editions indexed (@5).
+  Choices (@5) carry decision-support notes from governance/decision-support.jsonl
+             (relay-kit/decision-support@1), one block per author, authored, never generated.
 
 It reads with the export module's readers (tools/export.py), changes nothing under --root, and
 refuses a destination inside the records or inside a public (or unconfirmed) git repository,
@@ -25,7 +30,7 @@ git revision, its commit time and the last fetch (fixed for a given clone), apar
 record's timestamp; the browser counts their age. Spec: docs/cockpit.md. Standard library only."""
 import argparse, datetime as dt, html, importlib.util, json, os, pathlib, re, shlex, sys, tempfile
 
-SCHEMA = "relay-kit/cockpit@4"
+SCHEMA = "relay-kit/cockpit@5"
 OUT_FILES = {"index.html", "cockpit.json"}
 BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
@@ -42,7 +47,12 @@ LIMITS = [
     "Nothing on this page writes anywhere. Accept / Reject / Defer only compose text for the owner to paste "
     "(DEC-019: authority stays with the human paste).",
     "The page fetches nothing. Pull requests are as fresh as the last relay-kit prs run that wrote "
-    "governance/pr-state.jsonl; their sections are the PR body's own words, not a summary.",
+    "governance/pr-state.jsonl; their sections and reviews are the authors' own words, not a summary. A review's "
+    "'Findings' line is shown only when its body states those counts.",
+    "Status is the coordinator's narrative, rendered as written (a markdown subset; anything else is shown as text). "
+    "Decision-support notes are authored by the people named on them; the page ranks nothing and recommends nothing itself.",
+    "A reviewer's family is known only from a Reviewer: signature; a family taken from the login is marked inferred. "
+    "Several people may post from one GitHub account.",
     "The coordinator's status-file cost lines are not parsed; only governance/budget.jsonl counts toward the budget.",
     "The authority diagram shows only recorded delegation (an adopted decision with delegates_to). Text-matched "
     "delegations and the assumed owner -> coordinator -> lane lines are in a closed 'hypothesised authority (inferred)' "
@@ -415,10 +425,13 @@ def compose_extra(kind, cid, owner, proposer, full, text, scope, expect=None):
 
 # ---------------- pull requests, from relay-kit prs (HO-RK-20261105-SWK5) ----------------
 PRS_FILE = "governance/pr-state.jsonl"
-PRS_SCHEMA = "relay-kit/prs@2"
-PRS_READS = {"relay-kit/prs@1", PRS_SCHEMA}
+PRS_SCHEMA = "relay-kit/prs@3"
+PRS_READS = {"relay-kit/prs@1", "relay-kit/prs@2", PRS_SCHEMA}
 PR_SECTIONS = ("what", "why", "how", "authorized")
 APPROVING = {"APPROVED", "COMMENTED", "CHANGES_REQUESTED"}
+# counts a review body states in so many words; nothing is counted by the page itself (DEC-139: no AI summarising)
+FINDINGS = {"blocking": re.compile(r"\b(\d{1,3})\s+blocking\b", re.I),
+            "should_fix": re.compile(r"\b(\d{1,3})\s+should[- ]fix", re.I)}
 
 
 def read_pr_state(root):
@@ -489,11 +502,34 @@ def iso_minus_days(ts, days):
         return None
 
 
-def pr_items(ps, owner, settings, full):
+def stated_findings(body):
+    """{blocking: N, should_fix: M} only for the counts the body itself states ("2 blocking", "10 should-fix")."""
+    out = {}
+    for k, rx in FINDINGS.items():
+        m = rx.search(body or "")
+        if m:
+            out[k] = int(m.group(1))
+    return out or None
+
+
+def actors_map(cfg):
+    """handoffs/.ledger.json 'actors' (@5, optional): GitHub login -> family, or login -> {family, lanes}. Lower-cased
+    logins; anything malformed is ignored."""
+    raw = cfg.get("actors") if isinstance(cfg, dict) and isinstance(cfg.get("actors"), dict) else {}
+    out = {}
+    for k, v in raw.items():
+        fam = v.get("family") if isinstance(v, dict) else v
+        if isinstance(k, str) and isinstance(fam, str) and fam.strip():
+            out[k.strip().lower()] = fam.strip()
+    return out
+
+
+def pr_items(ps, owner, settings, full, actors=None):
     fams = {str(k).lower(): str(v) for k, v in (settings.get("review_families") or {}).items()} \
         if isinstance(settings.get("review_families"), dict) else {}
+    actors = {**(actors or {}), **fams}   # cockpit.json's explicit mapping wins over the records' actor register
     owners = {owner} | {str(x).lower() for x in settings.get("owner_names") or [] if isinstance(x, str)}
-    mapped = lambda name: fams.get(str(name).strip().lower()) if name else None
+    mapped = lambda name: actors.get(str(name).strip().lower()) if name else None
     items = []
     for (repo, num), x in ps["latest"].items():
         line = x.get("author_line") if isinstance(x.get("author_line"), str) and x["author_line"].strip() else None
@@ -503,11 +539,22 @@ def pr_items(ps, owner, settings, full):
         reviews, ids = [], set()
         for r in sorted((r for r in x.get("reviews") or [] if isinstance(r, dict)), key=lambda r: str(r.get("at") or "")):
             signed = r.get("signed") if full and isinstance(r.get("signed"), str) else None
-            fam = (review_family(signed, fams) or review_family(r.get("by"), fams)) if full else mapped(r.get("by"))
-            reviews.append({"who": signed or r.get("by") or "?", "login": r.get("by"), "signed": signed,
+            # family: a Reviewer: signature is the reviewer's own word; a login mapping (review_families or the
+            # records' actors register) is an inference, and is labelled so (DEC-139: never silently)
+            fam, source = (review_family(signed, fams), "signed") if full and signed else (None, None)
+            if not fam:
+                fam, source = mapped(r.get("by")), ("login" if mapped(r.get("by")) else None)
+            kind = r.get("kind") if r.get("kind") in ("review", "comment") else "review"
+            body = r.get("body") if full and isinstance(r.get("body"), str) else None
+            reviews.append({"who": signed or r.get("by") or "?", "login": r.get("by"), "signed": signed, "kind": kind,
                             "verdict": r.get("verdict"), "at": r.get("at"),
-                            "stated": r.get("stated") if isinstance(r.get("stated"), str) else None, "family": fam})
-        counted = [r for r in reviews if r["verdict"] in APPROVING and not (line and (r["who"] or "").lower() == line.lower())]
+                            "stated": r.get("stated") if isinstance(r.get("stated"), str) else None,
+                            "family": fam, "family_source": source,
+                            "body": body, "body_recorded": isinstance(r.get("body"), str),
+                            "truncated": bool(r.get("truncated")), "comments": r.get("comments") if isinstance(r.get("comments"), int) else None,
+                            "findings": stated_findings(r.get("body")) if full else None})
+        counted = [r for r in reviews if (r["verdict"] in APPROVING or (r["kind"] == "comment" and r["stated"]))
+                   and not (line and (r["who"] or "").lower() == line.lower())]
         ids = {(r["who"] or "").lower() for r in counted}
         if not counted:
             other = False
@@ -539,6 +586,238 @@ def pr_items(ps, owner, settings, full):
     items.sort(key=lambda i: str(i["merged_at"] or i["updated_at"] or ""), reverse=True)   # newest first within a group
     items.sort(key=lambda i: group.get(i["state"], 4) + (1 if i["draft"] and i["state"] == "open" else 0))
     return items
+
+
+# ---------------- status editions, relay-kit/status@1 (HO-RK-20261106-NXPR, DEC-139) ----------------
+STATUS_DIR = "status"
+STATUS_FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})-([a-z][a-z0-9-]{0,30})\.md$")
+STATUS_SECTIONS = ("Accomplishments", "Road bumps", "Status", "Next steps")
+EDITION_ORDER = ["morning", "midday", "noon", "afternoon", "evening", "night"]   # within one day; others after, by name
+FRONT = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*\n", re.S)
+
+
+def edition_rank(name):
+    return (EDITION_ORDER.index(name), "") if name in EDITION_ORDER else (len(EDITION_ORDER), name)
+
+
+def parse_front(text):
+    """(fields, body): a YAML-like block of `key: value` lines between --- fences; nothing else is parsed."""
+    m = FRONT.match(text)
+    if not m:
+        return {}, text
+    fields = {}
+    for ln in m.group(1).split("\n"):
+        k, sep, v = ln.partition(":")
+        if sep and re.fullmatch(r"[A-Za-z_][\w-]*", k.strip()):
+            fields[k.strip()] = v.strip()
+    return fields, text[m.end():]
+
+
+def read_status(root, full):
+    """Every status/<YYYY-MM-DD>-<edition>.md: newest first (date, then edition order). A file whose name or
+    front matter doesn't fit is listed as unreadable, never guessed at. Body text only with --content full."""
+    d = pathlib.Path(root) / STATUS_DIR
+    if not d.is_dir() or d.is_symlink():
+        return {"present": False, "dir": STATUS_DIR, "editions": [], "unreadable": []}
+    eds, bad = [], []
+    for f in sorted(d.iterdir()):
+        if not f.is_file() or f.is_symlink():
+            continue
+        m = STATUS_FILE.match(f.name)
+        if not m:
+            bad.append({"file": f.name, "reason": "name isn't <YYYY-MM-DD>-<edition>.md"})
+            continue
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as x:
+            bad.append({"file": f.name, "reason": f"unreadable: {type(x).__name__}"})
+            continue
+        fields, body = parse_front(text.replace("\r\n", "\n"))
+        problems = []
+        if fields.get("date") != m.group(1):
+            problems.append("front matter date doesn't match the file name" if fields.get("date") else "no date in front matter")
+        if fields.get("edition") != m.group(2):
+            problems.append("front matter edition doesn't match the file name" if fields.get("edition") else "no edition in front matter")
+        if not fields.get("author"):
+            problems.append("no author")
+        heads = [h.strip() for h in re.findall(r"^##[ \t]+(.+?)[ \t]*$", body, re.M)]
+        missing = [sec for sec in STATUS_SECTIONS if not any(h.lower().startswith(sec.lower()) for h in heads)]
+        title = next((t.strip() for t in re.findall(r"^#[ \t]+(.+?)[ \t]*$", body, re.M)), None)
+        eds.append({"file": f"{STATUS_DIR}/{f.name}", "date": m.group(1), "edition": m.group(2),
+                    "author": fields.get("author") or None, "covers": fields.get("covers") or None,
+                    "contract": fields.get("contract") or None, "title": title if full else None,
+                    "sections_missing": missing, "problems": problems, "body": body.strip() if full else None,
+                    "chars": len(body)})
+    eds.sort(key=lambda x: (x["date"], edition_rank(x["edition"])), reverse=True)
+    return {"present": True, "dir": STATUS_DIR, "editions": eds, "unreadable": bad}
+
+
+# ---------------- decision support, relay-kit/decision-support@1 (DEC-140 §1) ----------------
+SUPPORT_FILE = "governance/decision-support.jsonl"
+SUPPORT_FIELDS = [("changes_if_accepted", "What changes"), ("unchanged", "What doesn't"),
+                  ("counterfactual", "If nothing is done"), ("can_wait", "Can it wait"),
+                  ("depends", "Depends on it"), ("recommendation", "Recommendation")]
+SUPPORT_SCHEMAS = {"relay-kit/decision-support@1", "kairos/decision-support@0"}   # @0 is the pilot form, same fields
+
+
+def read_support(root, full):
+    """governance/decision-support.jsonl: authored notes per item. Latest line per (item, author) is current;
+    earlier ones are its history. Nothing is generated from them."""
+    path = pathlib.Path(root) / SUPPORT_FILE
+    if not path.is_file() or path.is_symlink():
+        return {"present": False, "file": SUPPORT_FILE, "by_item": {}, "unreadable": 0, "lines": 0}
+    by_item, bad, n = {}, 0, 0
+    for i, ln in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        if not ln.strip():
+            continue
+        try:
+            x = json.loads(ln)
+        except json.JSONDecodeError:
+            bad += 1
+            continue
+        if not isinstance(x, dict) or not isinstance(x.get("item"), str) or not isinstance(x.get("author"), str) \
+                or (x.get("contract") and x.get("contract") not in SUPPORT_SCHEMAS):
+            bad += 1
+            continue
+        n += 1
+        note = {"id": x.get("id"), "author": x["author"], "at": x.get("at"), "line": i, "contract": x.get("contract"),
+                "fields": {k: (x.get(k) if full else None) for k, _ in SUPPORT_FIELDS},
+                "present": [k for k, _ in SUPPORT_FIELDS if isinstance(x.get(k), str) and x[k].strip()]}
+        by_item.setdefault(x["item"], []).append(note)
+    return {"present": True, "file": SUPPORT_FILE, "by_item": by_item, "unreadable": bad, "lines": n}
+
+
+def support_for(sup, cid, owner, lane_of, coords):
+    """The current note per author for one item, in reading order: authors outside the coordinator lane first
+    (the independent note is read before the coordinator's, DEC-140), then the coordinator, then by name; each
+    with its earlier revisions. The order is a reading order, not a ranking."""
+    notes = sup["by_item"].get(cid) or []
+    by_author = {}
+    for nt in notes:
+        by_author.setdefault(base_of(nt["author"], owner) or nt["author"], []).append(nt)
+    out = []
+    for base, revs in by_author.items():
+        revs = sorted(revs, key=lambda n: (str(n.get("at") or ""), n["line"]))
+        ln = lane_of(base) if base != "owner" else None
+        out.append({"author": revs[-1]["author"], "author_base": base, "lane": ln, "role": "coordinator" if ln in coords else
+                    ("owner" if base == "owner" else "independent"), "current": revs[-1], "history": revs[:-1]})
+    rank = {"independent": 0, "owner": 1, "coordinator": 2}
+    out.sort(key=lambda b: (rank[b["role"]], b["author_base"]))
+    return out
+
+
+# ---------------- text with structure (DEC-140 §2) and a markdown subset (status@1) ----------------
+ENUM = re.compile(r"(?:^|(?<=\s))\((\d{1,2})\)\s+")
+INLINE = [(re.compile(r"`([^`\n]+)`"), lambda m: f"<code>{m.group(1)}</code>"),
+          (re.compile(r"\*\*([^*\n]+?)\*\*"), lambda m: f"<b>{m.group(1)}</b>"),
+          (re.compile(r"(?<![\w*])\*([^*\n]+?)\*(?![\w*])"), lambda m: f"<i>{m.group(1)}</i>"),
+          (re.compile(r"(?<![\w_])_([^_\n]+?)_(?![\w_])"), lambda m: f"<i>{m.group(1)}</i>"),
+          (re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)"), lambda m: f"{m.group(1)} <span class=\"url\">({m.group(2)})</span>")]
+
+
+def inline_md(escaped):
+    """Bold, italic, inline code and links-as-text over already-escaped text. Nothing becomes a tag but these."""
+    out = escaped
+    for rx, fn in INLINE:
+        out = rx.sub(fn, out)
+    return out
+
+
+def structured(text, md=False):
+    """Plain record text as HTML with its structure kept (DEC-140 §2): blank lines separate paragraphs;
+    lines opening with '- ', '* ' or 'N. ' / 'N) ' are list items; a line holding '(1) … (2) …' is an
+    introduction followed by a numbered list. Everything is escaped first; with md, the inline markdown
+    subset (bold, italic, code, link text) is applied afterwards."""
+    if not text:
+        return ""
+    fmt = (lambda t: inline_md(e(t))) if md else e
+    html_, para, kind, items = [], [], None, []
+
+    def flush_para():
+        nonlocal para
+        if para:
+            html_.append(f'<p>{"<br>".join(fmt(x) for x in para)}</p>')
+            para = []
+
+    def flush_list():
+        nonlocal items, kind
+        if items:
+            html_.append(f'<{kind}>' + "".join(f"<li>{fmt(x)}</li>" for x in items) + f'</{kind}>')
+            items, kind = [], None
+
+    def enum_split(line):
+        """'Seven findings: (1) a. (2) b.' -> ('Seven findings:', ['a.', 'b.']) when (1)…(n) run in order."""
+        ms = list(ENUM.finditer(line))
+        nums = [int(m.group(1)) for m in ms]
+        if len(ms) < 2 or nums != list(range(1, len(ms) + 1)):
+            return None
+        intro = line[:ms[0].start()].strip()
+        parts = [line[ms[i].end():(ms[i + 1].start() if i + 1 < len(ms) else len(line))].strip() for i in range(len(ms))]
+        return intro, parts
+
+    for raw in str(text).replace("\r\n", "\n").split("\n"):
+        ln = raw.rstrip()
+        if not ln.strip():
+            flush_para(); flush_list()
+            continue
+        m = re.match(r"^\s*(?:([-*•])|(\d{1,3})[.)])\s+(.*)$", ln)
+        if m:
+            k = "ul" if m.group(1) else "ol"
+            if kind and kind != k:
+                flush_list()
+            flush_para()
+            kind, items = k, items + [m.group(3)]
+            continue
+        en = enum_split(ln)
+        if en:
+            flush_para(); flush_list()
+            if en[0]:
+                html_.append(f"<p>{fmt(en[0])}</p>")
+            html_.append("<ol>" + "".join(f"<li>{fmt(x)}</li>" for x in en[1]) + "</ol>")
+            continue
+        flush_list()
+        para.append(ln.strip())
+    flush_para(); flush_list()
+    return "".join(html_)
+
+
+def markdown_subset(text):
+    """The status@1 rendering: ATX headings, lists, paragraphs, bold/italic/code, horizontal rules, links as
+    text. Fenced code is shown as text in <pre>. HTML comments (template hints) are removed. Anything else
+    (HTML, images, tables) is plain text."""
+    out, buf, fence = [], [], None
+    text = re.sub(r"<!--.*?-->", "", text or "", flags=re.S)
+    def flush():
+        if buf:
+            out.append(structured("\n".join(buf), md=True))
+            buf.clear()
+    for ln in (text or "").replace("\r\n", "\n").split("\n"):
+        if fence is not None:
+            if ln.strip().startswith(fence):
+                out.append(f"<pre>{e(chr(10).join(fence_buf))}</pre>")
+                fence = None
+            else:
+                fence_buf.append(ln)
+            continue
+        if re.match(r"^\s*(```|~~~)", ln):
+            flush()
+            fence, fence_buf = ln.strip()[:3], []
+            continue
+        h = re.match(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$", ln)
+        if h:
+            flush()
+            lvl = min(len(h.group(1)) + 1, 6)   # the page's own h1 is the surface title; the file's # becomes h2
+            out.append(f"<h{lvl}>{inline_md(e(h.group(2)))}</h{lvl}>")
+            continue
+        if re.fullmatch(r"\s*(?:-{3,}|\*{3,}|_{3,})\s*", ln):
+            flush()
+            out.append("<hr>")
+            continue
+        buf.append(ln)
+    if fence is not None:
+        out.append(f"<pre>{e(chr(10).join(fence_buf))}</pre>")
+    flush()
+    return "".join(out)
 
 
 def snapshot_of(root, as_of):
@@ -598,6 +877,9 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     if landing not in {k for k, _, _ in SURFACES}:
         raise Refused(f"landing {landing!r} isn't a surface ({', '.join(k for k, _, _ in SURFACES)})")
     ps = read_pr_state(rd.root)
+    actors = actors_map(cfg)
+    support = read_support(rd.root, full)
+    status = read_status(rd.root, full)
     # one reader: PR states come from relay-kit prs's file. --pr-state (gh at build time) is asked first when
     # given, since it is newer; the file answers the rest. Each state says where it came from.
     latest = (ps or {"latest": {}})["latest"]
@@ -840,6 +1122,11 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             item["compose"].update({k: v for k, v in compose_extra(kind, cid, owner, (rec or {}).get("from"), full, "", None).items()
                                     if k in ("clarify", "inquire")})
 
+    # ---- decision support (DEC-140 §1): authored notes per item, one block per author ----
+    coord_lanes = [coordinator.lower()] if coordinator else [l for l in (set(rd.lanes.codes) | {t["lane"] for t in threads.values() if t.get("lane")}) if "coord" in l]
+    for item in choices:
+        item["support"] = support_for(support, item["id"], owner, rd.lanes.lane, coord_lanes)
+
     # handoff titles in metadata mode: ids only (the title can carry the substance)
     def htitle(h):
         return h["title"] if full else None
@@ -1072,6 +1359,16 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
     b["policy"] = {"advisory": True, "source": SETTINGS_FILE if policy else None,
                    "caps": {k: policy.get(k) for k in POLICY_KEYS}}
 
+    # ---- Status (DEC-139): the newest edition; stale when older than drift_days before the newest record ----
+    for ed in status["editions"]:
+        sp = ex.span(ed["date"])
+        ed["age_days"] = (as_of_dt - sp[0]).days if sp and as_of_dt else None
+        ed["stale"] = ed["age_days"] is not None and ed["age_days"] > drift_days
+    latest_ed = status["editions"][0] if status["editions"] else None
+    status_out = {"present": status["present"], "dir": status["dir"], "contract": "relay-kit/status@1", "latest": latest_ed,
+                  "older": [{k: v for k, v in ed.items() if k != "body"} for ed in status["editions"][1:]],
+                  "unreadable": status["unreadable"], "drift_days": drift_days}
+
     counts = {"choices": len(choices),"choices_by_kind": {k: sum(1 for c in choices if c["kind"] == k)
                                                            for k in ("decision", "handoff", "challenge")},
               "decisions": len(decisions), "challenges": len(challenges), "handoffs": len(handoffs),
@@ -1082,7 +1379,10 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
               "drift_flags": len([c for c in drift_ch if c["open"]]) + len(stale),
               "delegations_inferred": len(delegations), "delegations_recorded": len(rec_edges),
               "questions_open": len(questions), "possibly_overtaken": sum(1 for c in choices if c["possibly_overtaken"]),
-              "prs_open": sum(1 for (r, n), x in (ps or {"latest": {}})["latest"].items() if x.get("state") == "open")}
+              "prs_open": sum(1 for (r, n), x in (ps or {"latest": {}})["latest"].items() if x.get("state") == "open"),
+              "status_editions": len(status["editions"]),
+              "support_notes": sum(len(v) for v in support["by_item"].values()),
+              "choices_without_support": sum(1 for c in choices if not c["support"])}
     return {
         "schema": SCHEMA,
         "generator": {"tool": "relay-kit cockpit (tools/cockpit.py)", "kit_version": __version__,
@@ -1098,7 +1398,11 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
                       "via": " and ".join(v for v in ["gh api (build time), first" if gh_lookup else None,
                                                       PRS_FILE + " (relay-kit prs)" if file_states else None] if v)}
                      if pr_lookup else {"looked_up": False}),
-        "pull_requests": ({"present": True, "file": PRS_FILE, "items": pr_items(ps, owner, settings, full),
+        "status": status_out,
+        "decision_support": {"present": support["present"], "file": SUPPORT_FILE, "contract": "relay-kit/decision-support@1",
+                             "lines": support["lines"], "unreadable": support["unreadable"],
+                             "order": "independent authors first, then the owner, then the coordinator lane; a reading order, not a ranking"},
+        "pull_requests": ({"present": True, "file": PRS_FILE, "items": pr_items(ps, owner, settings, full, actors),
                            "fetches": sorted(ps["fetches"].values(), key=lambda f: f["repo"]), "unreadable": ps["unreadable"]}
                           if ps is not None else {"present": False, "file": PRS_FILE, "items": [], "fetches": [], "unreadable": 0}),
         "topology": {"information": info, "authority": authority},
@@ -1268,7 +1572,7 @@ def choice_card(c, pr_fetched_at=None):
     head = (f'<header><span class="badge {c["kind"]}">{e(c["kind"])}</span><b>{e(c["id"])}</b>'
             f'<span class="st">{e(c["status"])}</span><span class="date">{e(c.get("date"))}</span></header>')
     if c["kind"] == "decision":
-        body = (f'<p class="txt">{e(c.get("text"))}</p>' if c.get("text") else "") + dl(
+        body = (f'<div class="txt rec">{structured(c.get("text"))}</div>' if c.get("text") else "") + dl(
             [("scope", c.get("scope")), ("proposed by", c.get("proposed_by")), ("decider", c.get("decider")),
              ("basis", c.get("basis")), ("locator", c.get("locator")), ("source", c["source"]),
              ("proposed replacement", (", ".join(c["proposed_replacements"]) + " (proposed, so this is still open)")
@@ -1283,9 +1587,10 @@ def choice_card(c, pr_fetched_at=None):
         hint = (f'Accept moves it to {nxt}' if nxt else f'No legal next state from {c["status"]}') + \
             '; Reject cancels it (owner only). These are handoff.py commands; your words go in the note.'
     else:
-        body = (f'<p class="txt">{e(c.get("text"))}</p>' if c.get("text") else "") + dl(
-            [("raised by", c.get("raised_by")), ("affects", c.get("affects")), ("proposed test", c.get("proposed_test")),
-             ("source", c["source"])])
+        body = (f'<div class="txt rec">{structured(c.get("text"))}</div>' if c.get("text") else "") + dl(
+            [("raised by", c.get("raised_by")), ("affects", c.get("affects")), ("source", c["source"])]) + \
+            (f'<details class="rec-more"><summary>Proposed test</summary><div class="txt rec">{structured(c.get("proposed_test"))}</div></details>'
+             if c.get("proposed_test") else "")
         hint = "Accept records accepted-risk; Reject records resolved (dismissed or fixed). You write the resolution."
     comp = c["compose"]
     ledger_kind = {"decision": "decision", "challenge": "challenge"}.get(c["kind"])
@@ -1336,15 +1641,43 @@ def choice_card(c, pr_fetched_at=None):
     onrec = ('<p class="onrec-note">Clarify is on the record: it composes an open question addressed to '
              f'{e(comp["clarify"]["json"]["addressed_to"])}, listed under Questions until a line resolves it. '
              'Recording it doesn\'t deliver it: tell them, or send a handoff, if you need the answer.</p>') if "clarify" in comp else ""
-    return (f'<article class="card choice" data-key="{e(key)}">{head}{ask_block(c, pr_fetched_at)}{body}<p class="hint">{e(hint)}</p>'
+    return (f'<article class="card choice" data-key="{e(key)}">{head}{ask_block(c, pr_fetched_at, hint)}{body}'
             f'{words}<div class="btns">{btns}</div>{edits}{onrec}{off}</article>')
 
 
-def ask_block(c, pr_fetched_at=None):
-    """'So what is this asking?' above the raw record. What each action does is this page's own
-    description of the composed lines, always; a proposer's `ask` may word the question and explain
-    the options, shown apart and attributed to them. Then what waits on it, its age, and whether it
-    may be overtaken."""
+def support_block(c):
+    """Decision support (DEC-140 §1): the authored notes for this item, one block per author, in reading
+    order (independent authors before the coordinator). The page writes none of it and ranks nothing."""
+    blocks = c.get("support") or []
+    if not blocks:
+        return ('<p class="mini-label">DECISION SUPPORT</p><p class="empty nosupport">No decision-support note yet. '
+                'One is written by hand into governance/decision-support.jsonl; this page never generates one.</p>')
+    out = ['<p class="mini-label">DECISION SUPPORT · AUTHORED NOTES, READ IN THIS ORDER; THE PAGE RANKS NOTHING</p>']
+    for b in blocks:
+        cur = b["current"]
+        role = {"independent": "independent note", "coordinator": "coordinator's note", "owner": "owner's note"}[b["role"]]
+        rows = "".join(f'<div class="ds-row"><dt>{e(label)}</dt><dd>{structured(cur["fields"].get(k))}</dd></div>'
+                       for k, label in SUPPORT_FIELDS if cur["fields"].get(k))
+        if not rows:
+            rows = ('<p class="hint">fields left out (--content metadata); present: ' + e(", ".join(cur["present"])) + "</p>") if cur["present"] \
+                else '<p class="hint">no fields filled in</p>'
+        hist = ""
+        if b["history"]:
+            hist = ('<details class="ds-hist"><summary>' + f'{len(b["history"])} earlier revision(s)</summary>'
+                    + "".join(f'<p class="hint">{e(h.get("id") or "")} · {e(h.get("at") or "?")}</p>'
+                              + "".join(f'<div class="ds-row"><dt>{e(label)}</dt><dd>{structured(h["fields"].get(k))}</dd></div>'
+                                        for k, label in SUPPORT_FIELDS if h["fields"].get(k)) for h in reversed(b["history"]))
+                    + "</details>")
+        out.append(f'<section class="ds {e(b["role"])}"><header><span class="tag ds-tag">{e(role)}</span><b>{e(b["author"])}</b>'
+                   f'<span class="date">{e(cur.get("at") or "?")} · {e(cur.get("id") or "")}</span></header><dl class="ds-fields">{rows}</dl>{hist}</section>')
+    return "".join(out)
+
+
+def ask_block(c, pr_fetched_at=None, hint=""):
+    """'So what is this asking?' above the raw record, then the authored decision support (DEC-140 §1), then
+    the facts (what waits on it, its age, whether it may be overtaken). What each action does to the ledger,
+    this page's own description of the composed lines, is kept behind a disclosure: it is mechanics, not
+    decision support."""
     a = c.get("ask") or {}
     whose = (f'question written by {e(a.get("by") or "the proposer")}' if a.get("source") == "proposer"
              else 'question derived by this page from the record, not written by the proposer')
@@ -1369,9 +1702,10 @@ def ask_block(c, pr_fetched_at=None):
         over = ('<p class="overtaken-flag"><span class="tag warn">POSSIBLY OVERTAKEN</span> '
                 + e("; ".join(c["possibly_overtaken"])) + '. Check before settling it; "Close as overtaken" composes a '
                 'line that closes it without adopting anything.</p>')
+    mech = (f'<details class="mech"><summary>how the ledger records this</summary><p class="mini-label">WHAT EACH ACTION DOES (THIS PAGE)</p>'
+            f'<ul class="effects">{effects}</ul>{dflt}{theirs}<p class="hint">{e(hint)}</p></details>')
     return (f'<div class="ask"><p class="mini-label">SO WHAT IS THIS ASKING? · <span class="whose {e(a.get("source"))}">{whose}</span></p>'
-            f'<p class="q">{e(a.get("question"))}</p><p class="mini-label">WHAT EACH ACTION DOES (THIS PAGE)</p>'
-            f'<ul class="effects">{effects}</ul>{dflt}{theirs}{dl(facts)}{over}</div>')
+            f'<p class="q">{e(a.get("question"))}</p>{support_block(c)}{dl(facts)}{over}{mech}</div>')
 
 
 CI_WORD = {"success": "CI passing", "failure": "CI failing", "pending": "CI running", "none": "no CI",
@@ -1402,19 +1736,63 @@ def pr_card(x, full):
                    + "</dl></details>" if rest else ""))
     elif not full:
         secs = f'<p class="hint">Sections present: {e(", ".join(x["present"]) or "none")} (text left out: --content metadata)</p>'
-    revs = "not read (the reader couldn't get them)" if "reviews" in x.get("unread", []) else ", ".join(f'{r["who"]} ({VERDICT.get(r["verdict"], str(r["verdict"]).lower())}'
-                     + (f', body says “{r["stated"]}”' if r.get("stated") else "")
-                     + f'; {r["family"] or "family unknown"})' for r in x["reviews"]) or "none yet"
+    revs = review_fold(x, full)
     other = ("not known (reviews not read)" if "reviews" in x.get("unread", []) else
              ("no reviews yet" if not x["reviews"] else "no counted reviews (only dismissed)") if not x["reviewers_counted"] else
              {True: "yes", False: "no", None: "can't tell (a family is unknown)"}[x["other_family"]])
     ci = CI_WORD.get(x["ci"]["state"], x["ci"]["state"]) + (f' ({", ".join(x["ci"]["failing"])})' if x["ci"]["failing"] else "")
     return (f'<article class="card pr pr-{e(st)}"><header><span class="badge pr-st">{e(st)}</span>{link}'
             f'<span class="date">updated {e((x["updated_at"] or "?")[:16].replace("T", " "))}</span></header>{title}'
-            f'<div class="btns">{by}{missing}</div>{secs}'
-            f'<dl><dt>Reviews</dt><dd>{e(revs)}</dd><dt>Other family</dt><dd>{e(other)} · author family '
+            f'<div class="btns">{by}{missing}</div>{secs}{revs}'
+            f'<dl><dt>Other family</dt><dd>{e(other)} · author family '
             f'{e(x["author_family"] or "unknown")}</dd><dt>CI</dt><dd>{e(ci)}</dd><dt>Read</dt><dd>{e(x["read_at"] or "?")}'
             f' · last changed {e(x["changed_at"] or "?")}</dd></dl></article>')
+
+
+def family_label(r):
+    """'copilot (inferred from login)', 'claude (signed)', or 'unsigned' (no Reviewer: line and no mapping)."""
+    if r.get("family") and r.get("family_source") == "signed":
+        return f'{r["family"]} (signed)'
+    if r.get("family"):
+        return f'{r["family"]} (inferred from login)'
+    return "signed, family unknown" if r.get("signed") else "unsigned"
+
+
+def review_fold(x, full):
+    """The PR's reviews folded under the card (@5): one entry per review or review-style comment with author,
+    family, kind, verdict, time and inline-comment count, and the body as plain paragraphs (no markdown is
+    executed; URLs stay text). A Findings line appears only when the body states those counts."""
+    unread = x.get("unread", [])
+    if "reviews" in unread and not x["reviews"]:
+        return '<dl><dt>Reviews</dt><dd>not read (the reader couldn\'t get them)</dd></dl>'
+    if not x["reviews"]:
+        return '<dl><dt>Reviews</dt><dd>none yet</dd></dl>'
+    def one(r):
+        verdict = VERDICT.get(r["verdict"], str(r["verdict"]).lower()) if r["verdict"] else "comment"
+        meta = [e(r["who"]), e(family_label(r)), "review" if r["kind"] == "review" else "review-style comment",
+                e(verdict) + (f' · body says “{e(r["stated"])}”' if r.get("stated") else ""),
+                e((r.get("at") or "?")[:16].replace("T", " "))]
+        if r.get("comments"):
+            meta.append(f'{r["comments"]} inline comment{"s" if r["comments"] != 1 else ""} (on GitHub)')
+        f = r.get("findings") or {}
+        find = (f'<p class="findings">Findings, as the review states them: '
+                + " / ".join(x_ for x_ in [f'{f["blocking"]} blocking' if "blocking" in f else None,
+                                          f'{f["should_fix"]} should-fix' if "should_fix" in f else None] if x_) + "</p>") if f else ""
+        if not full:
+            body = '<p class="hint">body left out (--content metadata)</p>'
+        elif not r.get("body_recorded"):
+            body = '<p class="hint">body not recorded: this line was read by relay-kit prs@2 or earlier; rerun prs to record it</p>'
+        elif not (r.get("body") or "").strip():
+            body = '<p class="hint empty">empty review body</p>'
+        else:
+            body = f'<div class="rv-body">{structured(r["body"])}</div>' + ('<p class="hint">(body cut at 4000 characters)</p>' if r.get("truncated") else "")
+        return f'<article class="rv rv-{e(r["kind"])}"><p class="rv-meta">{" · ".join(meta)}</p>{find}{body}</article>'
+    n = len(x["reviews"])
+    verdicts = [VERDICT.get(r["verdict"], "comment") if r["verdict"] else (f'says “{r["stated"]}”' if r.get("stated") else "comment") for r in x["reviews"]]
+    summ = f'Reviews: {n} · ' + ", ".join(f'{e(r["who"])} ({e(v)})' for r, v in zip(x["reviews"], verdicts))
+    if "comments" in unread:
+        summ += " · review-style comments not read this run"
+    return f'<details class="pr-reviews"><summary>{summ}</summary>{"".join(one(r) for r in x["reviews"])}</details>'
 
 
 def table(head, rows, cls=""):
@@ -1428,7 +1806,7 @@ def table(head, rows, cls=""):
 SURFACES = [("overview", "◈", "Overview"), ("intake", "✳", "Idea intake"), ("questions", "❖", "Questions"),
             ("choices", "⌁", "Choices"), ("topology", "◎", "Topology"), ("budget", "◉", "Budget control"),
             ("lanes", "▦", "Project lanes"), ("run", "◇", "Run commitments"), ("review", "◷", "Review"),
-            ("prs", "⇄", "Pull requests")]
+            ("prs", "⇄", "Pull requests"), ("status", "☷", "Status")]
 CREDIT = "design after the Cockpit v0.4 prototype (2026-11-04)"
 
 
@@ -1456,6 +1834,59 @@ def questions_table(qs):
     rows = [(q["id"], q.get("about"), q.get("addressed_to"), q.get("raised_by"), q.get("date"), q.get("text") or "(text left out)")
             for q in qs]
     return table(["question", "about", "addressed to", "asked by", "date", "question text"], rows)
+
+
+def edition_meta(ed, full):
+    tag = f'<span class="tag agent">written by {e(ed["author"])}, not the owner</span>' if ed.get("author") else '<span class="tag warn">no author in front matter</span>'
+    stale = (f'<span class="tag warn">STALE · {ed["age_days"]} days before the newest record (limit {{}})</span>' if ed.get("stale") else "")
+    probs = "".join(f'<span class="tag warn">{e(p)}</span>' for p in ed.get("problems") or [])
+    miss = f'<span class="tag warn">sections missing: {e(", ".join(ed["sections_missing"]))}</span>' if ed.get("sections_missing") else ""
+    return tag, stale, probs, miss
+
+
+def status_line(data):
+    st = data.get("status") or {}
+    ed = st.get("latest")
+    if not ed:
+        return '<p class="hint status-line">No status edition yet (<a class="subtle-link" href="#status" data-goto="status">Status ↗</a>).</p>'
+    return (f'<p class="status-line"><a class="subtle-link" href="#status" data-goto="status">Status ↗</a> latest edition '
+            f'<b>{e(ed["date"])} · {e(ed["edition"])}</b>, written by {e(ed.get("author") or "?")}'
+            + (f' · <b class="warn">stale ({ed["age_days"]} d)</b>' if ed.get("stale") else "") + "</p>")
+
+
+def status_surface(data):
+    st = data.get("status") or {"present": False, "latest": None, "older": [], "unreadable": [], "dir": STATUS_DIR}
+    full = data["query"]["content"] == "full"
+    if not st["present"] or not st["latest"]:
+        body = (f'<div class="notice">No editions in <code>{e(st["dir"])}/</code> yet. An edition is a hand-written file '
+                f'<code>{e(st["dir"])}/&lt;YYYY-MM-DD&gt;-&lt;edition&gt;.md</code> with front matter (date, edition, author, covers) and the '
+                'four sections Accomplishments / Road bumps / Status / Next steps (relay-kit/status@1; <code>relay-kit edition new</code> '
+                'scaffolds one). The page renders it as written and generates nothing.</div>')
+    else:
+        ed = st["latest"]
+        tag, stale, probs, miss = edition_meta(ed, full)
+        stale = stale.format(st["drift_days"])
+        meta = dl([("edition", f'{ed["date"]} · {ed["edition"]}'), ("author", ed.get("author")), ("covers", ed.get("covers")),
+                   ("file", ed["file"]), ("contract named in the file", ed.get("contract"))])
+        text = (f'<div class="narrative">{markdown_subset(ed["body"])}</div>' if full and ed.get("body")
+                else f'<p class="hint">Body left out (--content metadata): {ed["chars"]} characters, sections present: '
+                     f'{e(", ".join(s_ for s_ in STATUS_SECTIONS if s_ not in ed["sections_missing"]))}.</p>')
+        older = ""
+        if st["older"]:
+            rows = [[o["date"], o["edition"], o.get("author") or "?", o.get("covers") or "", o["file"]] for o in st["older"]]
+            older = (f'<details class="panel pad"><summary>Older editions · {len(st["older"])}</summary>'
+                     + table(["date", "edition", "author", "covers", "file"], rows) + "</details>")
+        body = (f'<div class="panel pad status-head"><div class="btns">{tag}{stale}{probs}{miss}</div>{meta}'
+                f'<p class="hint">Rendered as written: headings, lists, bold, italic, inline code and rules; links are shown as text and '
+                'not followed; anything else is plain text. Nothing here is summarised by the page.</p></div>'
+                f'<article class="panel pad edition">{text}</article>{older}')
+        if st["unreadable"]:
+            body += '<p class="hint">Not read: ' + e("; ".join(f'{u["file"]} ({u["reason"]})' for u in st["unreadable"])) + "</p>"
+    return f"""
+<section class="section surface" id="status">
+{head(11, "NARRATIVE", "Status", "The coordinator's account of what was done, what went wrong, where things stand and what comes next: written by hand, shown as written.", "AUTHORED · NOT GENERATED")}
+{body}
+</section>"""
 
 
 def render(data):
@@ -1495,6 +1926,7 @@ def render(data):
 <section class="section surface" id="overview">
 {head(1, "MISSION OVERVIEW", "Overview", "Generated from your records: what waits on you, what is running, what it costs, and where it drifts.", "ADVISORY ONLY")}
 <div class="dials">{dials}</div>
+{status_line(data)}
 <div class="overview-grid">
  <div class="panel pad"><div class="panel-head"><p class="eyebrow dark">WAITING ON YOU</p>
  <a class="subtle-link" href="#choices" data-goto="choices">Open Choices ↗</a></div><div class="direction-list">{waiting}</div></div>
@@ -1717,6 +2149,7 @@ more than one line is shown with all of them.</p>
 {pr_body}
 </section>"""
 
+    s_status = status_surface(data)
     nav = "".join(f'<a class="nav-link" href="#{k}" data-goto="{k}" data-name="{e(t)}"><span class="nav-icon">{i}</span>{e(t)}'
                   f'<span class="nav-kbd">{n:02d}</span></a>' for n, (k, i, t) in enumerate(SURFACES, 1))
     limits = "".join(f"<li>{e(x)}</li>" for x in data["limits"])
@@ -1760,7 +2193,7 @@ more than one line is shown with all of them.</p>
 <span id="crumb">OVERVIEW</span></div><div class="topbar-right"><span class="offline-tag"><span class="light light-warn"></span>LOCAL-FIRST PREVIEW</span>
 <span class="date-label">{snap_label}newest record {e(data["as_of"] or "(no timestamps)")} · lane {e(q["lane"] or "all")} · content {e(q["content"])}</span>
 {toggle}<a class="primary small" href="#intake" data-goto="intake">+ Capture thought</a></div></header>
-<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}</main>
+<main>{s_overview}{s_intake}{s_questions}{s_choices}{s_topo}{s_budget}{s_lanes}{s_run}{s_review}{s_prs}{s_status}</main>
 <footer class="section"><p class="mini-label">WHAT THIS PAGE CAN'T TELL YOU</p><ul>{limits}</ul>{unread}
 <p class="hint">{e(SCHEMA)} · relay-kit {e(data["generator"]["kit_version"])} · owner {e(data["owner"])} · data: cockpit.json beside this page ·
 {e(CREDIT)}.</p>
@@ -1994,6 +2427,27 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);marg
 .cards+.eyebrow{margin-top:18px}.pr-src summary{font:600 12px var(--mono);color:var(--text-2)}.pr-src[open] summary{margin-bottom:10px}
 .pr-src .warn{color:var(--gold)}.pr-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
 .card.pr .tag{white-space:normal;overflow-wrap:anywhere}
+.txt.rec p,.rv-body p,.ds-fields p,.narrative p{margin:0 0 8px}.txt.rec ol,.txt.rec ul,.rv-body ol,.rv-body ul,.ds-fields ol,.ds-fields ul,.narrative ol,.narrative ul{margin:4px 0 8px;padding-left:22px}
+.txt.rec li,.rv-body li,.ds-fields li,.narrative li{margin:3px 0;line-height:1.5}.txt.rec{white-space:normal}
+.rec-more summary{font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+.ds{border:1px solid var(--border);border-left:3px solid var(--purple);border-radius:6px;padding:10px 12px;margin:8px 0;background:var(--panel)}
+.ds.coordinator{border-left-color:var(--blue)}.ds.owner{border-left-color:var(--gold)}
+.ds header{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px}.ds header b{font:600 12px var(--mono)}
+.ds-tag{color:var(--purple);border-color:var(--purple-deep)}.ds.coordinator .ds-tag{color:var(--blue);border-color:var(--blue)}
+.ds-fields{display:block;margin:0}.ds-row{display:grid;grid-template-columns:130px minmax(0,1fr);gap:2px 12px;padding:5px 0;border-top:1px solid var(--line)}
+.ds-row dt{font:600 11px var(--mono);letter-spacing:.6px;text-transform:uppercase;color:var(--muted);padding-top:2px}.ds-row dd{font-size:13px}
+.ds-hist summary{font:600 11px var(--mono);color:var(--muted)}.nosupport{font-size:13px}
+.mech{margin:10px 0 0;padding:6px 10px;border:1px dashed var(--border-strong);border-radius:6px}.mech summary{font:600 11px var(--mono);letter-spacing:.6px;color:var(--muted);text-transform:uppercase}
+.mech[open] summary{margin-bottom:6px}
+.pr-reviews{margin:8px 0}.pr-reviews summary{font:600 12px var(--mono);color:var(--text-2);overflow-wrap:anywhere;white-space:normal}
+.rv{border-left:2px solid var(--teal-deep);padding:6px 0 6px 12px;margin:8px 0}.rv-comment{border-left-style:dashed}
+.rv-meta{font:12px var(--mono);color:var(--muted);margin:0 0 6px;overflow-wrap:anywhere}.rv-body{font-size:14px;line-height:1.6}
+.findings{color:var(--gold);font:600 12px var(--mono);margin:0 0 6px}.url{color:var(--muted);font-size:.9em;overflow-wrap:anywhere}
+.narrative{font-size:15px;line-height:1.65;max-width:78ch}.narrative h2{font-family:var(--heading);font-size:26px;letter-spacing:-.6px;margin:4px 0 14px}
+.narrative h3{font-size:19px;font-weight:600;margin:26px 0 10px;padding-top:12px;border-top:1px solid var(--line);color:var(--teal)}
+.narrative h4,.narrative h5,.narrative h6{font-size:15px;margin:16px 0 6px}.narrative li{margin:6px 0}.narrative hr{border:0;border-top:1px solid var(--border);margin:18px 0}
+.narrative pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.45 var(--mono);background:var(--sunk);padding:10px;border-radius:6px}
+.edition{padding:24px 28px}.status-head .btns{margin:0 0 8px}.status-line{font-size:13px;color:var(--text-2);margin:-4px 0 14px}
 @media (max-width:1000px){.choices-grid,.cols,.overview-grid,.budget-top{grid-template-columns:1fr}.apply{position:static;order:-1}
  .apply textarea{min-height:120px}
  .dials,.stats-row,.principles{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -2003,7 +2457,7 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--border);marg
  .topbar{position:static;padding:10px 16px}.section{padding:20px 16px 4px}.date-label{font-size:10px}
  table,thead,tbody,tr,td{display:block}thead{display:none}tr{border-bottom:1px solid var(--border);padding:4px 0}
  td{border:none;padding:2px 4px}td::before{content:attr(data-h) ": ";color:var(--muted);font:10px var(--mono)}td:first-child{white-space:normal}
- dl{grid-template-columns:1fr}dt{margin-top:4px}}
+ dl{grid-template-columns:1fr}dt{margin-top:4px}.ds-row{grid-template-columns:1fr}.edition{padding:16px}}
 @media (max-width:420px){.dials,.stats-row,.principles{grid-template-columns:1fr 1fr;gap:8px}.gauge figcaption b{font-size:20px}.stat strong{font-size:19px}}
 """
 

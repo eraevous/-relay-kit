@@ -1,4 +1,4 @@
-# Pull-request reader: `relay-kit/prs@2`
+# Pull-request reader: `relay-kit/prs@3`
 
 `relay-kit prs` reads pull-request state from GitHub, at build time and only when you run it, and
 appends what changed to `governance/pr-state.jsonl` in the records. The [Cockpit](cockpit.md)
@@ -7,6 +7,14 @@ file too, so there is one GitHub reader, not one per tool.
 
     relay-kit prs --root RECORDS [--repo OWNER/NAME ...] [--since-days 14] [--limit 30]
                   [--via gh|token] [--token-env NAME] [--max-wait 60] [--cache DIR] [--dry-run]
+
+**@3** (HO-RK-20261106-NXPR, DEC-139) records what reviewers wrote, not only how they voted: each
+review's body verbatim (cut at 4,000 characters, flagged), its inline-comment count, and **issue
+comments that are reviews in all but GitHub's type** (the first non-empty line opens with `Review`,
+`Execution review` or `Reviewer`, or a verdict is stated in the opening words), as reviews of
+`kind: "comment"`. That is one more read per pull request (its issue comments) and one per pull
+request with reviews (its inline comments). On the first @3 run a pull request whose reviews gained
+bodies gets one new line; an unchanged one none. Inline comments' text stays on GitHub.
 
 **@2** (HO-RK-20261105-TXRM step 1) reads GitHub through [tools/github.py](../tools/github.py), the
 kit's client for pull-request reads, and records what was asked for against what came back, so a
@@ -47,7 +55,7 @@ cockpit's opt-in `--pr-state` lookup still call GitHub their own way; routing th
 
 ## Lines
 
-Every line has `"schema": "relay-kit/prs@2"` and a `kind`.
+Every line has `"schema": "relay-kit/prs@3"` and a `kind`.
 
 **`"kind": "pr"`**, written only when something about the pull request changed since its last line
 (any field but `ts`):
@@ -60,11 +68,11 @@ Every line has `"schema": "relay-kit/prs@2"` and a `kind`.
 | `author` | the GitHub login that opened it. Agents often push under the owner's login, so this doesn't say who wrote it |
 | `author_line` | the text of the body's first `Author:` line, or null: who says they wrote it |
 | `created_at`, `updated_at`, `merged_at`, `closed_at`, `base`, `head` (`ref`, `sha`) | as on GitHub |
-| `reviews` | every submitted review: `by` (login), `verdict` (GitHub's state), `at`, `signed` (a `Reviewer:` line in the review body, or null), `stated` (a verdict word in the review's first 160 characters, e.g. `APPROVED` or `REQUEST CHANGES`, for reviews posted as comments; or null) |
+| `reviews` | every submitted review, and every review-style issue comment, by time: `id`, `kind` (`review` or `comment`), `by` (login), `verdict` (GitHub's state; null for a comment), `at`, `signed` (a `Reviewer:` line in the body, or null), `stated` (a verdict word in the first 160 characters, e.g. `APPROVED` or `REQUEST CHANGES`; or null), `body` (verbatim, up to 4,000 characters), `truncated`, `comments` (inline comments on that review; 0 for a comment) |
 | `ci` | `state`: `failure` if any check run or status failed, else `pending` if any is still running, else `success`, or `none` when there are none; `failing`: their names |
 | `body_sections` | `what`, `why`, `how`, `authorized`: the text under each heading, verbatim (HTML comments removed), up to 4000 characters each. A heading counts when its first word is the section's name ("What this changes" is `what`); headings in code fences don't |
 | `missing`, `truncated` | sections absent or empty; sections cut at 4000 characters |
-| `unread` | @2: `reviews` and/or `ci` when they couldn't be read. Then `reviews` is empty and `ci.state` is `unknown`: not read, not none |
+| `unread` | `reviews`, `comments` and/or `ci` when they couldn't be read. Then the unread part keeps its last recorded value (or is empty; `ci.state` is `unknown`): not read, not none |
 
 **`"kind": "fetch"`**, one per run: `ts`, `via`, `repos`, `ok`, `failed` (repo → error),
 `since_days`, `prs_seen`, `appended`. A repository that fails doesn't stop the others. @2 adds:
@@ -90,5 +98,5 @@ and session; the Cockpit then shows "written by <agent>, not the owner".
 
 It summarises nothing, infers no authorship from commits, and decides nothing: whether a pull request
 had enough reviews is for whoever reads it (the Cockpit states families; the rule is yours). It reads
-no issue comments and no review threads, only submitted reviews. Running it is a network action;
+issue comments only to find reviews posted as comments, and review threads only to count them. Running it is a network action;
 the records hold only what GitHub returned to the account it ran as.
