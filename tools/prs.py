@@ -135,16 +135,21 @@ GH = _github()
 Refused = GH.Refused     # one exception for the reader and the client
 
 
+def refused(x):
+    """A Refused from any copy of the client module (a caller may load github.py under another name)."""
+    return type(x).__name__ == "Refused"
+
+
 class FnClient:
     """A bare get(path) function (tests) behind the client's interface."""
     def __init__(self, get):
         self.get, self.stats = get, {}
 
     def pages(self, path, limit=100, **_):
-        got = self.get(f"{path}&per_page={max(1, min(limit, 100))}")
+        got = self.get(f"{path}&per_page={max(1, min(limit + 1, 100))}")
         if not isinstance(got, list):
             raise Refused(f"GET {path}: expected a list")
-        return got[:limit], len(got) >= limit
+        return got[:limit], len(got) > limit
 
 
 def ci_state(get, repo, sha):
@@ -182,7 +187,9 @@ def pr_record(get, repo, pr, ts, partial=None):
             sig = next((m.group(1)[:120] for ln in (r.get("body") or "").split("\n") if (m := SIGNED.match(ln))), None)
             reviews.append({"by": (r.get("user") or {}).get("login"), "verdict": r.get("state"),
                             "at": r.get("submitted_at"), "signed": sig, "stated": stated_verdict(r.get("body"))})
-    except Refused as x:
+    except Exception as x:
+        if not refused(x):
+            raise
         unread.append("reviews")
         if partial is not None:
             partial.append({"number": n, "what": "reviews", "error": str(x)[:200]})
@@ -191,7 +198,9 @@ def pr_record(get, repo, pr, ts, partial=None):
     if sha:
         try:
             ci = ci_state(get, repo, sha)
-        except Refused as x:
+        except Exception as x:
+            if not refused(x):
+                raise
             ci = {"state": "unknown", "failing": []}
             unread.append("ci")
             if partial is not None:
@@ -229,8 +238,9 @@ def latest_by_pr(lines):
 
 
 def same(a, b):
-    """Unchanged apart from when it was read (and, for an @1 line, the fields @2 added)."""
-    skip = COMPARE_SKIP | ({"schema", "unread"} if a.get("schema") != b.get("schema") else set())
+    """Unchanged apart from when it was read, what couldn't be read this time (carried forward from the
+    last line), and, for an @1 line, the schema."""
+    skip = COMPARE_SKIP | {"unread"} | ({"schema"} if a.get("schema") != b.get("schema") else set())
     return {k: v for k, v in a.items() if k not in skip} == {k: v for k, v in b.items() if k not in skip}
 
 
@@ -273,22 +283,31 @@ def run(root, client, via, repos=None, since_days=14, limit=30, ts=None, dry_run
     new, ok, failed, seen, coverage, revisions = [], [], {}, 0, {}, {}
     for repo in repos:
         found, partial = [], []
-        cov = {"asked": f"the {limit} most recently updated, plus any last recorded open", "listed": 0,
+        lim = max(1, min(limit, 100))
+        cov = {"asked": f"the {lim} most recently updated, plus any last recorded open", "listed": 0,
                "more_available": None, "reread_open": 0, "prs_read": 0, "partial": partial}
         try:
             try:   # revision identity: what the repository looked like when it was read
                 meta = get(f"repos/{repo}")
                 if isinstance(meta, dict):
                     revisions[repo] = {"default_branch": meta.get("default_branch"), "pushed_at": meta.get("pushed_at")}
-            except Refused as x:
+            except Exception as x:
+                if not refused(x):
+                    raise
                 partial.append({"number": None, "what": "repository", "error": str(x)[:200]})
-            prs, more = client.pages(f"repos/{repo}/pulls?state=all&sort=updated&direction=desc", limit=max(1, min(limit, 100)))
+            prs, more = client.pages(f"repos/{repo}/pulls?state=all&sort=updated&direction=desc", limit=lim)
             cov["listed"], cov["more_available"] = len(prs), more
             listed = {pr.get("number") for pr in prs if isinstance(pr, dict)}
             # a PR last recorded open is re-read whatever its age, so a closed one never stays "open"
             for (r_, n_), prev in sorted(last.items(), key=lambda kv: kv[0][1]):
                 if r_ == repo and prev.get("state") == "open" and n_ not in listed:
-                    one = get(f"repos/{repo}/pulls/{n_}")
+                    try:
+                        one = get(f"repos/{repo}/pulls/{n_}")
+                    except Exception as x:     # one PR that can't be read again doesn't fail the repository
+                        if not refused(x):
+                            raise
+                        partial.append({"number": n_, "what": "pull request", "error": str(x)[:200]})
+                        continue
                     if isinstance(one, dict):
                         prs.append(one)
                         cov["reread_open"] += 1
@@ -302,12 +321,19 @@ def run(root, client, via, repos=None, since_days=14, limit=30, ts=None, dry_run
                 cov["prs_read"] += 1
                 rec = pr_record(get, repo, pr, ts, partial)
                 prev = last.get((repo, rec["number"]))
+                if prev:   # what couldn't be read this time keeps its last known value (still marked unread)
+                    if "reviews" in rec["unread"]:
+                        rec["reviews"] = prev.get("reviews") or []
+                    if "ci" in rec["unread"] and isinstance(prev.get("ci"), dict):
+                        rec["ci"] = prev["ci"]
                 if prev is None or not same(prev, rec):
                     found.append(rec)
             new += found          # a repository whose list fails part-way contributes nothing
             ok.append(repo)
             coverage[repo] = cov
-        except Refused as x:
+        except Exception as x:
+            if not refused(x):
+                raise
             failed[repo] = str(x)[:300]
     stats = dict(getattr(client, "stats", {}) or {})
     fetch = {"schema": SCHEMA, "kind": "fetch", "ts": ts, "via": via, "repos": repos, "ok": ok, "failed": failed,
@@ -357,7 +383,7 @@ def main(argv=None):
             if not token:
                 raise Refused(f"no token in {' or '.join(names)}")
             transport = GH.token_transport(token)
-        client = GH.Client(transport, max_wait=a.max_wait, cache_dir=a.cache)
+        client = GH.Client(transport, max_wait=a.max_wait, cache_dir=a.cache, cache_scope=via)
         f = run(a.root, client, via, a.repo, a.since_days, a.limit, dry_run=a.dry_run)
     except Refused as x:
         sys.exit(f"refused: {x}")

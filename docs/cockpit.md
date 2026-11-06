@@ -35,8 +35,9 @@ Choices only when a settled line closes it (a proposed replacement is shown on i
 challenge only when a resolved or accepted-risk line resolves it, and transitions that take no effect
 or conflict are listed on Review. Every line it composes for a decision or challenge carries
 `--expect ID=STATE@HASH`, so applying it after the records have moved on is refused with what changed
-(below). The header shows the records' **revision and its commit time** (aged in your browser)
-apart from the **newest record**; `cockpit.json` gains `snapshot`, `transitions` and, on a choice,
+(below). The header shows the records' **revision, its commit time and when the clone last fetched**
+(aged in your browser) apart from the **newest record**; outside a git repository it says the
+revision is unknown; `cockpit.json` gains `snapshot`, `transitions` and, on a choice,
 `proposed_replacements`. Nothing from @3 was removed.
 
 The page is deterministic: two runs over the same records give byte-identical files. It shows two
@@ -137,7 +138,9 @@ the placeholders, copy, and run the lines in your records with `RELAYKIT_ACTOR=<
 | handoff | `relay-kit handoff --dir handoffs set HO-... <next>`, after you fill its Authorized section | `... set HO-... cancelled` | comment |
 
 **Applying from an old page.** Decision and challenge lines carry `--expect DEC-N=open@<hash>`
-(the item's state when the page was built, and the first 12 hex digits of its line's sha256).
+(the item's state when the page was built, and the first 12 hex digits of the sha256 of its line's
+bytes as stored). A proposal that proposes to replace another also carries `--expect` for that one,
+so its replacement can't be adopted after the target was settled another way.
 `ledger_append` checks it against the records you are appending to and, if the item has since been
 settled or its line changed, refuses, appends nothing, and lists the later lines that mention it.
 Handoff lines already carry `--expect` for their state.

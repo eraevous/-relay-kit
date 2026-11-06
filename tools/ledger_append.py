@@ -63,20 +63,23 @@ def check_expect(d, expects):
         p = d / name
         rows[name] = []
         if p.exists():
-            for ln in p.read_text(encoding="utf-8").splitlines():
+            for ln in p.read_bytes().split(b"\n"):    # raw bytes, as the readers hash them
                 try:
-                    obj = json.loads(ln)
+                    obj = json.loads(ln) if ln.strip() else None
                 except ValueError:
                     continue
                 if isinstance(obj, dict):
                     rows[name].append((ln, obj))
-    res = lifecycle().resolve([o for _, o in rows["decisions.jsonl"]], [o for _, o in rows["challenges.jsonl"]])
+    lc = lifecycle()
+    decs = [o for _, o in rows["decisions.jsonl"]]
+    res = lc.resolve(decs, [o for _, o in rows["challenges.jsonl"]], lc.ledger_as_of(decs))
     out = []
     for e in expects:
         m = EXPECT.match(e)
         if not m:
             return f"refused: --expect {e!r} isn't ID=STATE or ID=STATE@HASH"
         rid, want, h = m.groups()
+        want = "standing" if want == lc.STANDING else want
         name = "decisions.jsonl" if rid.startswith("DEC-") else "challenges.jsonl"
         line = next((ln for ln, o in rows[name] if o.get("id") == rid), None)
         r = (res["decisions"] if name == "decisions.jsonl" else res["challenges"]).get(rid)
@@ -89,16 +92,16 @@ def check_expect(d, expects):
         changed = []
         if want != now:
             changed.append(f"{rid} is now {now}, not {want}")
-        if h and not hashlib.sha256(line.encode("utf-8")).hexdigest().startswith(h):
+        if h and not lc.line_hash(line).startswith(h):
             changed.append(f"{rid}'s own line has changed since the page was built")
         if changed:
-            pat = re.compile(rf"\b{re.escape(rid)}\b")
+            pat = re.compile(rf"\b{re.escape(rid)}\b".encode())
             later = [f"  {o.get('id')} ({o.get('status')}, {o.get('date')})"
                      for nm in ("decisions.jsonl", "challenges.jsonl") for ln, o in rows[nm]
                      if o.get("id") != rid and pat.search(ln)]
             out.append("; ".join(changed) + (":\n" + "\n".join(later) if later else ""))
     if out:
-        return ("refused: the records changed since the page you are applying from was built:\n" + "\n".join(out)
+        return ("refused: the records changed since the page you are applying from was built (lines that mention it are listed):\n" + "\n".join(out)
                 + "\nNothing was appended. Rebuild the page, or look at those lines, and decide again.")
     return None
 
