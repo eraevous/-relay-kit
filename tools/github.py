@@ -66,10 +66,10 @@ def gh_transport():
         for k, v in headers.items():
             cmd += ["-H", f"{k}: {v}"]
         try:
-            p = subprocess.run(cmd + ["--", path], capture_output=True, text=True, timeout=90)
+            p = subprocess.run(cmd + ["--", path], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
         except subprocess.TimeoutExpired as x:
             raise OSError(f"gh api timed out: {x}")
-        status, h, body = _split_response(p.stdout)
+        status, h, body = _split_response(p.stdout or "")
         if status is None:   # no HTTP response at all (not signed in, bad flag): retrying won't help
             raise Refused(f"gh api {path}: " + ((p.stderr or p.stdout).strip()[:200] or f"exited {p.returncode}"))
         return status, h, body

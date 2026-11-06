@@ -23,7 +23,7 @@ try:
     from . import __version__
 except ImportError:   # run as a file (python3 tools/cli.py) rather than as the package
     import re as _re
-    __version__ = _re.search(r'__version__ = "([^"]+)"', (__import__("pathlib").Path(__file__).with_name("__init__.py")).read_text()).group(1)
+    __version__ = _re.search(r'__version__ = "([^"]+)"', (__import__("pathlib").Path(__file__).with_name("__init__.py")).read_text(encoding="utf-8")).group(1)
 
 HERE = pathlib.Path(__file__).resolve().parent
 SKILLS = HERE.parent / "skills" if (HERE.parent / "skills" / "handoff-ledger").is_dir() else HERE / "skills"

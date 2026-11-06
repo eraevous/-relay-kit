@@ -222,9 +222,9 @@ def new_ids(path, base):
         return set()
     try:
         rel = subprocess.run(["git", "-C", str(path.parent), "ls-files", "--full-name", path.name],
-                             capture_output=True, text=True, check=True).stdout.strip()
+                             capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
         old = subprocess.run(["git", "-C", str(path.parent), "show", f"{base}:{rel}"],
-                             capture_output=True, text=True, check=True).stdout if rel else ""
+                             capture_output=True, text=True, encoding="utf-8", check=True).stdout if rel else ""
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
     out = set()
@@ -238,7 +238,7 @@ def new_ids(path, base):
 
 def check_merge_attr(path):
     p = subprocess.run(["git", "-C", str(path.parent), "check-attr", "merge", "--", path.name],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, encoding="utf-8")
     if p.returncode == 0 and p.stdout.strip().endswith(": union"):
         return [f"{path.name}: .gitattributes sets merge=union; concurrent appends must conflict, not be joined"]
     return []
@@ -248,9 +248,9 @@ def check_new_recorders(path, base):
     """Lines added since base: an agent recorder ('x:y') must carry a session ('x:y#id')."""
     try:
         rel = subprocess.run(["git", "-C", str(path.parent), "ls-files", "--full-name", path.name],
-                             capture_output=True, text=True, check=True).stdout.strip()
+                             capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
         old = subprocess.run(["git", "-C", str(path.parent), "show", f"{base}:{rel}"],
-                             capture_output=True, text=True, check=True).stdout if rel else ""
+                             capture_output=True, text=True, encoding="utf-8", check=True).stdout if rel else ""
     except (subprocess.CalledProcessError, FileNotFoundError):
         old = ""
     out = []
@@ -271,11 +271,11 @@ def check_new_recorders(path, base):
 def check_append_only(path, base):
     try:
         rel = subprocess.run(["git", "-C", str(path.parent), "ls-files", "--full-name", path.name],
-                             capture_output=True, text=True, check=True).stdout.strip()
+                             capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
         if not rel:
             return []   # not committed yet
         old = subprocess.run(["git", "-C", str(path.parent), "show", f"{base}:{rel}"],
-                             capture_output=True, text=True, check=True).stdout
+                             capture_output=True, text=True, encoding="utf-8", check=True).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
         return []
     new = path.read_text(encoding="utf-8")

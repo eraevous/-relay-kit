@@ -61,7 +61,7 @@ def load_ledger():
 
 
 def git(root, *args):
-    p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=60)
+    p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     if p.returncode:
         raise RuntimeError(p.stderr.strip() or f"git {' '.join(args)} failed")
     return p.stdout.strip()
@@ -156,7 +156,7 @@ def github_repo(root, gaps, what):
 
 def api(path):
     gh = os.environ.get("RELAYKIT_GH", "gh")
-    p = subprocess.run([gh, "api", path], capture_output=True, text=True, timeout=60)
+    p = subprocess.run([gh, "api", path], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     if p.returncode:
         raise RuntimeError(p.stderr.strip() or "gh api failed")
     return json.loads(p.stdout)
