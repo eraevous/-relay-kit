@@ -120,6 +120,26 @@ class ClientTests(unittest.TestCase):
         for verb in ("POST", "PATCH", "PUT", "DELETE"):
             self.assertNotIn(f'"{verb}"', src)
 
+    def test_utf8(self):
+        """github: gh's output is read as UTF-8 whatever the system's code page (Windows cp1252 broke on review text), and no output at all is a refusal, not a crash"""
+        real, kws = subprocess.run, []
+        def fake(cmd, **kw):
+            kws.append(kw)
+            return subprocess.CompletedProcess(cmd, 0, "HTTP/2.0 200 OK\r\n\r\n[\"\u201cok\u201d\"]", "")
+        subprocess.run = fake
+        try:
+            self.assertEqual(GH.gh_transport()("p", {})[2], '["\u201cok\u201d"]')
+            subprocess.run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, None, "gh: not signed in")
+            with self.assertRaises(GH.Refused):
+                GH.gh_transport()("p", {})
+        finally:
+            subprocess.run = real
+        self.assertEqual(kws[0].get("encoding"), "utf-8")
+        import re
+        for f in list((KIT / "tools").glob("*.py")) + list((KIT / "skills").rglob("*.py")):     # every reader of a subprocess
+            src = f.read_text(encoding="utf-8")
+            self.assertEqual(re.findall(r"text=True(?!, encoding=)", src), [], f"{f.name}: text=True without encoding")
+
     def test_coverage(self):
         """prs: what was asked for and what came back is recorded per repository; unreadable reviews or CI are unread, not none"""
         root = TC.build_root(self.tmp / "r")

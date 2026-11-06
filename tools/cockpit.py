@@ -363,7 +363,7 @@ def gh_pr_state(owner, repo, number):
     try:
         p = subprocess.run(["gh", "api", f"repos/{owner}/{repo}/pulls/{number}", "-q",
                             '(if .merged_at then "merged" else .state end)'],
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
     s = p.stdout.strip()
@@ -375,7 +375,7 @@ def records_github_owner(root):
     import subprocess
     try:
         url = subprocess.run(["git", "-C", str(root), "remote", "get-url", "origin"], capture_output=True,
-                             text=True, timeout=10).stdout.strip()
+                             text=True, encoding="utf-8", errors="replace", timeout=10).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return None
     m = re.search(r"github\.com[/:]([\w.-]+)/", url)
@@ -549,7 +549,7 @@ def snapshot_of(root, as_of):
     import subprocess
     def g(*args):
         try:
-            p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=20,
+            p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
                                env={**os.environ, "TZ": "UTC"})
         except (OSError, subprocess.TimeoutExpired):
             return None

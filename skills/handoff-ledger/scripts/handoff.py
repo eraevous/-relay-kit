@@ -91,7 +91,7 @@ def clone_of(folder, records):
            if not (k.startswith("GIT_") and k not in ("GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS"))}
     def g(*a):
         try:
-            return subprocess.run(["git", "-C", str(folder), *a], capture_output=True, text=True, timeout=30, env=env)
+            return subprocess.run(["git", "-C", str(folder), *a], capture_output=True, text=True, encoding="utf-8", timeout=30, env=env)
         except (OSError, subprocess.TimeoutExpired) as e:
             raise Refused(f"git couldn't check {folder} ({e}); pass --dir to choose the records yourself")
     top = g("rev-parse", "--show-toplevel")
@@ -508,7 +508,7 @@ def ids_in_git(d):
     """Handoff ids that exist in any commit or branch git knows about, after a best-effort
     fetch. Another session may have taken an id in its own clone and pushed it."""
     def git(*args):
-        return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, timeout=60)
+        return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, encoding="utf-8", timeout=60)
     try:
         if git("rev-parse", "--git-dir").returncode != 0:
             return set(), "not a git repository: only this folder was checked"
@@ -604,7 +604,7 @@ def shared_copy_error(p, fetch):
     detached HEAD this clone is on): refuse if the shared copy holds a version of this handoff
     that this clone has never had. Returns (error, note)."""
     def git(*args):
-        return subprocess.run(["git", "-C", str(p.parent), *args], capture_output=True, text=True, timeout=60)
+        return subprocess.run(["git", "-C", str(p.parent), *args], capture_output=True, text=True, encoding="utf-8", timeout=60)
     try:
         if git("rev-parse", "--git-dir").returncode != 0:
             return None, None
@@ -725,7 +725,7 @@ def history_problems(d, base):
     """Against git revision `base`: no handoff removed, its id/from/to/created unchanged, and its
     earlier log lines still first, in order (protected writes, after a merge as well)."""
     def git(*args):
-        return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, timeout=60)
+        return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, encoding="utf-8", timeout=60)
     prefix = git("rev-parse", "--show-prefix").stdout.strip()
     mb = git("merge-base", base, "HEAD")
     if mb.returncode != 0:
