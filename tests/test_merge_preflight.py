@@ -20,7 +20,7 @@ class GitMergeFixtures(unittest.TestCase):
         self.repo = Path(self.temp.name)
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "Fixture")
-        self.git("config", "user.email", "fixture@example.invalid")
+        self.git("config", "user.email", "fixture")
         self.write("shared.py", "value = 1\n")
         self.write("a.py", "one = 1\n")
         self.git("add", ".")
