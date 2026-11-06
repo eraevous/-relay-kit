@@ -31,7 +31,10 @@ BUDGET_FILE = "governance/budget.jsonl"
 SETTINGS_FILE = "governance/cockpit.json"
 BUDGET_FIELDS = {"ts": "ISO time (UTC) the line covers up to", "actor": "assistant:lane#session or the owner",
                  "window": "weekly | session", "tokens_in": "integer >= 0", "tokens_out": "integer >= 0",
-                 "agents": "integer >= 0: agents running in that window", "note": "free text"}
+                 "agents": "integer >= 0: agents running in that window", "note": "free text",
+                 "method": "measured | proxy | estimate (relay-kit/budget@2; older lines: unlabelled)",
+                 "id / correction_of / includes_children / interval_start / interval_end / scope / source / tokens_detail":
+                     "relay-kit/budget@2: see docs/budget.md"}
 POLICY_KEYS = ["default_effort", "spawn_route", "weekly_tokens_soft", "max_delegations_per_question",
                "chatgpt_standing_thread_cap", "claude_build_context_cap", "codex_repo_context_cap",
                "human_interruptions_per_day"]
@@ -69,6 +72,12 @@ def load_export():
 
 ex = load_export()
 Refused = ex.Refused
+_bspec = importlib.util.spec_from_file_location("relaykit_budget_for_cockpit", HERE / "budget.py")
+BG = importlib.util.module_from_spec(_bspec)
+_bspec.loader.exec_module(BG)
+_tspec = importlib.util.spec_from_file_location("relaykit_telemetry_for_cockpit", HERE / "telemetry.py")
+TEL = importlib.util.module_from_spec(_tspec)
+_tspec.loader.exec_module(TEL)
 
 
 def dumps(x):
@@ -101,7 +110,7 @@ def read_budget(root, rd):
     if not p.is_file() or p.is_symlink():
         return None, []
     raw = rd.read(p, "budget")
-    rows, bad = [], []
+    rows, bad, raws = [], [], {}
     for n, line in enumerate(raw.split(b"\n"), 1):
         if not line.strip():
             continue
@@ -109,19 +118,20 @@ def read_budget(root, rd):
             r = json.loads(line)
             if not isinstance(r, dict):
                 raise ValueError("not an object")
+            for pr in BG.row_problems(r):    # the same check every budget reader makes
+                raise ValueError(pr)
+            raws[n] = line.decode("utf-8", "replace")
             sp = ex.span(r.get("ts"))
             if not sp:
                 raise ValueError("ts isn't an ISO time")
-            if r.get("window") not in ("weekly", "session"):
-                raise ValueError("window must be weekly or session")
-            for f in ("tokens_in", "tokens_out"):
-                if not isinstance(r.get(f), int) or isinstance(r.get(f), bool) or r[f] < 0:
-                    raise ValueError(f"{f} must be an integer >= 0")
         except ValueError as e:
             bad.append({"line": n, "reason": str(e)})
             continue
         rows.append((n, sp[0], r))
-    return {"rows": rows, "bad": bad}, bad
+    kept, report = BG.effective([(n, raws[n], r) for n, _, r in rows])
+    at = {n: (ex.span(a)[0] if ex.span(a) else None) for n, _, _, a in kept}   # counted at the replaced line's time
+    ids = {n: i for n, i, _, _ in kept}
+    return {"rows": rows, "bad": bad, "counted": at, "ids": ids, "corrections": report}, bad
 
 
 def captures(rd, threads):
@@ -969,7 +979,13 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
          "weekly_allowance": weekly_tokens, "status_file_costs_parsed": False}
     if budget is not None:
         start = (as_of_dt - dt.timedelta(days=7)) if as_of_dt else None
-        recent = [(n, t, r) for n, t, r in budget["rows"] if start is None or t > start]
+        # relay-kit/budget@2: a corrected line is replaced (and counted at the time of the line it replaces);
+        # a child is dropped only where its parent is counted in the same window
+        recent = [(n, budget["counted"][n] or t, r) for n, t, r in budget["rows"]
+                  if n in budget["counted"] and (start is None or (budget["counted"][n] or t) > start)]
+        in_window = {budget["ids"][n] for n, _, _ in recent}
+        kids = budget["corrections"]["children"]
+        recent = [(n, t, r) for n, t, r in recent if not (budget["ids"][n] in kids and kids[budget["ids"][n]] in in_window)]
         sess = [r for _, _, r in recent if r["window"] == "session"]
         weekly = sorted([(t, n, r) for n, t, r in recent if r["window"] == "weekly"], key=lambda x: (x[0], x[1]))
         by_actor, by_lane = {}, {}
@@ -989,6 +1005,15 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
             "session_tokens_7d": sess_total,
             "session_in_7d": sum(r["tokens_in"] for r in sess), "session_out_7d": sum(r["tokens_out"] for r in sess),
             "session_lines_7d": len(sess),
+            "session_tokens_7d_by_method": {m: sum(r["tokens_in"] + r["tokens_out"] for r in sess
+                                                   if (r.get("method") if r.get("method") in BG.METHODS else "unlabelled") == m)
+                                            for m in sorted({(r.get("method") if r.get("method") in BG.METHODS else "unlabelled") for r in sess})},
+            "corrections": {"budget_schema": BG.SCHEMA, "replaced": budget["corrections"]["replaced"],
+                            "children_included": budget["corrections"]["children"],
+                            "conflicts": budget["corrections"]["conflicts"],
+                            "invalid": budget["corrections"]["invalid"],
+                            "duplicate_ids": budget["corrections"]["duplicates"]},
+            "burn_label": "+".join(sorted({(r.get("method") if r.get("method") in BG.METHODS else "unlabelled") for r in sess})) or None,
             "weekly_reference": ({"ts": latest_weekly["ts"], "tokens": latest_weekly["tokens_in"] + latest_weekly["tokens_out"],
                                   "actor": latest_weekly.get("actor"),
                                   "note": "a separately reported weekly reading; reference only, never added to or substituted for the session sum"}
@@ -1109,6 +1134,7 @@ def collect(root, lane=None, content="full", weekly_tokens=None, drift_days=None
         "unreadable": sorted(rd.unreadable, key=lambda x: str(x["path"])),
         "limits": LIMITS,
         "snapshot": snapshot_of(rd.root, as_of),
+        "telemetry": TEL.derive(rd.root, lane=lane, content=content, as_of=as_of),
         "transitions": {"lifecycle": "relay-kit/lifecycle@1",
                         "problems": sorted(({"id": r["fields"].get("id"), "message": m} for r in decisions_all + challenges_all
                                             for m in r.get("transition_problems") or []), key=lambda x: str(x["id"])),
@@ -1580,8 +1606,17 @@ its scope names. These are readings, not delegations. Layout is automatic.{"" if
     wref = b.get("weekly_reference")
     if b["present"]:
         bud = f"""
-<div class="panel pad">{dl([("window", f'{b["window"]["from"]} → {b["window"]["to"]}'), ("burn", f'{fmt_n(burn)} tokens ({b["burn_source"]})'),
+<div class="panel pad">{dl([("window", f'{b["window"]["from"]} → {b["window"]["to"]}'), ("burn", f'{fmt_n(burn)} tokens, {b.get("burn_label") or "unlabelled"} ({b["burn_source"]})'),
   ("session lines, 7 d", f'{fmt_n(b["session_tokens_7d"])} ({fmt_n(b["session_in_7d"])} in, {fmt_n(b["session_out_7d"])} out)'),
+  ("by how it was measured", "; ".join(f'{m}: {fmt_n(v)}' for m, v in (b.get("session_tokens_7d_by_method") or {}).items()) or None),
+  ("corrections applied", (", ".join(f'{k} replaced by {v}' for k, v in b["corrections"]["replaced"].items())
+                           + ("; conflicting corrections (the later one counts): " + ", ".join(c["id"] for c in b["corrections"]["conflicts"]) if b["corrections"]["conflicts"] else ""))
+                          if b.get("corrections") and b["corrections"]["replaced"] else None),
+  ("children inside a parent's numbers", ", ".join(f'{c} in {p}' for c, p in b["corrections"]["children_included"].items()) or None
+   if b.get("corrections") else None),
+  ("budget lines that take no effect as written", "; ".join(f'{x.get("id")}: {x["why"]}' for x in b["corrections"]["invalid"])
+   + ("; duplicate ids: " + ", ".join(d["id"] for d in b["corrections"]["duplicate_ids"]) if b["corrections"]["duplicate_ids"] else "") or None
+   if b.get("corrections") else None),
   ("weekly reading (reference only)", f'{fmt_n(wref["tokens"])} tokens at {wref["ts"]}, reported by {wref["actor"]}; not added to the gauge' if wref else None),
   ("most agents at once", fmt_n(b["max_agents_7d"])), ("records", b["records"]),
   ("invalid lines", ", ".join(f'{x["line"]}: {x["reason"]}' for x in b["invalid_lines"]) or "none")])}
@@ -1665,6 +1700,42 @@ lines the gauge says so; it never shows a zero it didn't observe. The coordinato
 </section>"""
 
     tr = data.get("transitions") or {"problems": [], "conflicts": []}
+    tel = data.get("telemetry") or {"metrics": [], "notes": []}
+
+    def tel_value(m):
+        k = m["metric"]
+        d = lambda x: f'median {x["median"]}, p90 {x["p90"]}, n {x["n"]}' if x and x.get("n") else "unknown"
+        if k == "compute_consumption":
+            v = "; ".join(f"{mm}: {fmt_n(n)}" for mm, n in m["tokens_by_method"].items()) or "unknown"
+            return (f'{v} tokens over {m["active_days"]} active day(s), {m["lines"]} line(s)'
+                    + (f'; {m["incomplete_lines"]} incomplete (lower bounds)' if m.get("incomplete_lines") else "")
+                    + (f'; {len(m["invalid_lines"])} invalid line(s) not counted' if m.get("invalid_lines") else "")
+                    + (f'; measured and estimated lines for the same actor: {", ".join(m["possible_double_count_actors"])}' if m.get("possible_double_count_actors") else ""))
+        if k == "delivery_throughput":
+            weeks = "; ".join(f'{w}: {sum(r.values())}' for w, r in m["merged_per_week"].items())
+            return f'{m["merged"]} merged ({weeks or "none"}); {m["abandoned"]} abandoned'
+        if k == "lead_time":
+            return d(m["hours"]) + " (hours)" + (f'; excluded: {m["excluded"]}' if m.get("excluded") else "")
+        if k == "review_burden":
+            return d(m["rounds"]) + " change-request rounds per merged PR"
+        if k == "post_merge_remediation":
+            return "; ".join(f'{w}: ' + (f'{v["remediated"]} of {v["cohort"]}' if v["cohort"] else (v["unknown"] or "unknown"))
+                             for w, v in m["windows"].items())
+        if k == "surviving_changes":
+            return f'{m["count"]} of {m["cohort"]}' if m.get("count") is not None else (m.get("unknown") or "unknown")
+        if k == "human_intervention":
+            return f'{m["minutes_recorded"]} min from {m["lines"]} line(s)' if m.get("minutes_recorded") is not None else "unknown"
+        if k == "measurement_coverage":
+            return (f'{m["with_measured_budget_line"]} of {m["agent_sessions_in_handoffs"]} agent sessions measured; '
+                    f'budget lines {", ".join(f"{a}: {b}" for a, b in m["budget_lines_by_method"].items()) or "none"}; '
+                    f'{len(m["repositories_read"])} repositories read'
+                    + (f'; more PRs than read in {", ".join(m["repositories_with_more_than_read"])}' if m.get("repositories_with_more_than_read") else ""))
+        if k == "coordination_loss":
+            return (f'{len(m["stale_handoffs"])} stale handoff(s), {len(m["cancelled_handoffs"])} cancelled, '
+                    f'{m["overlapping_claim_count"] if m.get("overlapping_claim_count") is not None else "unknown"} overlapping claim(s), {len(m["ledger_conflicts"])} ledger conflict(s); '
+                    f'reconciliation time unknown')
+        return ""
+    tel_rows = [[m["metric"], m["label"], tel_value(m), m["definition"]] for m in tel["metrics"]]
     s_review = f"""
 <section class="section surface" id="review">
 {head(9, "REVIEW", "Review", "The recent decision timeline and the challenges still open.", "LEDGER IS THE SOURCE OF TRUTH")}
@@ -1678,6 +1749,10 @@ accepted-risk one, and only toward an earlier record. Lines that break this are 
 more than one line is shown with all of them.</p>
 {table(["id", "what"], [[x["id"], x["message"]] for x in tr["problems"]] + [[x["id"], "closed by more than one line: " + ", ".join(x["closed_by"] or [])] for x in tr["conflicts"]])
  if tr["problems"] or tr["conflicts"] else '<p class="empty">None.</p>'}</div>
+<div class="panel pad"><p class="eyebrow dark">TELEMETRY (relay-kit/telemetry@1, DERIVED, AS OF {e(tel.get("as_of") or "unknown")})</p>
+<p class="hint">Rebuilt from the records on every build: budget lines, pull-request state, handoffs and ledgers. Each figure says how it
+was measured; distributions, not means; unknown, never zero. {" ".join(e(n) for n in tel.get("notes", [])[1:])}</p>
+{table(["metric", "label", "value", "definition"], tel_rows) if tel_rows else '<p class="empty">No telemetry.</p>'}</div>
 </section>"""
 
     prd = data.get("pull_requests") or {"present": False, "items": [], "fetches": [], "unreadable": 0, "file": PRS_FILE}
