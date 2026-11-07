@@ -1,4 +1,4 @@
-# Cockpit (`relay-kit/cockpit@4`)
+# Cockpit (`relay-kit/cockpit@5`)
 
 One static page over your records: what waits on you, how the work is wired, what it costs, and
 what has drifted. It is generated, not hand-kept: every number and line on it comes from the
@@ -13,7 +13,7 @@ It writes two files into `--out`:
 - `index.html`: one self-contained page (inline CSS and JS; no fonts, scripts or images from
   anywhere else; a Content-Security-Policy that forbids loading any). It works offline, from a
   file, at phone width.
-- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@4"`).
+- `cockpit.json`: the data the page was built from (`"schema": "relay-kit/cockpit@5"`).
 
 **@2** (HO-RK-20261105-VZH4) adds, on every choice: `ask`, `refs`, `waiting_on_it`, `cited_later_by`,
 `prs`, `age_days`, `possibly_overtaken`, and `compose` entries `amend`, `overtaken`, `clarify` and
@@ -40,6 +40,17 @@ or conflict are listed on Review. Every line it composes for a decision or chall
 revision is unknown; `cockpit.json` gains `snapshot`, `transitions` and, on a choice,
 `proposed_replacements`. Nothing from @3 was removed.
 
+**@5** (HO-RK-20261106-NXPR; DEC-139, DEC-140) adds three things the owner asked to read from the
+page rather than from GitHub or the ledgers. **Reviews, folded under each pull request** (below):
+author, family (signed, inferred from the login, or unsigned), kind, verdict, time, inline-comment
+count and the body as written. **A Status surface** (11, a `--landing` target) rendering the newest
+[status edition](status.md) verbatim. **Decision support on each choice** ([spec](decision-support.md)):
+authored notes, one block per author, with the ledger mechanics moved behind "how the ledger records
+this". Decision and challenge text is now rendered with its structure (enumerations and line breaks
+become lists and paragraphs). `cockpit.json` gains `status`, `decision_support`, `choices[].support`,
+on each review `kind`, `body`, `body_recorded`, `truncated`, `comments`, `family_source`, `findings`,
+and `counts.status_editions`, `support_notes`, `choices_without_support`. Nothing from @4 was removed.
+
 The page is deterministic: two runs over the same records give byte-identical files. It shows two
 times, kept apart: the records' git revision and when it was committed (fixed for a revision; the
 browser counts its age, so an old page shows as old), and the newest record's own timestamp. "Last
@@ -64,7 +75,8 @@ header (default `relay-kit`; or `brand` in `governance/cockpit.json`).
 | 07 | Project lanes | One card per lane (from .ledger.json and threads.md): code, handoffs open/total, decisions and proposals, open challenges, threads, last activity | all |
 | 08 | Run commitments | **Authorized & in progress** (sent, acknowledged or in_progress, with a filled Authorized section; the only handoffs the gauge counts) apart from **pending authorization** (prepared, or no authorization quote); all handoffs by status; PR links found in threads.md; the Drift panel: proposals older than `--drift-days` (default 3) and challenges that mention drift | handoffs/, threads.md, ledgers |
 | 09 | Review | The last 20 decisions, newest first; open challenges | ledgers |
-| 10 | Pull requests | Each pull request [`relay-kit prs`](prs.md) recorded: open first, then merged or closed recently. Its `## What` / `## Why` / `## How` / `## Authorized` sections **verbatim**; who wrote it (an `Author:` line naming anyone but the owner is tagged "written by …, not the owner"; no line says so, with the GitHub login that opened it); which sections are missing; reviews, latest per reviewer, with their family and a verdict stated in the review body; whether a review comes from another family than the author; CI; when it was read. A table of repositories with their last read time, aged in your browser | governance/pr-state.jsonl, governance/cockpit.json |
+| 10 | Pull requests | Each pull request [`relay-kit prs`](prs.md) recorded: open first, then merged or closed recently. Its `## What` / `## Why` / `## How` / `## Authorized` sections **verbatim**; who wrote it (an `Author:` line naming anyone but the owner is tagged "written by …, not the owner"; no line says so, with the GitHub login that opened it); which sections are missing; **reviews folded under the card** with author, family, kind, verdict, time and body (below); whether a review comes from another family than the author; CI; when it was read. A table of repositories with their last read time, aged in your browser | governance/pr-state.jsonl, governance/cockpit.json, handoffs/.ledger.json |
+| 11 | Status | The newest [status edition](status.md), rendered as written from a markdown subset: title, the four sections, lists, bold; links as text. Tagged "written by <author>, not the owner"; flagged stale when its date is more than `--drift-days` before the newest record; older editions in a collapsed index. Overview links to it | status/*.md |
 
 ### Pull requests: words, not summaries
 
@@ -84,6 +96,23 @@ is unknown. The page states the facts; any rule about how many reviews are neede
 counts as the owner's only when it is the owner's name alone, or with a note in brackets
 ("sam (from a call)"); "sam via claude:x" is an agent's.
 
+**Reviews (@5).** Each review is folded under its card, in order of time: the reviewer (a `Reviewer:`
+signature, else the login), the family, whether it is a GitHub review or a **review-style comment**
+(an issue comment opening with `Review:` / `Execution review` / `Reviewer:` or stating a verdict;
+`relay-kit prs@3` records those), the verdict (GitHub's, or "comment"), a verdict stated in the
+body, the time, and how many inline comments it carries (their text stays on GitHub). The body is
+shown as written: escaped, paragraphs and lists kept, no markdown executed, URLs as text and never
+links. A line "Findings, as the review states them: N blocking / M should-fix" appears **only** when
+the body says those words with a number; the page counts nothing itself. A review recorded by an
+older `prs` (no body) says so rather than showing an empty one.
+
+**Family, signed or inferred.** A family is *signed* when it comes from the review's own
+`Reviewer:` line. Otherwise it is taken from the login, through `review_families` in
+`governance/cockpit.json` (first) or the optional `actors` map in `handoffs/.ledger.json`
+(`{"login": "family"}` or `{"login": {"family": "…", "lanes": […]}}`), and shown as "inferred from
+login". With neither, the review is "unsigned". Several people may post from one account, so an
+inferred family is a guess the records made, never the page's.
+
 **Freshness.** The page never fetches. Each card shows when its repository was last read and when
 the pull request last changed; the source summary counts the last read's age in your browser (over a
 day is marked). Rebuild after `relay-kit prs` for newer state. Merged or closed pull requests older
@@ -96,7 +125,7 @@ not taken from `review_families` by login are left out.
 ## Themes and landing
 
 `--landing SURFACE` (or `"landing"` in `governance/cockpit.json`) opens the page on another surface,
-e.g. `prs`. A `#surface` in the address still wins.
+e.g. `prs` or `status`. A `#surface` in the address still wins.
 
 `--theme FILE` restyles the page from a JSON file:
 
@@ -144,6 +173,19 @@ so its replacement can't be adopted after the target was settled another way.
 `ledger_append` checks it against the records you are appending to and, if the item has since been
 settled or its line changed, refuses, appends nothing, and lists the later lines that mention it.
 Handoff lines already carry `--expect` for their state.
+
+### Decision support, then mechanics (DEC-140)
+
+Under the question, each choice shows the [decision-support notes](decision-support.md) written for
+it: one block per author (independent authors first, then the owner, then the coordinator lane; a
+reading order, not a ranking), each a labelled list: What changes / What doesn't / If nothing is done
+/ Can it wait / Depends on it / Recommendation, with that author's earlier revisions folded. An item
+with none says "no decision-support note yet". What each action does to the ledger, the page's own
+description of the composed lines, now sits behind "how the ledger records this".
+
+Decision text, challenge concerns and the notes are rendered with the structure their authors wrote:
+`(1) … (2) …` enumerations, lines starting with `1.` or `-`, and line breaks become lists and
+paragraphs. Records are not markdown: `**` and backticks stay as typed, and everything is escaped.
 
 ### So what is this asking?
 

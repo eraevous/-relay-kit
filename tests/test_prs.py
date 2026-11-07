@@ -1,5 +1,5 @@
-"""Tests for tools/prs.py (relay-kit/prs@2) and the Pull requests surface, themes and landing of
-tools/cockpit.py (relay-kit/cockpit@4). Standard library only; synthetic data only; no network: the
+"""Tests for tools/prs.py (relay-kit/prs@3) and the Pull requests, Status and decision-support parts of
+tools/cockpit.py (relay-kit/cockpit@5). Standard library only; synthetic data only; no network: the
 GitHub reader is given a fake `get`.
 
 Run alone with `python3 -m unittest tests.test_prs`, or as part of tests/run_tests.py."""
@@ -46,8 +46,9 @@ def gh_pr(n, state="open", merged=False, body=BODY, updated="2026-11-03T10:00:00
 
 
 class FakeGitHub:
-    def __init__(self, prs_by_repo, reviews=None, runs=None, statuses=None, broken=()):
+    def __init__(self, prs_by_repo, reviews=None, runs=None, statuses=None, broken=(), issue_comments=None, inline=None, broken_paths=()):
         self.prs, self.reviews, self.runs, self.statuses, self.broken = prs_by_repo, reviews or {}, runs or {}, statuses or {}, set(broken)
+        self.issue_comments, self.inline, self.broken_paths = issue_comments or {}, inline or {}, set(broken_paths)
         self.calls = []
 
     def __call__(self, path):
@@ -59,6 +60,12 @@ class FakeGitHub:
             return {"default_branch": "main", "pushed_at": "2026-11-03T09:30:00Z"}
         if "/pulls?" in path:
             return self.prs.get(repo, [])
+        if any(path.startswith(b) for b in self.broken_paths):
+            raise prs.Refused(f"GET {path}: HTTP 500")
+        if "/issues/" in path and "/comments" in path:
+            return self.issue_comments.get(int(path.split("/issues/")[1].split("/")[0]), [])
+        if "/pulls/" in path and "/comments" in path:
+            return self.inline.get(int(path.split("/pulls/")[1].split("/")[0]), [])
         if "/reviews" in path:
             return self.reviews.get(int(path.split("/pulls/")[1].split("/")[0]), [])
         if path.endswith("/status"):
@@ -197,10 +204,59 @@ class PrsTests(unittest.TestCase):
         self.assertEqual(by[7]["ci"], {"state": "failure", "failing": ["tests"]})
         self.assertEqual(by[8]["ci"]["state"], "pending")
         self.assertEqual(by[9]["ci"]["state"], "none")
-        self.assertEqual(by[7]["reviews"], [{"by": "sam", "verdict": "COMMENTED", "at": "2026-11-03T11:00:00Z",
-                                             "signed": "model-b (other family)", "stated": "APPROVED"},
-                                            {"by": "sam", "verdict": "COMMENTED", "at": "2026-11-03T11:30:00Z",
-                                             "signed": None, "stated": "REQUEST CHANGES"}])   # negated verdicts are skipped
+        slim = [{k: r[k] for k in ("by", "verdict", "at", "signed", "stated")} for r in by[7]["reviews"]]
+        self.assertEqual(slim, [{"by": "sam", "verdict": "COMMENTED", "at": "2026-11-03T11:00:00Z",
+                                 "signed": "model-b (other family)", "stated": "APPROVED"},
+                                {"by": "sam", "verdict": "COMMENTED", "at": "2026-11-03T11:30:00Z",
+                                 "signed": None, "stated": "REQUEST CHANGES"}])   # negated verdicts are skipped
+
+    def test_review_bodies(self):
+        """prs: review bodies are recorded verbatim (cut at 4000, flagged), with inline-comment counts; review-style issue comments join as kind comment"""
+        long_body = "Execution review (fresh Claude): 2 blocking, 10 should-fix.\n\n" + "x" * 5000
+        gh = FakeGitHub({"example/synthetic": [gh_pr(7)]},
+                        reviews={7: [{"id": 501, "user": {"login": "rev"}, "state": "CHANGES_REQUESTED", "submitted_at": "2026-11-03T11:00:00Z",
+                                      "body": long_body}]},
+                        inline={7: [{"pull_request_review_id": 501, "body": "nit"}, {"pull_request_review_id": 501, "body": "nit2"},
+                                    {"pull_request_review_id": 999, "body": "other"}]},
+                        issue_comments={7: [{"id": 1, "user": {"login": "sam"}, "created_at": "2026-11-03T12:00:00Z",
+                                             "body": "**APPROVED (round 3).**\nReviewer: model-b\nFine."},
+                                            {"id": 2, "user": {"login": "sam"}, "created_at": "2026-11-03T12:10:00Z", "body": "thanks, merging"},
+                                            {"id": 3, "user": {"login": "sam"}, "created_at": "2026-11-03T12:20:00Z", "body": "  \n## Review: nothing blocking\nok"}]})
+        prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T13:00:00Z")
+        pr = [x for x in lines(self.root) if x["kind"] == "pr"][-1]
+        self.assertEqual(pr["schema"], "relay-kit/prs@3")
+        kinds = [(r["kind"], r["by"], r["stated"], r["signed"]) for r in pr["reviews"]]
+        self.assertEqual(kinds, [("review", "rev", None, None), ("comment", "sam", "APPROVED", "model-b"), ("comment", "sam", None, None)])
+        rv = pr["reviews"][0]
+        self.assertEqual((len(rv["body"]), rv["truncated"], rv["comments"], rv["verdict"]), (prs.MAX_REVIEW, True, 2, "CHANGES_REQUESTED"))
+        self.assertTrue(rv["body"].startswith("Execution review (fresh Claude): 2 blocking"))
+        self.assertEqual((pr["reviews"][1]["body"], pr["reviews"][1]["truncated"], pr["reviews"][1]["verdict"]),
+                         ("**APPROVED (round 3).**\nReviewer: model-b\nFine.", False, None))
+        self.assertNotIn("thanks, merging", json.dumps(pr))          # a plain remark isn't a review
+        # unchanged next run: no new pr line, even though comments were re-read
+        prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T14:00:00Z")
+        self.assertEqual([x["kind"] for x in lines(self.root)], ["pr", "fetch", "fetch"])
+
+    def test_comments_unread(self):
+        """prs: review-style comments that can't be read are unread, keep their last value, and never read as none"""
+        gh = FakeGitHub({"example/synthetic": [gh_pr(7)]},
+                        issue_comments={7: [{"id": 1, "user": {"login": "sam"}, "created_at": "2026-11-03T12:00:00Z", "body": "LGTM"}]})
+        prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T13:00:00Z")
+        gh.broken_paths = {"repos/example/synthetic/issues/7/comments"}
+        f = prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T14:00:00Z")
+        got = lines(self.root)
+        self.assertEqual([x["kind"] for x in got], ["pr", "fetch", "fetch"])   # carried forward: no new line
+        self.assertEqual(f["coverage"]["example/synthetic"]["partial"][0]["what"], "comments")
+        # an @2 line (no bodies) followed by an @3 read of the same PR with a review: one new line, with the body
+        (self.root / prs.OUT).unlink()
+        gh2 = FakeGitHub({"example/synthetic": [gh_pr(8)]},
+                         reviews={8: [{"id": 9, "user": {"login": "rev"}, "state": "APPROVED", "submitted_at": "2026-11-03T11:00:00Z", "body": "fine"}]})
+        old = {"schema": "relay-kit/prs@2", "kind": "pr", "ts": "2026-11-01T00:00:00Z", "repo": "example/synthetic", "number": 8,
+               "reviews": [{"by": "rev", "verdict": "APPROVED", "at": "2026-11-03T11:00:00Z", "signed": None, "stated": None}], "state": "open"}
+        (self.root / prs.OUT).write_text(json.dumps(old) + "\n", encoding="utf-8")
+        prs.run(self.root, gh2, "test", ["example/synthetic"], ts="2026-11-03T15:00:00Z")
+        last = [x for x in lines(self.root) if x["kind"] == "pr"][-1]
+        self.assertEqual((last["schema"], last["reviews"][0]["body"]), ("relay-kit/prs@3", "fine"))
 
     def test_repos(self):
         """prs: repositories come from .ledger.json repos or --repo; anything not OWNER/NAME is refused"""
@@ -227,9 +283,12 @@ class CockpitPrTests(unittest.TestCase):
             gh_pr(8, body="Author: sam\n\n## What\nOwner's own change.\n## Why\nBecause.\n## How\nBy hand.\n## Authorized\nn/a\n"),
             gh_pr(9, state="closed", merged=True, body="no sections here"),
             gh_pr(10, state="closed", merged=True, body="Author: \n", updated="2026-11-03T08:00:00Z"),
-        ]}, reviews={7: [{"user": {"login": "rev-bot"}, "state": "APPROVED", "submitted_at": "2026-11-03T11:00:00Z", "body": ""},
-                         {"user": {"login": "sam"}, "state": "COMMENTED", "submitted_at": "2026-11-03T11:10:00Z",
-                          "body": "Reviewer: SECRETSIGNED reviewer\nlooks fine"}]})
+        ]}, reviews={7: [{"id": 1, "user": {"login": "rev-bot"}, "state": "APPROVED", "submitted_at": "2026-11-03T11:00:00Z",
+                          "body": "Execution review: 1 blocking / 3 should-fix.\n\n**Blocking:**\n1. First. <script>alert(2)</script>\n2. Second http://example.test/x\n\nParagraph two."},
+                         {"id": 2, "user": {"login": "sam"}, "state": "COMMENTED", "submitted_at": "2026-11-03T11:10:00Z",
+                          "body": "Reviewer: SECRETSIGNED reviewer\nlooks fine"}]},
+           inline={7: [{"pull_request_review_id": 1, "body": "nit"}]},
+           issue_comments={7: [{"id": 5, "user": {"login": "zed"}, "created_at": "2026-11-03T12:30:00Z", "body": "**APPROVED (round 2).** Nothing blocking here."}]})
         prs.run(self.root, gh, "test", ["example/synthetic"], ts="2026-11-03T12:00:00Z")
 
     def tearDown(self):
@@ -251,10 +310,11 @@ class CockpitPrTests(unittest.TestCase):
         self.assertIn("&lt;/textarea&gt;&lt;/script&gt;&lt;script&gt;alert(1)", page)
         self.assertIn("sections missing: why, authorized", page)
         self.assertEqual(items[7]["reviews"][0]["family"], None)
+        self.assertIn("unsigned", page)
         self.assertEqual(data["counts"]["prs_open"], 2)
         self.assertEqual(page.count('class="card pr '), 4)
         self.assertEqual(items[10]["written_by"], "unstated")             # a blank Author: line builds, as unstated
-        self.assertEqual(items[7]["reviewers_counted"], 2)
+        self.assertEqual(items[7]["reviewers_counted"], 3)
 
     def test_written_by(self):
         """cockpit: an agent-written PR is tagged as not written by the owner; one with no Author line says so"""
@@ -362,12 +422,237 @@ class CockpitPrTests(unittest.TestCase):
         self.assertIn("1 older merged or closed pull request(s) are in the file but not shown", page)
         self.assertNotIn("example/synthetic#3", page)
 
+    def test_review_fold(self):
+        """cockpit: reviews fold under the card with author, family or unsigned, kind, verdict, time and the body as escaped paragraphs; Findings only as stated"""
+        data, page = self.build()
+        items = {x["number"]: x for x in data["pull_requests"]["items"]}
+        rv = items[7]["reviews"][0]
+        self.assertEqual((rv["kind"], rv["comments"], rv["findings"]), ("review", 1, {"blocking": 1, "should_fix": 3}))
+        self.assertIn("Findings, as the review states them: 1 blocking / 3 should-fix", page)
+        self.assertIn('<details class="pr-reviews">', page)
+        self.assertIn("&lt;script&gt;alert(2)&lt;/script&gt;", page)
+        self.assertNotIn("<script>alert(2)", page)
+        self.assertIn("<ol><li>First. &lt;script&gt;alert(2)&lt;/script&gt;</li><li>Second http://example.test/x</li></ol>", page)
+        self.assertNotIn('href="http://example.test/x"', page)        # URLs are text, never links
+        self.assertIn("1 inline comment (on GitHub)", page)
+        c7 = items[7]["reviews"][2]
+        self.assertEqual((c7["kind"], c7["verdict"], c7["stated"], c7["who"]), ("comment", None, "APPROVED", "zed"))
+        self.assertIn("review-style comment", page)
+        self.assertEqual(items[7]["reviewers_counted"], 3)             # a stated verdict in a comment counts as a review
+        self.assertNotIn("Findings, as the review states them: 0", page)   # "Nothing blocking" states no count
+        # a review from the owner's lane signed with a lane actor: family from the signature, labelled signed
+        self.assertEqual(items[7]["reviews"][1]["family_source"], None)   # "SECRETSIGNED reviewer" maps to no family
+        # metadata: no bodies anywhere
+        _, mpage = self.build("meta", content="metadata")
+        for word in ("First.", "looks fine", "Nothing blocking here"):
+            self.assertNotIn(word, mpage)
+        self.assertIn("body left out (--content metadata)", mpage)
+
+    def test_family_inferred(self):
+        """cockpit: a family taken from the login (the records' actors map or review_families) is marked inferred; a Reviewer: signature is marked signed"""
+        cfg = json.loads((self.root / "handoffs" / ".ledger.json").read_text())
+        cfg["actors"] = {"rev-bot": "copilot", "sam": {"family": "owner-account", "lanes": ["research"]}}
+        (self.root / "handoffs" / ".ledger.json").write_text(json.dumps(cfg))
+        data, page = self.build()
+        items = {x["number"]: x for x in data["pull_requests"]["items"]}
+        self.assertEqual((items[7]["reviews"][0]["family"], items[7]["reviews"][0]["family_source"]), ("copilot", "login"))
+        self.assertIn("copilot (inferred from login)", page)
+        (self.root / "governance" / "cockpit.json").write_text(json.dumps({"review_families": {"secretsigned": "model-b", "rev-bot": "bot"}}))
+        data, page = self.build("o2")
+        items = {x["number"]: x for x in data["pull_requests"]["items"]}
+        self.assertEqual((items[7]["reviews"][1]["family"], items[7]["reviews"][1]["family_source"]), ("model-b", "signed"))
+        self.assertEqual(items[7]["reviews"][0]["family"], "bot")       # cockpit.json's explicit mapping wins over actors
+        self.assertIn("model-b (signed)", page)
+
+    def test_old_schema_body(self):
+        """cockpit: a review recorded by prs@2 (no body) says the body isn't recorded, rather than showing an empty one"""
+        old = {"schema": "relay-kit/prs@2", "kind": "pr", "ts": "2026-11-04T00:00:00Z", "repo": "example/synthetic", "number": 11,
+               "url": "https://github.com/example/synthetic/pull/11", "title": "Old", "state": "open", "draft": False, "author": "sam",
+               "updated_at": "2026-11-04T00:00:00Z", "reviews": [{"by": "rev-bot", "verdict": "APPROVED", "at": "2026-11-03T11:00:00Z", "signed": None, "stated": None}],
+               "ci": {"state": "none", "failing": []}, "body_sections": {}, "missing": list(prs.SECTIONS), "truncated": []}
+        with open(self.root / prs.OUT, "a", encoding="utf-8") as f:
+            f.write(json.dumps(old) + "\n")
+        data, page = self.build()
+        rv = {x["number"]: x for x in data["pull_requests"]["items"]}[11]["reviews"][0]
+        self.assertEqual((rv["body_recorded"], rv["body"]), (False, None))
+        self.assertIn("body not recorded: this line was read by relay-kit prs@2 or earlier", page)
+
     def test_no_file(self):
         """cockpit: without pr-state.jsonl the Pull requests surface says how to fill it and nothing is fetched"""
         (self.root / prs.OUT).unlink()
         data, page = self.build()
         self.assertFalse(data["pull_requests"]["present"])
         self.assertIn("relay-kit prs --root RECORDS", page)
+
+
+EDITION = """---
+date: 2026-11-03
+edition: morning
+author: claude:coord#S1
+covers: 2026-11-02 → 2026-11-03
+---
+
+# Status · Monday, morning
+
+Written **by hand**. <script>alert(3)</script> and <b>not bold</b>. <!-- a hint, removed -->
+
+## Accomplishments
+
+- **Thing one** landed (`code`), see [the PR](https://github.com/example/synthetic/pull/7).
+- Thing two
+
+## Road bumps
+
+1. Ids collided
+2. CI broke
+
+## Status
+
+Waiting on you: 1 item.
+
+---
+
+## Next steps
+
+**Yours:**
+1. Decide.
+
+```
+## not a heading
+```
+"""
+
+
+class CockpitStatusTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="relaykit-ckst-"))
+        self.root = tc.build_root(self.tmp)
+        self._vis = ck.ex.repo_visibility
+        ck.ex.repo_visibility = lambda repo: "unknown"
+        (self.root / "status").mkdir()
+        (self.root / "status" / "2026-11-03-morning.md").write_text(EDITION, encoding="utf-8")
+        (self.root / "status" / "2026-11-02-evening.md").write_text(EDITION.replace("2026-11-03", "2026-11-02").replace("edition: morning", "edition: evening"), encoding="utf-8")
+        (self.root / "status" / "2026-11-02-morning.md").write_text(EDITION.replace("2026-11-03", "2026-11-02").replace("## Status\n", "## Standing\n"), encoding="utf-8")
+        (self.root / "status" / "notes.txt").write_text("x", encoding="utf-8")
+
+    def tearDown(self):
+        ck.ex.repo_visibility = self._vis
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def build(self, name="out", **kw):
+        out = self.tmp / name
+        data = ck.build(self.root, out, **kw)
+        return data, (out / "index.html").read_text(encoding="utf-8")
+
+    def test_status_surface(self):
+        """cockpit: Status renders the newest edition verbatim from the markdown subset (escaped; links as text), indexes older ones, and can be the landing"""
+        data, page = self.build(landing="status")
+        st = data["status"]
+        self.assertEqual((st["latest"]["date"], st["latest"]["edition"], st["latest"]["author"]), ("2026-11-03", "morning", "claude:coord#S1"))
+        self.assertEqual([(o["date"], o["edition"]) for o in st["older"]], [("2026-11-02", "evening"), ("2026-11-02", "morning")])
+        self.assertEqual(st["older"][1]["sections_missing"], ["Status"])
+        self.assertEqual(st["unreadable"], [{"file": "notes.txt", "reason": "name isn't <YYYY-MM-DD>-<edition>.md"}])
+        self.assertIn('data-landing="status"', page)
+        self.assertIn("<h2>Status · Monday, morning</h2>", page)
+        self.assertIn("<h3>Accomplishments</h3>", page)
+        self.assertIn("<li><b>Thing one</b> landed (<code>code</code>), see the PR <span class=\"url\">(https://github.com/example/synthetic/pull/7)</span>.</li>", page)
+        self.assertIn("<ol><li>Ids collided</li><li>CI broke</li></ol>", page)
+        self.assertIn("&lt;script&gt;alert(3)&lt;/script&gt; and &lt;b&gt;not bold&lt;/b&gt;", page)
+        self.assertNotIn("<script>alert(3)", page)
+        self.assertIn("<pre>## not a heading</pre>", page)
+        self.assertNotIn("a hint, removed", page)
+        self.assertIn("<hr>", page)
+        self.assertIn("written by claude:coord#S1, not the owner", page)
+        self.assertIn("Older editions · 2", page)
+        narrative = page[page.index('<div class="narrative">'):page.index("Older editions")]
+        self.assertNotIn("<a ", narrative)                                # links are text in the narrative
+        self.assertEqual(data["counts"]["status_editions"], 3)
+        # stale: the newest record in the fixture is 2026-11-03; an edition dated 2026-10-20 is older than drift_days
+        shutil.rmtree(self.root / "status")
+        (self.root / "status").mkdir()
+        (self.root / "status" / "2026-10-20-morning.md").write_text(EDITION.replace("2026-11-03", "2026-10-20"), encoding="utf-8")
+        data, page = self.build("stale")
+        self.assertTrue(data["status"]["latest"]["stale"])
+        self.assertIn("STALE · 14 days before the newest record (limit 3)", page)
+        _, mpage = self.build("meta", content="metadata")
+        self.assertNotIn("Thing one", mpage)
+        self.assertIn("Body left out (--content metadata)", mpage)
+
+    def test_edition_tool(self):
+        """status: `relay-kit edition new` scaffolds the front matter and four headings and never overwrites; `check` reports what doesn't fit"""
+        se = load("relaykit_status_edition_under_test", KIT / "tools" / "status_edition.py")
+        p = se.new(self.root, "midday", "2026-11-03", "claude:coord#S1", "lunch")
+        text = p.read_text(encoding="utf-8")
+        self.assertEqual(p.name, "2026-11-03-midday.md")
+        for line in ("date: 2026-11-03", "edition: midday", "author: claude:coord#S1", "covers: lunch", "contract: relay-kit/status@1",
+                     "## Accomplishments", "## Road bumps", "## Status", "## Next steps"):
+            self.assertIn(line, text)
+        with self.assertRaises(se.Refused):
+            se.new(self.root, "midday", "2026-11-03", "claude:coord#S1", None)      # exists: added, never rewritten
+        for bad in (("Morning", "2026-11-03", "a#1"), ("morning", "2026-13-03", "a#1"), ("morning", "2026-11-03", "")):
+            with self.assertRaises((se.Refused, ValueError)):
+                se.new(self.root, *bad, None)
+        probs = se.check(self.root)
+        self.assertIn(("notes.txt", "name isn't <YYYY-MM-DD>-<edition>.md"), probs)
+        self.assertIn(("status/2026-11-02-morning.md", "sections missing: Status"), probs)
+        self.assertNotIn("status/2026-11-03-midday.md", [f for f, _ in probs])
+        data, page = self.build()
+        self.assertEqual(data["status"]["latest"]["edition"], "midday")             # midday is later than morning on one day
+        self.assertIn("<h3>Accomplishments</h3>", page)
+
+    def test_status_absent(self):
+        """cockpit: without a status folder the Status surface says how to write an edition"""
+        shutil.rmtree(self.root / "status")
+        data, page = self.build()
+        self.assertFalse(data["status"]["present"])
+        self.assertIn("No editions in <code>status/</code> yet", page)
+
+    def test_decision_support(self):
+        """cockpit: decision-support notes render per item, one block per author, independent authors before the coordinator, latest per author with history; mechanics folded"""
+        notes = [{"id": "DS-001", "item": "CH-001", "author": "claude:coord#S1", "at": "2026-11-03T09:00Z", "contract": "relay-kit/decision-support@1",
+                  "changes_if_accepted": "Coord says: (1) A changes. (2) B changes.", "unchanged": "Repos.", "counterfactual": "Stays open.",
+                  "can_wait": "Yes.", "depends": "HO-X.", "recommendation": "Defer (coord, v1)."},
+                 {"id": "DS-002", "item": "CH-001", "author": "chatgpt:kate#K1", "at": "2026-11-03T09:30Z", "contract": "relay-kit/decision-support@1",
+                  "changes_if_accepted": "Kate says A.", "recommendation": "Resolve now <script>alert(4)</script>."},
+                 {"id": "DS-003", "item": "CH-001", "author": "claude:coord#S2", "at": "2026-11-03T10:00Z", "contract": "relay-kit/decision-support@1",
+                  "changes_if_accepted": "Coord says: A changes.", "recommendation": "Defer (coord, v2)."},
+                 "not json"]
+        (self.root / "governance" / "decision-support.jsonl").write_text("".join((json.dumps(n) if isinstance(n, dict) else n) + "\n" for n in notes), encoding="utf-8")
+        cfg = json.loads((self.root / "handoffs" / ".ledger.json").read_text())
+        cfg["lanes"]["coord"] = "KO"
+        (self.root / "handoffs" / ".ledger.json").write_text(json.dumps(cfg))
+        data, page = self.build()
+        ch = next(c for c in data["choices"] if c["id"] == "CH-001")
+        self.assertEqual([(b["author_base"], b["role"], b["current"]["id"], len(b["history"])) for b in ch["support"]],
+                         [("chatgpt:kate", "independent", "DS-002", 0), ("claude:coord", "coordinator", "DS-003", 1)])
+        self.assertEqual(data["decision_support"]["unreadable"], 1)
+        self.assertEqual(data["counts"]["choices_without_support"], 2)
+        self.assertLess(page.index("Kate says A."), page.index("Coord says: A changes."))
+        self.assertIn("Resolve now &lt;script&gt;alert(4)&lt;/script&gt;.", page)
+        self.assertIn("1 earlier revision(s)", page)
+        self.assertIn("Defer (coord, v1).", page)
+        self.assertIn("No decision-support note yet", page)
+        self.assertIn('<details class="mech"><summary>how the ledger records this</summary>', page)
+        self.assertLess(page.index("DECISION SUPPORT"), page.index("WHAT EACH ACTION DOES"))
+        for label in ("What changes", "What doesn't", "If nothing is done", "Can it wait", "Depends on it", "Recommendation"):
+            self.assertIn(f"<dt>{ck.e(label)}</dt>", page)
+        _, mpage = self.build("meta", content="metadata")
+        self.assertNotIn("Kate says A.", mpage)
+        self.assertIn("fields left out (--content metadata)", mpage)
+
+    def test_structured_text(self):
+        """cockpit: record text with (1)…(n), numbered or dashed lines, or line breaks renders as lists and paragraphs, escaped"""
+        h = ck.structured("Seven findings: (1) CONFIRMED a. (2) b <x>. (3) c. Proposed sequence: resolver first.")
+        self.assertEqual(h, "<p>Seven findings:</p><ol><li>CONFIRMED a.</li><li>b &lt;x&gt;.</li><li>c. Proposed sequence: resolver first.</li></ol>")
+        self.assertEqual(ck.structured("intro\n- one\n- two\n\nafter"), "<p>intro</p><ul><li>one</li><li>two</li></ul><p>after</p>")
+        self.assertEqual(ck.structured("1. a\n2. b\nc"), "<ol><li>a</li><li>b</li></ol><p>c</p>")
+        self.assertEqual(ck.structured("see (2) and (1)"), "<p>see (2) and (1)</p>")          # out of order: not an enumeration
+        self.assertEqual(ck.structured("**raw** `md`"), "<p>**raw** `md`</p>")                # records aren't markdown
+        with open(self.root / "governance" / "challenges.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": "CH-035", "date": "2026-11-03", "status": "open", "kind": "review", "raised_by": "ext",
+                                "concern": "Seven findings: (1) one. (2) two. (3) three.", "recorded_by": "claude:research#SESSA1"}) + "\n")
+        _, page = self.build()
+        self.assertIn('<div class="txt rec"><p>Seven findings:</p><ol><li>one.</li><li>two.</li><li>three.</li></ol></div>', page)
 
 
 if __name__ == "__main__":
