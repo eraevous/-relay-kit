@@ -286,6 +286,8 @@ class CockpitTests(unittest.TestCase):
         self.assertIn("HANDOFFS PER ACTOR", page)
         self.assertIn('<td data-h="sent" class="n">4 (1 to itself)</td>', page)
         self.assertIn('<span class="tag warn">no thread</span>', page)
+        self.assertIn("Every sender → receiver count · 2 senders × 3 receivers", page)   # the folded matrix
+        self.assertIn('<tr><th>claude:research</th><td class="n">1</td><td class="n">2</td><td class="n">1</td><td class="n tot">4</td></tr>', page)
 
     def test_actions_surface(self):
         """cockpit: Actions renders a markdown checklist as written: open items with since/age, size and due when stated, done items folded; --actions FILE or actions/*.md; a landing target"""
@@ -313,6 +315,7 @@ class CockpitTests(unittest.TestCase):
         self.assertIn("Rename &lt;script&gt;alert(1)&lt;/script&gt; one word each", page)
         self.assertIn("Only you can do these. &lt;b&gt;x&lt;/b&gt;", page)
         self.assertIn("since 2026-11-01 · <b>2 d</b> · size ~15 min", page)
+        self.assertIn("counted to the newest record, 2026-11-03, not today · 2 open without a stated since-when · 1 without a stated size", page)
         self.assertIn("due 2026-11-10 · <b class=\"warn\">in 7 d</b> · size not stated", page)
         self.assertIn("since not stated · size one word each", page)
         self.assertIn("<summary>Done · 1</summary>", page)

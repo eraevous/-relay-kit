@@ -1696,7 +1696,24 @@ def actor_table(info):
                f'<td data-h="sent" class="n">{t["sends"]}{f" ({t["self"]} to itself)" if t["self"] else ""}</td>'
                f'<td data-h="received" class="n">{t["receives"]}</td>'
                f'<td data-h="sends most to">{e(top(t["to"])) or "—"}</td><td data-h="receives most from">{e(top(t["from"])) or "—"}</td></tr>')
-    return f'<div class="tw"><table><thead><tr>{th}</tr></thead><tbody>{tr}</tbody></table></div>'
+    out = f'<div class="tw"><table><thead><tr>{th}</tr></thead><tbody>{tr}</tbody></table></div>'
+    # DEC-141 run 2: "+N more" hid the rest of each actor's counterparts; the full matrix answers "to whom"
+    senders = [t["actor"] for t in rows if t["sends"]]
+    receivers = [t["actor"] for t in rows if t["receives"]]
+    if senders and receivers:
+        by = {t["actor"]: t["to"] for t in rows}
+        mh = "".join(f'<th class="rot"><span>{e(r)}</span></th>' for r in receivers)
+        mr = "".join(f'<tr><th>{e(a)}</th>' + "".join(f'<td class="n">{by[a].get(r) or ""}</td>' for r in receivers)
+                     + f'<td class="n tot">{sum(by[a].values())}</td></tr>' for a in senders)
+        tot = "".join(f'<td class="n tot">{sum(by[a].get(r, 0) for a in senders)}</td>' for r in receivers)
+        out += (f'<details class="matrix"><summary>Every sender → receiver count · {len(senders)} senders × {len(receivers)} receivers</summary>'
+                f'<div class="tw"><table class="mx"><thead><tr><th>sender ↓ · receiver →</th>{mh}<th class="rot"><span>sent</span></th></tr></thead>'
+                f'<tbody>{mr}<tr><th>received</th>{tot}<td></td></tr></tbody></table></div></details>')
+    unseen = [l for l in no_thread if l not in {t.get("lane") for t in rows}]
+    if unseen:
+        out += (f'<p class="hint">Lanes with no thread and no actor in any handoff, so no band above: '
+                f'{e(", ".join(unseen))}.</p>')
+    return out
 
 
 def authority_svg(auth, pid="a"):
@@ -2118,7 +2135,10 @@ def actions_surface(data):
                 f'<article class="panel pad action-list"><div class="panel-head"><h2>{e(fl.get("title") or fl["file"])}</h2>'
                 f'<span class="tag hot">{len(open_)} OPEN · {len(done)} DONE</span></div>'
                 f'<p class="hint">{e(fl["file"])} · as written by its author; the page ticks nothing'
-                + (f' · oldest open item: since {e(oldest[0]["since"])} ({oldest[0]["age_days"]} d)' if oldest else "") + "</p>"
+                + (f' · oldest open item: since {e(oldest[0]["since"])} ({oldest[0]["age_days"]} d)' if oldest else "")
+                + f' · ages and due dates are counted to the newest record, {e(data["as_of"][:10])}, not today'
+                + (f' · {sum(1 for it in open_ if not it.get("since"))} open without a stated since-when' if any(not it.get("since") for it in open_) else "")
+                + (f' · {sum(1 for it in open_ if not it.get("size"))} without a stated size' if any(not it.get("size") for it in open_) else "") + "</p>"
                 + (f'<p class="action-intro">{inline_md(e(fl["intro"]))}</p>' if fl.get("intro") else "")
                 + f'<ul class="actions">{items}</ul>{folded}</article>')
         body = "".join(blocks)
@@ -2644,7 +2664,9 @@ textarea{min-height:260px;color:var(--teal);font:12px/1.45 var(--mono);resize:ve
 .band-tag{fill:var(--gold);font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase}
 .topo-grid{display:grid;grid-template-columns:1fr;gap:16px;align-items:start}
 @media (min-width:1500px){.topo-grid{grid-template-columns:minmax(0,1fr) minmax(520px,600px)}.topo-grid .tw{max-height:620px;overflow:auto}}
-.topo-grid td,.topo-grid th{font-size:12px;padding:5px 6px;vertical-align:top}.topo-grid table{min-width:520px}.topo-grid td.n{text-align:right;font:600 12px var(--mono);white-space:nowrap}
+.topo-grid td,.topo-grid th{font-size:12px;padding:5px 6px;vertical-align:top}.topo-grid table{min-width:520px}
+.matrix{margin-top:10px}.mx th{font:600 11px var(--mono);text-align:left;white-space:nowrap}.mx th.rot{height:150px;vertical-align:bottom;padding:0 2px}
+.mx th.rot span{display:inline-block;writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap}.mx td.n{text-align:center;min-width:28px}.mx .tot{color:var(--gold)}.topo-grid td.n{text-align:right;font:600 12px var(--mono);white-space:nowrap}
 .n-coord{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.n-lane{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}
 .a-structure{fill:none;stroke:var(--soft);stroke-dasharray:5 4;stroke-width:1.5}.m-structure{fill:var(--soft)}
 .a-delegation{fill:none;stroke:var(--gold);stroke-width:1.8}.m-delegation{fill:var(--gold)}
