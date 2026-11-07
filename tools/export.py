@@ -272,7 +272,7 @@ def effective_remotes(folder, cfg):
     config), or None when they can't be determined. Without git, the local config is read only if it
     has no include sections; otherwise None."""
     try:
-        p = subprocess.run([GIT, f"--git-dir={folder / '.git'}", "remote", "-v"], capture_output=True, text=True,
+        p = subprocess.run([GIT, f"--git-dir={folder / '.git'}", "remote", "-v"], capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=15, env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
     except FileNotFoundError:
         if cfg is None or re.search(r"^\s*\[\s*include", cfg.read_text(encoding="utf-8", errors="replace"), re.M | re.I):
@@ -305,7 +305,7 @@ def authenticated_visibility(repo):
             pass
     if shutil.which("gh"):
         try:
-            p = subprocess.run(["gh", "api", f"repos/{repo}", "--jq", ".private"], capture_output=True, text=True, timeout=20)
+            p = subprocess.run(["gh", "api", f"repos/{repo}", "--jq", ".private"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
             if p.returncode == 0 and p.stdout.strip() in ("true", "false"):
                 return "private" if p.stdout.strip() == "true" else "public"
         except (OSError, subprocess.SubprocessError):

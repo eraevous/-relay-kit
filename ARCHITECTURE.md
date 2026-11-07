@@ -41,6 +41,8 @@ Registry: [governance/contracts.json](governance/contracts.json).
 | `relay-kit/prs@3` | governance/pr-state.jsonl: pull-request state read from GitHub at build time | [docs/prs.md](docs/prs.md) |
 | `relay-kit/status@1` | status/<date>-<edition>.md: a hand-written narrative edition, rendered as written | [docs/status.md](docs/status.md) |
 | `relay-kit/decision-support@1` | governance/decision-support.jsonl: authored notes per pending item | [docs/decision-support.md](docs/decision-support.md) |
+| `relay-kit/budget@2` | governance/budget.jsonl: readings of compute and time, labelled by method, with corrections that replace | [docs/budget.md](docs/budget.md) |
+| `relay-kit/telemetry@1` | a derived view of compute, delivery, review, remediation, coverage and coordination loss, never stored | [docs/telemetry.md](docs/telemetry.md) |
 | `relay-kit/mcp@1` | read-only MCP server over the records (stdio) | [docs/mcp.md](docs/mcp.md) |
 
 **How a contract changes:** only by a new version. The spec, every implementer and the

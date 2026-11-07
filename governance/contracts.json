@@ -1,268 +1,245 @@
 {
- "rule": "A contract changes only by a new version. The spec, every implementer and the tests change in the same commit, and the change is recorded in decisions.jsonl. tests/run_tests.py checks that every file below carries the current marker.",
- "contracts": [
-  {
-   "id": "relay-kit/conversation@1",
-   "what": "Normalized conversation JSON and message ids (T3u, T3a, T3a2), and the same ids in Markdown markers.",
-   "spec": "docs/conversation-schema.md",
-   "implementers": [
-    "skills/chat-capture/SKILL.md",
-    "skills/thread-seed/SKILL.md",
-    "skills/selective-self-distillation/SKILL.md",
-    "skills/chat-telemetry/SKILL.md"
-   ],
-   "tests": [
-    "schema: renderer tags the version and gives every message a unique mid",
-    "schema: an unknown version is refused by seed, SSD and telemetry"
-   ]
-  },
-  {
-   "id": "relay-kit/handoff@2",
-   "what": "The handoff file: front matter, sections, states, log line, and the folder's .ledger.json owner and lane settings. @2 (HO-20261101-005): random lane-coded ids (HO-LANE-YYYYMMDD-XXXX), actors with a session (lane#session), steps recorded 'for' another party. Optional touches: (paths, globs or thread URLs) for overlap warnings; readers that don't use it ignore it. @1 files (HO-YYYYMMDD-NNN, no sessions) stay readable and valid.",
-   "spec": "skills/handoff-ledger/SKILL.md",
-   "implementers": [
-    "skills/handoff-ledger/scripts/handoff.py"
-   ],
-   "tests": [
-    "ledger: prepared -> sent -> acknowledged -> completed, then check",
-    "ledger: a handoff from a newer contract version is refused",
-    "ledger: @2 needs a session on every actor; the owner needs none"
-   ]
-  },
-  {
-   "id": "relay-kit/paste-markers@1",
-   "what": "Marking relayed and pasted material: a FROM: first line, FROM: ... END FROM blocks, and >\"\"\" pastes.",
-   "spec": "docs/paste-markers.md",
-   "implementers": [
-    "skills/selective-self-distillation/SKILL.md",
-    "skills/thread-seed/SKILL.md",
-    "skills/chat-telemetry/SKILL.md"
-   ],
-   "tests": [
-    "ssd: a FROM ... END FROM block after your words is stripped from own text",
-    "seed: a FROM block inside your message is flagged as a paste, speaker stays you"
-   ]
-  },
-  {
-   "id": "relay-kit/relay-result@1",
-   "what": "chat-relay's reply statuses: done (explicit completion signal), unconfirmed (text stopped, no signal), pending.",
-   "spec": "skills/chat-relay/SKILL.md",
-   "implementers": [
-    "skills/relay-governor/SKILL.md"
-   ],
-   "tests": [
-    "relay: text that stops changing without a signal is never \"done\"",
-    "relay: explicit ChatGPT completion -> done"
-   ]
-  },
-  {
-   "id": "relay-kit/export@1",
-   "what": "Read-only export of a records store: manifest.json (queried sources, counts, time bounds, hashes, filters, redaction policy, exclusions, coverage gaps) and records.jsonl (one record per item, with kind, rid, source_path, source_hash, lane, actor, ts/ts_missing and evidence_class). Reads conversation@1 and handoff@1/@2; changes neither.",
-   "spec": "docs/export.md",
-   "implementers": [
-    "tools/export.py"
-   ],
-   "tests": [
-    "export: message round trip from a conversation@1 capture preserves text, ids and order",
-    "export: a relayed message is marked relay with its origin, distinct from original speech",
-    "export: missing captures, hidden steps, absent timestamps and missing outputs are reported in the manifest",
-    "export: a destination inside a public or unconfirmed GitHub repository is refused"
-   ]
-  },
-  {
-   "id": "relay-kit/lifecycle@1",
-   "what": "What the decision and challenge ledgers say is open, settled, in force or contested, decided once (tools/lifecycle.py) and shared by check_ledgers, status, export, the MCP server and the cockpit. A supersedes takes effect only from a settled line (adopted closes any earlier decision; rejected and superseded settle a proposal only and cannot retire an adopted decision); a proposed line is a proposed replacement; a resolves only from a resolved or accepted-risk line; self, forward and unknown references are problems and take no effect; more than one effective closer is a conflict, kept, not collapsed. Applicability of an adopted decision: standing ('adopted, no structured supersession found'), superseded, revoked (revokes), expired or not yet effective (effective_from/until); amends (an id or {id, clauses}) records a partial amendment. Export records gain applicability, closed_by, proposed_replacements, amended_by, conflict, transition_problems (decisions) and open, closed_by, conflict (challenges); in_force follows these rules. Adopting a proposal replaces what it proposed to replace; a closing and a revoking line on one record is a conflict; an amendment lapses with what it amends; effective dates are evaluated against the ledger's latest date by every reader; check_ledgers reports invalid transitions on earlier lines as warnings. export and mcp stay @1 with this deviation recorded in docs/lifecycle.md.",
-   "spec": "docs/lifecycle.md",
-   "implementers": [
-    "tools/lifecycle.py",
-    "tools/check_ledgers.py",
-    "tools/status.py",
-    "tools/export.py",
-    "tools/mcp_server.py",
-    "tools/cockpit.py"
-   ],
-   "tests": [
-    "lifecycle: the six review reproductions and the other fixture cases resolve as specified",
-    "lifecycle: check_ledgers refuses exactly the cases with a transition that takes no effect",
-    "lifecycle: status, export, the MCP server and the cockpit show the same open items and in-force decisions",
-    "lifecycle: a transition that takes no effect on an earlier line is a warning, so later appends still work; a new one is refused"
-   ]
-  },
-  {
-   "id": "relay-kit/cockpit@5",
-   "what": "Read-only static control surface over a records store: DIR/index.html (one self-contained page: Choices, Topology, Budget, Run/Drift and the other v0.4 surfaces) and DIR/cockpit.json (the data it was built from). Choices compose paste-ready ledger_append / handoff set lines and write nothing (DEC-019). Reads decisions, challenges, handoff@1/@2, threads.md and conversation@1 through the export@1 readers, plus governance/budget.jsonl; changes none of them. Deterministic; no clock is read (the newest record, the records revision and its commit and fetch times are shown, not today). @2 (HO-RK-20261105-VZH4): each choice says what it asks (the proposer's optional `ask`, else a summary labelled derived), what cites it and waits on it, its age, and whether it may be overtaken (later citations; opt-in build-time PR states); Amend and Clarify compose ledger lines (an amending adopted line; an open question challenge addressed to the proposer); Inquire copies an off-record prompt; Questions lists open questions. @3 (HO-RK-20261105-SWK5): a Pull requests surface rendering governance/pr-state.jsonl (relay-kit/prs@1): each PR's What / Why / How / Authorized verbatim with who wrote it (an agent's Author: line is tagged as not the owner's), missing sections, reviews with their family and whether one is from another family than the author, CI, and read times; PR states for the overtaken check come from that file, so --pr-state only fills gaps. --theme FILE (known colour variables and font lists only; an optional light scheme with a toggle) and --landing SURFACE. The page still fetches and writes nothing. Additive: nothing in @2 changed meaning. @4 (HO-RK-20261105-8DTW): reads the ledgers through relay-kit/lifecycle@1 (a proposal leaves Choices only when a settled line closes it; a proposed replacement is shown on its card; transitions that take no effect or conflict are listed on Review); every composed decision or challenge line carries --expect ID=STATE@HASH (and one for what a proposal replaces) so ledger_append refuses it, with what changed, once the item has moved on; the header shows the records' revision, commit time and last fetch (aged in the browser) apart from the newest record. Nothing from @3 was removed. @5 (HO-RK-20261106-NXPR; DEC-139, DEC-140): Pull requests folds each review under its card with author, family (signed, or inferred from the login via review_families or the records' .ledger.json 'actors' map, and labelled so; else unsigned), kind (review or review-style comment), verdict, time, inline-comment count, and the body verbatim as escaped paragraphs and lists (no markdown executed, URLs as text); a 'Findings: N blocking / M should-fix' line only when the body states those counts. A Status surface (11, a --landing target) renders the newest relay-kit/status@1 edition verbatim from a markdown subset, tags its author, flags it stale past --drift-days (measured from the newest record), and indexes older editions. Choices show relay-kit/decision-support@1 notes per item, one block per author in reading order (independent authors, the owner, then the coordinator lane), latest per author with history, and 'no decision-support note yet' otherwise; the ledger mechanics (what each action does) sit behind a 'how the ledger records this' disclosure. Decision, challenge and decision-support text is rendered with its structure: (1)…(n) enumerations, numbered or dashed lines and line breaks become lists and paragraphs, escaped, never markdown. cockpit.json gains status, decision_support, choices[].support, reviews' kind/body/family_source/findings/comments, and counts.status_editions/support_notes/choices_without_support. Nothing from @4 was removed.",
-   "spec": "docs/cockpit.md",
-   "implementers": [
-    "tools/cockpit.py",
-    "tools/ledger_append.py"
-   ],
-   "tests": [
-    "cockpit: Choices lists exactly the proposed decision, the owner-waiting handoff and the open challenge",
-    "cockpit: a composed ledger line parses as JSON with the referenced id and the chosen status, and passes the ledger check",
-    "cockpit: --content metadata leaves out decision, challenge and handoff bodies (ids and states only)",
-    "cockpit: a destination inside a public GitHub repository or inside the records is refused",
-    "cockpit: two runs give byte-identical output and leave the records untouched",
-    "cockpit: a composed line pasted unedited is refused by ledger_append (its <<REQUIRED placeholders fail the ledger check)",
-    "cockpit: Run commitments count only authorized handoffs in progress; prepared or unauthorized ones are pending",
-    "cockpit: only an adopted decision with delegates_to draws a recorded delegation edge",
-    "cockpit: every choice says what it asks; the proposer's ask is shown as theirs, anything else is labelled derived",
-    "cockpit: Amend and Clarify compose ledger lines that pass the check once filled in, and are refused while placeholders remain",
-    "cockpit: Inquire is off the record: no command, no ledger line, only a prompt naming the item",
-    "cockpit: Pull requests renders each PR's sections verbatim and escaped, with who wrote it and what is missing",
-    "cockpit: an agent-written PR is tagged as not written by the owner; one with no Author line says so",
-    "cockpit: --content metadata shows which PR sections exist but none of their text",
-    "cockpit: PR states for overtaken checks come from pr-state.jsonl without any network lookup",
-    "cockpit: a theme can set only known variables to colours or font lists; anything else is refused",
-    "cockpit: a theme with a light block adds a light scheme and a toggle; without --theme the page is unchanged dark",
-    "cockpit: --landing opens the page on the named surface; an unknown surface is refused",
-    "cockpit: merged or closed pull requests older than the reader's window are counted, not listed",
-    "lifecycle: the cockpit composes Accept, Reject, Amend and Close-as-overtaken with --expect, and shows a proposed replacement on the card",
-    "lifecycle: a composed line with --expect is refused, with what changed, once its item has been settled",
-    "cockpit: reviews fold under the card with author, family or unsigned, kind, verdict, time and the body as escaped paragraphs; Findings only as stated",
-    "cockpit: a family taken from the login (the records' actors map or review_families) is marked inferred; a Reviewer: signature is marked signed",
-    "cockpit: a review recorded by prs@2 (no body) says the body isn't recorded, rather than showing an empty one",
-    "cockpit: Status renders the newest edition verbatim from the markdown subset (escaped; links as text), indexes older ones, and can be the landing",
-    "cockpit: without a status folder the Status surface says how to write an edition",
-    "cockpit: decision-support notes render per item, one block per author, independent authors before the coordinator, latest per author with history; mechanics folded",
-    "cockpit: record text with (1)…(n), numbered or dashed lines, or line breaks renders as lists and paragraphs, escaped"
-   ]
-  },
-  {
-   "id": "relay-kit/prs@3",
-   "what": "governance/pr-state.jsonl, append-only, written by relay-kit prs at build time from GitHub (gh CLI or a token): a 'pr' line when a pull request's state changed since its last line (repo, number, url, title, state open|closed|merged, draft, author, author_line from the body's Author: line, times, base, head, reviews [{by, verdict, at, signed, stated}], ci {state success|failure|pending|none, failing}, body_sections {what, why, how, authorized} verbatim with HTML comments removed, missing, truncated) and a 'fetch' line per run (ts, via, repos, ok, failed, since_days, prs_seen, appended). Repositories from handoffs/.ledger.json 'repos' or --repo. The one GitHub reader for pull requests: the Cockpit and other readers read the file. @2 (HO-RK-20261105-TXRM step 1): pull requests are read through tools/github.py, the kit's read-only client for pull-request reads (GET only; pagination; retries with backoff; rate-limit waits or refusal with the reset time; one fetch per path per run; optional ETag cache). A pr line gains `unread` (reviews or ci that couldn't be read: missing is not zero; ci state 'unknown'); the fetch line gains `coverage` per repository (what was asked, listed, more_available, re-read open PRs, PRs read, partial reads), `revisions` (default branch and pushed_at) and `client` (requests, retries, waits, cache hits, rate limit left, first/last request time). @1 lines stay readable. @3 (HO-RK-20261106-NXPR, DEC-139): each review carries id, kind 'review', its body verbatim (cut at 4000 characters, truncated: true) and comments (its inline-comment count; the inline text stays on GitHub); issue comments that are reviews in all but type (first non-empty line opening with Review / Execution review / Reviewer, or a verdict stated in the opening words) are recorded as reviews with kind 'comment', verdict null and the same fields; unread may say 'comments'. One more read per PR (issue comments) and one per PR with reviews (inline comments). @1 and @2 lines stay readable; a PR whose reviews gained bodies gets one new line on the first @3 run, an unchanged PR none.",
-   "spec": "docs/prs.md",
-   "implementers": [
-    "tools/cockpit.py",
-    "tools/github.py",
-    "tools/prs.py"
-   ],
-   "tests": [
-    "prs: body sections are kept verbatim; missing and comment-only sections are listed as missing",
-    "prs: an unchanged PR appends no new line; a changed one appends one, and every run appends a fetch line",
-    "prs: a failing repository is recorded in the fetch line and the others are still read",
-    "prs: it writes only governance/pr-state.jsonl and never rewrites a line",
-    "prs: CI state from check runs and statuses; reviews keep the verdict stated in their body",
-    "prs: repositories come from .ledger.json repos or --repo; anything not OWNER/NAME is refused",
-    "prs: a PR last recorded open is read again however old, so a closed one never stays open",
-    "prs: appending to a file without a final newline doesn't join two lines",
-    "github: pages walks pages until the limit or a short page, and says whether more were available",
-    "github: network errors and 5xx are retried with backoff; other errors and exhausted retries are refused with the status",
-    "github: a rate limit waits for the reset when it is short, and is refused with the reset time when it isn't",
-    "github: a path is fetched once per run; with a cache folder an unchanged resource is revalidated by its ETag",
-    "github: the gh transport only ever sends GET, and parses status and headers from its output",
-    "prs: what was asked for and what came back is recorded per repository; unreadable reviews or CI are unread, not none",
-    "prs: a PR that can't be read again is a partial read, not a failed repository; an unread part keeps its last value and adds no line",
-    "prs: review bodies are recorded verbatim (cut at 4000, flagged), with inline-comment counts; review-style issue comments join as kind comment",
-    "prs: review-style comments that can't be read are unread, keep their last value, and never read as none"
-   ]
-  },
-  {
-   "id": "relay-kit/cockpit@5",
-   "what": "Read-only static control surface over a records store: DIR/index.html (one self-contained page: Choices, Topology, Budget, Run/Drift and the other v0.4 surfaces) and DIR/cockpit.json (the data it was built from). Choices compose paste-ready ledger_append / handoff set lines and write nothing (DEC-019). Reads decisions, challenges, handoff@1/@2, threads.md and conversation@1 through the export@1 readers, plus governance/budget.jsonl; changes none of them. Deterministic; no clock is read (the newest record, the records revision and its commit and fetch times are shown, not today). @2 (HO-RK-20261105-VZH4): each choice says what it asks (the proposer's optional `ask`, else a summary labelled derived), what cites it and waits on it, its age, and whether it may be overtaken (later citations; opt-in build-time PR states); Amend and Clarify compose ledger lines (an amending adopted line; an open question challenge addressed to the proposer); Inquire copies an off-record prompt; Questions lists open questions. @3 (HO-RK-20261105-SWK5): a Pull requests surface rendering governance/pr-state.jsonl (relay-kit/prs@1): each PR's What / Why / How / Authorized verbatim with who wrote it (an agent's Author: line is tagged as not the owner's), missing sections, reviews with their family and whether one is from another family than the author, CI, and read times; PR states for the overtaken check come from that file, so --pr-state only fills gaps. --theme FILE (known colour variables and font lists only; an optional light scheme with a toggle) and --landing SURFACE. The page still fetches and writes nothing. Additive: nothing in @2 changed meaning. @4 (HO-RK-20261105-8DTW): reads the ledgers through relay-kit/lifecycle@1 (a proposal leaves Choices only when a settled line closes it; a proposed replacement is shown on its card; transitions that take no effect or conflict are listed on Review); every composed decision or challenge line carries --expect ID=STATE@HASH (and one for what a proposal replaces) so ledger_append refuses it, with what changed, once the item has moved on; the header shows the records' revision, commit time and last fetch (aged in the browser) apart from the newest record. Nothing from @3 was removed. @5 (HO-RK-20261106-NXPR; DEC-139, DEC-140): Pull requests folds each review under its card with author, family (signed, or inferred from the login via review_families or the records' .ledger.json 'actors' map, and labelled so; else unsigned), kind (review or review-style comment), verdict, time, inline-comment count, and the body verbatim as escaped paragraphs and lists (no markdown executed, URLs as text); a 'Findings: N blocking / M should-fix' line only when the body states those counts. A Status surface (11, a --landing target) renders the newest relay-kit/status@1 edition verbatim from a markdown subset, tags its author, flags it stale past --drift-days (measured from the newest record), and indexes older editions. Choices show relay-kit/decision-support@1 notes per item, one block per author in reading order (independent authors, the owner, then the coordinator lane), latest per author with history, and 'no decision-support note yet' otherwise; the ledger mechanics (what each action does) sit behind a 'how the ledger records this' disclosure. Decision, challenge and decision-support text is rendered with its structure: (1)…(n) enumerations, numbered or dashed lines and line breaks become lists and paragraphs, escaped, never markdown. cockpit.json gains status, decision_support, choices[].support, reviews' kind/body/family_source/findings/comments, and counts.status_editions/support_notes/choices_without_support. Nothing from @4 was removed.",
-   "spec": "docs/cockpit.md",
-   "implementers": [
-    "tools/cockpit.py",
-    "tools/ledger_append.py"
-   ],
-   "tests": [
-    "cockpit: Choices lists exactly the proposed decision, the owner-waiting handoff and the open challenge",
-    "cockpit: a composed ledger line parses as JSON with the referenced id and the chosen status, and passes the ledger check",
-    "cockpit: --content metadata leaves out decision, challenge and handoff bodies (ids and states only)",
-    "cockpit: a destination inside a public GitHub repository or inside the records is refused",
-    "cockpit: two runs give byte-identical output and leave the records untouched",
-    "cockpit: a composed line pasted unedited is refused by ledger_append (its <<REQUIRED placeholders fail the ledger check)",
-    "cockpit: Run commitments count only authorized handoffs in progress; prepared or unauthorized ones are pending",
-    "cockpit: only an adopted decision with delegates_to draws a recorded delegation edge",
-    "cockpit: every choice says what it asks; the proposer's ask is shown as theirs, anything else is labelled derived",
-    "cockpit: Amend and Clarify compose ledger lines that pass the check once filled in, and are refused while placeholders remain",
-    "cockpit: Inquire is off the record: no command, no ledger line, only a prompt naming the item",
-    "cockpit: Pull requests renders each PR's sections verbatim and escaped, with who wrote it and what is missing",
-    "cockpit: an agent-written PR is tagged as not written by the owner; one with no Author line says so",
-    "cockpit: --content metadata shows which PR sections exist but none of their text",
-    "cockpit: PR states for overtaken checks come from pr-state.jsonl without any network lookup",
-    "cockpit: a theme can set only known variables to colours or font lists; anything else is refused",
-    "cockpit: a theme with a light block adds a light scheme and a toggle; without --theme the page is unchanged dark",
-    "cockpit: --landing opens the page on the named surface; an unknown surface is refused",
-    "cockpit: merged or closed pull requests older than the reader's window are counted, not listed",
-    "lifecycle: the cockpit composes Accept, Reject, Amend and Close-as-overtaken with --expect, and shows a proposed replacement on the card",
-    "lifecycle: a composed line with --expect is refused, with what changed, once its item has been settled",
-    "cockpit: reviews fold under the card with author, family or unsigned, kind, verdict, time and the body as escaped paragraphs; Findings only as stated",
-    "cockpit: a family taken from the login (the records' actors map or review_families) is marked inferred; a Reviewer: signature is marked signed",
-    "cockpit: a review recorded by prs@2 (no body) says the body isn't recorded, rather than showing an empty one",
-    "cockpit: Status renders the newest edition verbatim from the markdown subset (escaped; links as text), indexes older ones, and can be the landing",
-    "cockpit: without a status folder the Status surface says how to write an edition",
-    "cockpit: decision-support notes render per item, one block per author, independent authors before the coordinator, latest per author with history; mechanics folded",
-    "cockpit: record text with (1)…(n), numbered or dashed lines, or line breaks renders as lists and paragraphs, escaped"
-   ]
-  },
-  {
-   "id": "relay-kit/prs@3",
-   "what": "governance/pr-state.jsonl, append-only, written by relay-kit prs at build time from GitHub (gh CLI or a token): a 'pr' line when a pull request's state changed since its last line (repo, number, url, title, state open|closed|merged, draft, author, author_line from the body's Author: line, times, base, head, reviews [{by, verdict, at, signed, stated}], ci {state success|failure|pending|none, failing}, body_sections {what, why, how, authorized} verbatim with HTML comments removed, missing, truncated) and a 'fetch' line per run (ts, via, repos, ok, failed, since_days, prs_seen, appended). Repositories from handoffs/.ledger.json 'repos' or --repo. The one GitHub reader for pull requests: the Cockpit and other readers read the file. @2 (HO-RK-20261105-TXRM step 1): pull requests are read through tools/github.py, the kit's read-only client for pull-request reads (GET only; pagination; retries with backoff; rate-limit waits or refusal with the reset time; one fetch per path per run; optional ETag cache). A pr line gains `unread` (reviews or ci that couldn't be read: missing is not zero; ci state 'unknown'); the fetch line gains `coverage` per repository (what was asked, listed, more_available, re-read open PRs, PRs read, partial reads), `revisions` (default branch and pushed_at) and `client` (requests, retries, waits, cache hits, rate limit left, first/last request time). @1 lines stay readable. @3 (HO-RK-20261106-NXPR, DEC-139): each review carries id, kind 'review', its body verbatim (cut at 4000 characters, truncated: true) and comments (its inline-comment count; the inline text stays on GitHub); issue comments that are reviews in all but type (first non-empty line opening with Review / Execution review / Reviewer, or a verdict stated in the opening words) are recorded as reviews with kind 'comment', verdict null and the same fields; unread may say 'comments'. One more read per PR (issue comments) and one per PR with reviews (inline comments). @1 and @2 lines stay readable; a PR whose reviews gained bodies gets one new line on the first @3 run, an unchanged PR none.",
-   "spec": "docs/prs.md",
-   "implementers": [
-    "tools/cockpit.py",
-    "tools/github.py",
-    "tools/prs.py"
-   ],
-   "tests": [
-    "prs: body sections are kept verbatim; missing and comment-only sections are listed as missing",
-    "prs: an unchanged PR appends no new line; a changed one appends one, and every run appends a fetch line",
-    "prs: a failing repository is recorded in the fetch line and the others are still read",
-    "prs: it writes only governance/pr-state.jsonl and never rewrites a line",
-    "prs: CI state from check runs and statuses; reviews keep the verdict stated in their body",
-    "prs: repositories come from .ledger.json repos or --repo; anything not OWNER/NAME is refused",
-    "prs: a PR last recorded open is read again however old, so a closed one never stays open",
-    "prs: appending to a file without a final newline doesn't join two lines",
-    "github: pages walks pages until the limit or a short page, and says whether more were available",
-    "github: network errors and 5xx are retried with backoff; other errors and exhausted retries are refused with the status",
-    "github: a rate limit waits for the reset when it is short, and is refused with the reset time when it isn't",
-    "github: a path is fetched once per run; with a cache folder an unchanged resource is revalidated by its ETag",
-    "github: the gh transport only ever sends GET, and parses status and headers from its output",
-    "prs: what was asked for and what came back is recorded per repository; unreadable reviews or CI are unread, not none",
-    "prs: a PR that can't be read again is a partial read, not a failed repository; an unread part keeps its last value and adds no line",
-    "prs: review bodies are recorded verbatim (cut at 4000, flagged), with inline-comment counts; review-style issue comments join as kind comment",
-    "prs: review-style comments that can't be read are unread, keep their last value, and never read as none"
-   ]
-  },
-  {
-   "id": "relay-kit/status@1",
-   "what": "A hand-written status edition: status/<YYYY-MM-DD>-<edition>.md in the records store, with front matter date, edition, author, covers (and contract) and the four H2 sections Accomplishments / Road bumps / Status / Next steps, in a markdown subset (ATX headings, lists, bold, italic, inline code, horizontal rules, fenced code shown as text; links shown as text; HTML comments removed; anything else plain text). Editions are added, never edited or rewritten; the newest is the latest date, then morning < midday < noon < afternoon < evening < night, then other names alphabetically. The Cockpit renders it as written; `relay-kit edition new` scaffolds one and `check` reports what doesn't fit. Adopted from the pilot form kairos/status@0, which has the same fields.",
-   "spec": "docs/status.md",
-   "implementers": [
-    "tools/status_edition.py",
-    "tools/cockpit.py"
-   ],
-   "tests": [
-    "status: `relay-kit edition new` scaffolds the front matter and four headings and never overwrites; `check` reports what doesn't fit",
-    "cockpit: Status renders the newest edition verbatim from the markdown subset (escaped; links as text), indexes older ones, and can be the landing"
-   ]
-  },
-  {
-   "id": "relay-kit/decision-support@1",
-   "what": "governance/decision-support.jsonl, append-only: one line per authored decision-support note, {id, item (the DEC/CH/HO id it is about), author (actor with session), at, contract, changes_if_accepted, unchanged, counterfactual, can_wait, depends, recommendation}, all free text written by the author named; the latest line per (item, author) is current and earlier ones are its history. Nothing in it is generated. Readers show one block per author in a reading order (independent authors, the owner, then the coordinator lane) and rank nothing. Lines of the pilot form kairos/decision-support@0 (same fields) are read as @1.",
-   "spec": "docs/decision-support.md",
-   "implementers": [
-    "tools/cockpit.py"
-   ],
-   "tests": [
-    "cockpit: decision-support notes render per item, one block per author, independent authors before the coordinator, latest per author with history; mechanics folded"
-   ]
-  },
-  {
-   "id": "relay-kit/mcp@1",
-   "what": "Read-only MCP server over a records store, JSON-RPC 2.0 over stdio, protocol revisions 2024-11-05, 2025-03-26, 2025-06-18 and 2025-11-25 (any other gets -32022 with the supported list): the tool names and arguments, relaykit:// resource URIs, the result envelope (schema, evidence_class as in export@1, provenance 'read from <path> at records sha256:<hash>', content_level, notice) and the --content metadata policy. No tool writes to the records (DEC-019).",
-   "spec": "docs/mcp.md",
-   "implementers": [
-    "tools/mcp_server.py"
-   ],
-   "tests": [
-    "mcp: initialize handshake, tools/list and ping over stdio, for each supported protocol version",
-    "mcp: a 2026-07-28 or unknown protocol version gets -32022 with the supported list, never a silent fallback",
-    "mcp: every read tool answers with evidence_class and a provenance line naming the records hash",
-    "mcp: with --content metadata no tool or resource returns record text, and text filters are refused",
-    "mcp: read tools change nothing in the records, and instruction-like record text isn't acted on",
-    "mcp: malformed JSON-RPC gets a proper error and the server keeps serving"
-   ]
-  }
- ]
+  "rule": "A contract changes only by a new version. The spec, every implementer and the tests change in the same commit, and the change is recorded in decisions.jsonl. tests/run_tests.py checks that every file below carries the current marker.",
+  "contracts": [
+    {
+      "id": "relay-kit/conversation@1",
+      "what": "Normalized conversation JSON and message ids (T3u, T3a, T3a2), and the same ids in Markdown markers.",
+      "spec": "docs/conversation-schema.md",
+      "implementers": [
+        "skills/chat-capture/SKILL.md",
+        "skills/thread-seed/SKILL.md",
+        "skills/selective-self-distillation/SKILL.md",
+        "skills/chat-telemetry/SKILL.md"
+      ],
+      "tests": [
+        "schema: renderer tags the version and gives every message a unique mid",
+        "schema: an unknown version is refused by seed, SSD and telemetry"
+      ]
+    },
+    {
+      "id": "relay-kit/handoff@2",
+      "what": "The handoff file: front matter, sections, states, log line, and the folder's .ledger.json owner and lane settings. @2 (HO-20261101-005): random lane-coded ids (HO-LANE-YYYYMMDD-XXXX), actors with a session (lane#session), steps recorded 'for' another party. Optional touches: (paths, globs or thread URLs) for overlap warnings; readers that don't use it ignore it. @1 files (HO-YYYYMMDD-NNN, no sessions) stay readable and valid.",
+      "spec": "skills/handoff-ledger/SKILL.md",
+      "implementers": [
+        "skills/handoff-ledger/scripts/handoff.py"
+      ],
+      "tests": [
+        "ledger: prepared -> sent -> acknowledged -> completed, then check",
+        "ledger: a handoff from a newer contract version is refused",
+        "ledger: @2 needs a session on every actor; the owner needs none"
+      ]
+    },
+    {
+      "id": "relay-kit/paste-markers@1",
+      "what": "Marking relayed and pasted material: a FROM: first line, FROM: ... END FROM blocks, and >\"\"\" pastes.",
+      "spec": "docs/paste-markers.md",
+      "implementers": [
+        "skills/selective-self-distillation/SKILL.md",
+        "skills/thread-seed/SKILL.md",
+        "skills/chat-telemetry/SKILL.md"
+      ],
+      "tests": [
+        "ssd: a FROM ... END FROM block after your words is stripped from own text",
+        "seed: a FROM block inside your message is flagged as a paste, speaker stays you"
+      ]
+    },
+    {
+      "id": "relay-kit/relay-result@1",
+      "what": "chat-relay's reply statuses: done (explicit completion signal), unconfirmed (text stopped, no signal), pending.",
+      "spec": "skills/chat-relay/SKILL.md",
+      "implementers": [
+        "skills/relay-governor/SKILL.md"
+      ],
+      "tests": [
+        "relay: text that stops changing without a signal is never \"done\"",
+        "relay: explicit ChatGPT completion -> done"
+      ]
+    },
+    {
+      "id": "relay-kit/export@1",
+      "what": "Read-only export of a records store: manifest.json (queried sources, counts, time bounds, hashes, filters, redaction policy, exclusions, coverage gaps) and records.jsonl (one record per item, with kind, rid, source_path, source_hash, lane, actor, ts/ts_missing and evidence_class). Reads conversation@1 and handoff@1/@2; changes neither.",
+      "spec": "docs/export.md",
+      "implementers": [
+        "tools/export.py"
+      ],
+      "tests": [
+        "export: message round trip from a conversation@1 capture preserves text, ids and order",
+        "export: a relayed message is marked relay with its origin, distinct from original speech",
+        "export: missing captures, hidden steps, absent timestamps and missing outputs are reported in the manifest",
+        "export: a destination inside a public or unconfirmed GitHub repository is refused"
+      ]
+    },
+    {
+      "id": "relay-kit/lifecycle@1",
+      "what": "What the decision and challenge ledgers say is open, settled, in force or contested, decided once (tools/lifecycle.py) and shared by check_ledgers, status, export, the MCP server and the cockpit. A supersedes takes effect only from a settled line (adopted closes any earlier decision; rejected and superseded settle a proposal only and cannot retire an adopted decision); a proposed line is a proposed replacement; a resolves only from a resolved or accepted-risk line; self, forward and unknown references are problems and take no effect; more than one effective closer is a conflict, kept, not collapsed. Applicability of an adopted decision: standing ('adopted, no structured supersession found'), superseded, revoked (revokes), expired or not yet effective (effective_from/until); amends (an id or {id, clauses}) records a partial amendment. Export records gain applicability, closed_by, proposed_replacements, amended_by, conflict, transition_problems (decisions) and open, closed_by, conflict (challenges); in_force follows these rules. Adopting a proposal replaces what it proposed to replace; a closing and a revoking line on one record is a conflict; an amendment lapses with what it amends; effective dates are evaluated against the ledger's latest date by every reader; check_ledgers reports invalid transitions on earlier lines as warnings. export and mcp stay @1 with this deviation recorded in docs/lifecycle.md.",
+      "spec": "docs/lifecycle.md",
+      "implementers": [
+        "tools/lifecycle.py",
+        "tools/check_ledgers.py",
+        "tools/status.py",
+        "tools/export.py",
+        "tools/mcp_server.py",
+        "tools/cockpit.py"
+      ],
+      "tests": [
+        "lifecycle: the six review reproductions and the other fixture cases resolve as specified",
+        "lifecycle: check_ledgers refuses exactly the cases with a transition that takes no effect",
+        "lifecycle: status, export, the MCP server and the cockpit show the same open items and in-force decisions",
+        "lifecycle: a transition that takes no effect on an earlier line is a warning, so later appends still work; a new one is refused"
+      ]
+    },
+    {
+      "id": "relay-kit/cockpit@5",
+      "what": "Read-only static control surface over a records store: DIR/index.html (one self-contained page: Choices, Topology, Budget, Run/Drift and the other v0.4 surfaces) and DIR/cockpit.json (the data it was built from). Choices compose paste-ready ledger_append / handoff set lines and write nothing (DEC-019). Reads decisions, challenges, handoff@1/@2, threads.md and conversation@1 through the export@1 readers, plus governance/budget.jsonl; changes none of them. Deterministic; no clock is read (the newest record, the records revision and its commit and fetch times are shown, not today). @2 (HO-RK-20261105-VZH4): each choice says what it asks (the proposer's optional `ask`, else a summary labelled derived), what cites it and waits on it, its age, and whether it may be overtaken (later citations; opt-in build-time PR states); Amend and Clarify compose ledger lines (an amending adopted line; an open question challenge addressed to the proposer); Inquire copies an off-record prompt; Questions lists open questions. @3 (HO-RK-20261105-SWK5): a Pull requests surface rendering governance/pr-state.jsonl (relay-kit/prs@1): each PR's What / Why / How / Authorized verbatim with who wrote it (an agent's Author: line is tagged as not the owner's), missing sections, reviews with their family and whether one is from another family than the author, CI, and read times; PR states for the overtaken check come from that file, so --pr-state only fills gaps. --theme FILE (known colour variables and font lists only; an optional light scheme with a toggle) and --landing SURFACE. The page still fetches and writes nothing. Additive: nothing in @2 changed meaning. @4 (HO-RK-20261105-8DTW): reads the ledgers through relay-kit/lifecycle@1 (a proposal leaves Choices only when a settled line closes it; a proposed replacement is shown on its card; transitions that take no effect or conflict are listed on Review); every composed decision or challenge line carries --expect ID=STATE@HASH (and one for what a proposal replaces) so ledger_append refuses it, with what changed, once the item has moved on; the header shows the records' revision, commit time and last fetch (aged in the browser) apart from the newest record. Nothing from @3 was removed. @5 (HO-RK-20261106-NXPR; DEC-139, DEC-140): Pull requests folds each review under its card with author, family (signed, or inferred from the login via review_families or the records' .ledger.json 'actors' map, and labelled so; else unsigned), kind (review or review-style comment), verdict, time, inline-comment count, and the body verbatim as escaped paragraphs and lists (no markdown executed, URLs as text); a 'Findings: N blocking / M should-fix' line only when the body states those counts. A Status surface (11, a --landing target) renders the newest relay-kit/status@1 edition verbatim from a markdown subset, tags its author, flags it stale past --drift-days (measured from the newest record), and indexes older editions. Choices show relay-kit/decision-support@1 notes per item, one block per author in reading order (independent authors, the owner, then the coordinator lane), latest per author with history, and 'no decision-support note yet' otherwise; the ledger mechanics (what each action does) sit behind a 'how the ledger records this' disclosure. Decision, challenge and decision-support text is rendered with its structure: (1)…(n) enumerations, numbered or dashed lines and line breaks become lists and paragraphs, escaped, never markdown. cockpit.json gains status, decision_support, choices[].support, reviews' kind/body/family_source/findings/comments, and counts.status_editions/support_notes/choices_without_support. Nothing from @4 was removed.",
+      "spec": "docs/cockpit.md",
+      "implementers": [
+        "tools/cockpit.py",
+        "tools/ledger_append.py"
+      ],
+      "tests": [
+        "cockpit: Choices lists exactly the proposed decision, the owner-waiting handoff and the open challenge",
+        "cockpit: a composed ledger line parses as JSON with the referenced id and the chosen status, and passes the ledger check",
+        "cockpit: --content metadata leaves out decision, challenge and handoff bodies (ids and states only)",
+        "cockpit: a destination inside a public GitHub repository or inside the records is refused",
+        "cockpit: two runs give byte-identical output and leave the records untouched",
+        "cockpit: a composed line pasted unedited is refused by ledger_append (its <<REQUIRED placeholders fail the ledger check)",
+        "cockpit: Run commitments count only authorized handoffs in progress; prepared or unauthorized ones are pending",
+        "cockpit: only an adopted decision with delegates_to draws a recorded delegation edge",
+        "cockpit: every choice says what it asks; the proposer's ask is shown as theirs, anything else is labelled derived",
+        "cockpit: Amend and Clarify compose ledger lines that pass the check once filled in, and are refused while placeholders remain",
+        "cockpit: Inquire is off the record: no command, no ledger line, only a prompt naming the item",
+        "cockpit: Pull requests renders each PR's sections verbatim and escaped, with who wrote it and what is missing",
+        "cockpit: an agent-written PR is tagged as not written by the owner; one with no Author line says so",
+        "cockpit: --content metadata shows which PR sections exist but none of their text",
+        "cockpit: PR states for overtaken checks come from pr-state.jsonl without any network lookup",
+        "cockpit: a theme can set only known variables to colours or font lists; anything else is refused",
+        "cockpit: a theme with a light block adds a light scheme and a toggle; without --theme the page is unchanged dark",
+        "cockpit: --landing opens the page on the named surface; an unknown surface is refused",
+        "cockpit: merged or closed pull requests older than the reader's window are counted, not listed",
+        "lifecycle: the cockpit composes Accept, Reject, Amend and Close-as-overtaken with --expect, and shows a proposed replacement on the card",
+        "lifecycle: a composed line with --expect is refused, with what changed, once its item has been settled",
+        "cockpit: reviews fold under the card with author, family or unsigned, kind, verdict, time and the body as escaped paragraphs; Findings only as stated",
+        "cockpit: a family taken from the login (the records' actors map or review_families) is marked inferred; a Reviewer: signature is marked signed",
+        "cockpit: a review recorded by prs@2 (no body) says the body isn't recorded, rather than showing an empty one",
+        "cockpit: Status renders the newest edition verbatim from the markdown subset (escaped; links as text), indexes older ones, and can be the landing",
+        "cockpit: without a status folder the Status surface says how to write an edition",
+        "cockpit: decision-support notes render per item, one block per author, independent authors before the coordinator, latest per author with history; mechanics folded",
+        "cockpit: record text with (1)…(n), numbered or dashed lines, or line breaks renders as lists and paragraphs, escaped"
+      ]
+    },
+    {
+      "id": "relay-kit/prs@3",
+      "what": "governance/pr-state.jsonl, append-only, written by relay-kit prs at build time from GitHub (gh CLI or a token): a 'pr' line when a pull request's state changed since its last line (repo, number, url, title, state open|closed|merged, draft, author, author_line from the body's Author: line, times, base, head, reviews [{by, verdict, at, signed, stated}], ci {state success|failure|pending|none, failing}, body_sections {what, why, how, authorized} verbatim with HTML comments removed, missing, truncated) and a 'fetch' line per run (ts, via, repos, ok, failed, since_days, prs_seen, appended). Repositories from handoffs/.ledger.json 'repos' or --repo. The one GitHub reader for pull requests: the Cockpit and other readers read the file. @2 (HO-RK-20261105-TXRM step 1): pull requests are read through tools/github.py, the kit's read-only client for pull-request reads (GET only; pagination; retries with backoff; rate-limit waits or refusal with the reset time; one fetch per path per run; optional ETag cache). A pr line gains `unread` (reviews or ci that couldn't be read: missing is not zero; ci state 'unknown'); the fetch line gains `coverage` per repository (what was asked, listed, more_available, re-read open PRs, PRs read, partial reads), `revisions` (default branch and pushed_at) and `client` (requests, retries, waits, cache hits, rate limit left, first/last request time). @1 lines stay readable. @3 (HO-RK-20261106-NXPR, DEC-139): each review carries id, kind 'review', its body verbatim (cut at 4000 characters, truncated: true) and comments (its inline-comment count; the inline text stays on GitHub); issue comments that are reviews in all but type (first non-empty line opening with Review / Execution review / Reviewer, or a verdict stated in the opening words) are recorded as reviews with kind 'comment', verdict null and the same fields; unread may say 'comments'. One more read per PR (issue comments) and one per PR with reviews (inline comments). @1 and @2 lines stay readable; a PR whose reviews gained bodies gets one new line on the first @3 run, an unchanged PR none.",
+      "spec": "docs/prs.md",
+      "implementers": [
+        "tools/cockpit.py",
+        "tools/github.py",
+        "tools/prs.py"
+      ],
+      "tests": [
+        "prs: body sections are kept verbatim; missing and comment-only sections are listed as missing",
+        "prs: an unchanged PR appends no new line; a changed one appends one, and every run appends a fetch line",
+        "prs: a failing repository is recorded in the fetch line and the others are still read",
+        "prs: it writes only governance/pr-state.jsonl and never rewrites a line",
+        "prs: CI state from check runs and statuses; reviews keep the verdict stated in their body",
+        "prs: repositories come from .ledger.json repos or --repo; anything not OWNER/NAME is refused",
+        "prs: a PR last recorded open is read again however old, so a closed one never stays open",
+        "prs: appending to a file without a final newline doesn't join two lines",
+        "github: pages walks pages until the limit or a short page, and says whether more were available",
+        "github: network errors and 5xx are retried with backoff; other errors and exhausted retries are refused with the status",
+        "github: a rate limit waits for the reset when it is short, and is refused with the reset time when it isn't",
+        "github: a path is fetched once per run; with a cache folder an unchanged resource is revalidated by its ETag",
+        "github: the gh transport only ever sends GET, and parses status and headers from its output",
+        "prs: what was asked for and what came back is recorded per repository; unreadable reviews or CI are unread, not none",
+        "prs: a PR that can't be read again is a partial read, not a failed repository; an unread part keeps its last value and adds no line",
+        "prs: review bodies are recorded verbatim (cut at 4000, flagged), with inline-comment counts; review-style issue comments join as kind comment",
+        "prs: review-style comments that can't be read are unread, keep their last value, and never read as none"
+      ]
+    },
+    {
+      "id": "relay-kit/status@1",
+      "what": "A hand-written status edition: status/<YYYY-MM-DD>-<edition>.md in the records store, with front matter date, edition, author, covers (and contract) and the four H2 sections Accomplishments / Road bumps / Status / Next steps, in a markdown subset (ATX headings, lists, bold, italic, inline code, horizontal rules, fenced code shown as text; links shown as text; HTML comments removed; anything else plain text). Editions are added, never edited or rewritten; the newest is the latest date, then morning < midday < noon < afternoon < evening < night, then other names alphabetically. The Cockpit renders it as written; `relay-kit edition new` scaffolds one and `check` reports what doesn't fit. Adopted from the pilot form kairos/status@0, which has the same fields.",
+      "spec": "docs/status.md",
+      "implementers": [
+        "tools/status_edition.py",
+        "tools/cockpit.py"
+      ],
+      "tests": [
+        "status: `relay-kit edition new` scaffolds the front matter and four headings and never overwrites; `check` reports what doesn't fit",
+        "cockpit: Status renders the newest edition verbatim from the markdown subset (escaped; links as text), indexes older ones, and can be the landing"
+      ]
+    },
+    {
+      "id": "relay-kit/decision-support@1",
+      "what": "governance/decision-support.jsonl, append-only: one line per authored decision-support note, {id, item (the DEC/CH/HO id it is about), author (actor with session), at, contract, changes_if_accepted, unchanged, counterfactual, can_wait, depends, recommendation}, all free text written by the author named; the latest line per (item, author) is current and earlier ones are its history. Nothing in it is generated. Readers show one block per author in a reading order (independent authors, the owner, then the coordinator lane) and rank nothing. Lines of the pilot form kairos/decision-support@0 (same fields) are read as @1.",
+      "spec": "docs/decision-support.md",
+      "implementers": [
+        "tools/cockpit.py"
+      ],
+      "tests": [
+        "cockpit: decision-support notes render per item, one block per author, independent authors before the coordinator, latest per author with history; mechanics folded"
+      ]
+    },
+    {
+      "id": "relay-kit/budget@2",
+      "what": "governance/budget.jsonl, append-only: @1's ts, actor, window, tokens_in, tokens_out (and optional agents, note) plus @2's id (or a content-hash id for older lines), method (measured | proxy | estimate; required on new lines, 'unlabelled' for older ones), interval_start/end, includes_children {included, ids}, correction_of (an earlier line, same window: the replaced line is never summed with its correction and its use keeps the replaced line's time; two corrections of one line are a reported conflict, the later counting), metric_version, scope and source. Read through tools/budget.py by every reader; written by relay-kit budget-append. tokens_detail {input, output, cache_write, cache_read, by_model} keeps cache reads apart. relay-kit usage-ingest (tools/usage_ingest.py) turns a Claude Code session's local logs into one line per session: measured when the logs are complete, an estimate marked complete:false (a lower bound, with log_coverage) when compacted or late (message ids counted once across main and subagent logs; costUSD unused; re-ingesting appends a correction; no paths in the line).",
+      "spec": "docs/budget.md",
+      "implementers": [
+        "tools/budget.py",
+        "tools/budget_append.py",
+        "tools/cockpit.py",
+        "tools/usage_ingest.py"
+      ],
+      "tests": [
+        "budget: a correction replaces the line it names; the two are never summed",
+        "budget: a parent that includes its children's use isn't counted with them",
+        "budget: new lines must say how they were measured; malformed @2 fields are refused",
+        "budget: two corrections of one line are a conflict, reported; only the later one counts",
+        "budget: older lines without a method count as 'unlabelled', never as measured",
+        "budget: a correction is counted at the time of the line it replaces, so relabelling never moves use into this week",
+        "budget: children are followed through corrections, inclusion is inherited, and self, later, cross-window and cyclic references are reported and ignored",
+        "budget: the same reading appended twice gets two ids; duplicate ids in the file are reported and both lines read; a corrected line can't be corrected again",
+        "usage: one measured line per session; a message split over several log lines counts once; cache reads stay apart",
+        "usage: ingesting a session again appends a correction, so the cockpit counts it once",
+        "usage: the line carries counts and the session id only: no file paths or folder names",
+        "usage: a compacted log, or one starting well after its session did, gives an estimate marked incomplete, never a measurement",
+        "usage: a re-run that shows less than before is refused; duplicate session lines are refused; unidentified usage lines and zone-less times aren't counted"
+      ]
+    },
+    {
+      "id": "relay-kit/telemetry@1",
+      "what": "A derived view (tools/telemetry.py, relay-kit telemetry), rebuilt from the records and never stored in them: compute_consumption, delivery_throughput, lead_time, review_burden, post_merge_remediation (14 and 30 days, mature cohorts only), surviving_changes, human_intervention, measurement_coverage and coordination_loss, each with a frozen definition, a version, a measured/proxy/estimate/derived/unknown label, --lane and --content metadata as the cockpit applies them, distributions (median, p90, n) and 'unknown' with a reason in place of zero. No composite score, no targets. The cockpit's Review surface shows it.",
+      "spec": "docs/telemetry.md",
+      "implementers": [
+        "tools/telemetry.py",
+        "tools/cockpit.py"
+      ],
+      "tests": [
+        "telemetry: every metric carries its definition, version and label; with no records each says unknown, never zero",
+        "telemetry: lead time and review burden are distributions from pr-state; abandoned PRs are counted apart",
+        "telemetry: remediation is counted only over cohorts old enough; only a fix or revert wording right before this repository's reference counts",
+        "telemetry: corrections and child runs are applied before compute is summed; a malformed line is counted invalid, as the cockpit counts it, and breaks nothing",
+        "telemetry: the cockpit's Review panel shows each metric with its label and definition, no score or target, at the page's as of",
+        "telemetry: the view is derived and is never written into the records",
+        "telemetry: --content metadata reads no free text (claims and remediation are unknown); --lane keeps other lanes' handoffs and sessions out",
+        "telemetry: a time after the last pull-request read doesn't move as_of; it is flagged instead"
+      ]
+    },
+    {
+      "id": "relay-kit/mcp@1",
+      "what": "Read-only MCP server over a records store, JSON-RPC 2.0 over stdio, protocol revisions 2024-11-05, 2025-03-26, 2025-06-18 and 2025-11-25 (any other gets -32022 with the supported list): the tool names and arguments, relaykit:// resource URIs, the result envelope (schema, evidence_class as in export@1, provenance 'read from <path> at records sha256:<hash>', content_level, notice) and the --content metadata policy. No tool writes to the records (DEC-019).",
+      "spec": "docs/mcp.md",
+      "implementers": [
+        "tools/mcp_server.py"
+      ],
+      "tests": [
+        "mcp: initialize handshake, tools/list and ping over stdio, for each supported protocol version",
+        "mcp: a 2026-07-28 or unknown protocol version gets -32022 with the supported list, never a silent fallback",
+        "mcp: every read tool answers with evidence_class and a provenance line naming the records hash",
+        "mcp: with --content metadata no tool or resource returns record text, and text filters are refused",
+        "mcp: read tools change nothing in the records, and instruction-like record text isn't acted on",
+        "mcp: malformed JSON-RPC gets a proper error and the server keeps serving"
+      ]
+    }
+  ]
 }

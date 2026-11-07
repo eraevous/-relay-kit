@@ -293,7 +293,7 @@ class CockpitTests(unittest.TestCase):
         """cockpit: budget-append adds one valid line the cockpit reads"""
         g = self.root / "governance"
         p = subprocess.run([sys.executable, "-I", str(KIT / "tools" / "budget_append.py"), "--dir", str(g), "--window", "session",
-                            "--tokens-in", "10", "--tokens-out", "5", "--actor", "claude:research#SESSA1",
+                            "--tokens-in", "10", "--tokens-out", "5", "--method", "measured", "--actor", "claude:research#SESSA1",
                             "--ts", "2026-11-03T11:00:00Z"], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
         data, _, _ = self.build()
