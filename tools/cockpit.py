@@ -1709,7 +1709,7 @@ def actor_table(info):
         out += (f'<details class="matrix"><summary>Every sender → receiver count · {len(senders)} senders × {len(receivers)} receivers</summary>'
                 f'<div class="tw"><table class="mx"><thead><tr><th>sender ↓ · receiver →</th>{mh}<th class="rot"><span>sent</span></th></tr></thead>'
                 f'<tbody>{mr}<tr><th>received</th>{tot}<td></td></tr></tbody></table></div></details>')
-    unseen = [l for l in no_thread if l not in {t.get("lane") for t in rows}]
+    unseen = sorted(l for l in no_thread if l not in {t.get("lane") for t in rows})
     if unseen:
         out += (f'<p class="hint">Lanes with no thread and no actor in any handoff, so no band above: '
                 f'{e(", ".join(unseen))}.</p>')
