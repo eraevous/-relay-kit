@@ -45,7 +45,7 @@ def main():
     if names:
         pats["private name"] = re.compile(r"\b(?:" + "|".join(map(re.escape, names)) + r")\b", re.I)
     public = own_repo_pattern(root)
-    files = subprocess.run(["git", "-C", str(root), "ls-files"], capture_output=True, text=True, check=True).stdout.split()
+    files = subprocess.run(["git", "-C", str(root), "ls-files"], capture_output=True, text=True, encoding="utf-8", check=True).stdout.split()
     hits = 0
     for f in files:
         p = root / f

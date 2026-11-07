@@ -304,37 +304,14 @@ adopted line without decider, basis and locator, and any line with a `<<REQUIRED
 
 ## Budget records: `governance/budget.jsonl`
 
-Append-only JSON lines, one per reading:
-
-| field | meaning |
-| --- | --- |
-| `ts` | ISO time (UTC) the line covers up to |
-| `actor` | `assistant:lane#session`, or the owner |
-| `window` | `session`: one session's or work block's use; `weekly`: a reading of the whole week so far (for example the plan's usage page) |
-| `tokens_in`, `tokens_out` | integers ≥ 0 |
-| `agents` | integer ≥ 0: agents running in that window (optional) |
-| `note` | free text |
-
-Add a line with `relay-kit budget-append --window session --tokens-in N --tokens-out N [--agents N]
-[--note TEXT]` (actor from `RELAYKIT_ACTOR`, time now); commit it with the records. A correction is
-a new line with a note, never an edit.
-
-Definitions:
-
-- **Unit**: tokens (`tokens_in + tokens_out`). No money: there is no token-to-dollar rate.
-- **Window**: the 7 days ending at the latest timestamp in the records (`as_of`), exclusive of the
-  start; never the clock.
-- **Provenance**: each line names its `actor`; the page reports what the lines say and nothing
-  else. A line is an observation by whoever appended it, not a provider meter reading.
-- **Aggregation**: the gauge, burn and by-lane / by-actor tables are the **sum of `session` lines**
-  in the window. A `weekly` line is never added to that sum and never replaces it; the latest one
-  in the window is shown separately as a labelled reference.
-- **No manufactured zeros**: with no session lines in the window, burn is "no data", not 0; with
-  no file, "no budget records yet".
-
-The allowance comes from `--weekly-tokens N`, else `weekly_tokens` in `governance/cockpit.json`.
-Without the file the page shows this schema. Lines that don't parse are listed by line number.
-**The coordinator's status-file cost lines are not parsed**; only this file counts.
+The format is its own contract, [`relay-kit/budget@2`](budget.md). The cockpit reads it through
+`tools/budget.py`: a corrected line and a child line its parent already includes are never counted
+again, and the burn is shown split by method (measured, proxy, estimate, or unlabelled for older
+lines). The gauge, burn and by-lane / by-actor tables are the sum of the counted `session` lines in
+the 7 days ending at the newest record; a `weekly` line is shown separately as a reference, never
+added. With no session lines in the window, burn is "no data", not 0. The allowance comes from
+`--weekly-tokens N`, else `weekly_tokens` in `governance/cockpit.json`. **The coordinator's
+status-file cost lines are not parsed**; only this file counts.
 
 `governance/cockpit.json` (optional, read-only to the cockpit):
 

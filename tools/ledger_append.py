@@ -107,7 +107,7 @@ def check_expect(d, expects):
 
 
 def git(d, *args):
-    return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, timeout=60)
+    return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True, encoding="utf-8", timeout=60)
 
 
 def max_id(text, prefix):
@@ -251,7 +251,7 @@ def append(a, path, prefix, row, theirs):
         f.write(line)
     base = "HEAD" if git(a.dir, "rev-parse", "--verify", "--quiet", "HEAD").returncode == 0 else None
     cmd = [sys.executable, "-I", str(HERE / "check_ledgers.py"), "--dir", str(a.dir)] + (["--git", "--base", base] if base else [])
-    chk = subprocess.run(cmd, capture_output=True, text=True)
+    chk = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if chk.returncode != 0:
         now_text = path.read_text(encoding="utf-8")
         if now_text == mine + line:   # only ours was added: take exactly that back out

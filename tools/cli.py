@@ -10,6 +10,7 @@
     relay-kit cockpit --root RECORDS --out DIR [--lane L] [--content full|metadata] [...]   tools/cockpit.py (read-only)
     relay-kit budget-append --window session|weekly --tokens-in N --tokens-out N [...]   tools/budget_append.py
     relay-kit mcp --root RECORDS [--content full|metadata]   tools/mcp_server.py (MCP over stdio)
+    relay-kit usage-ingest --session ID [--dir governance]   tools/usage_ingest.py (Claude Code session logs -> measured budget line)
     relay-kit prs --root RECORDS [--repo OWNER/NAME ...]   tools/prs.py (build-time GitHub PR reader; appends pr-state.jsonl)
     relay-kit edition new|check --root RECORDS [...]   tools/status_edition.py (hand-written status editions, relay-kit/status@1)
     relay-kit zips [--out DIR] [--owner NAME --records OWNER/REPO]   one zip per skill (default ./relay-kit-upload)
@@ -24,7 +25,7 @@ try:
     from . import __version__
 except ImportError:   # run as a file (python3 tools/cli.py) rather than as the package
     import re as _re
-    __version__ = _re.search(r'__version__ = "([^"]+)"', (__import__("pathlib").Path(__file__).with_name("__init__.py")).read_text()).group(1)
+    __version__ = _re.search(r'__version__ = "([^"]+)"', (__import__("pathlib").Path(__file__).with_name("__init__.py")).read_text(encoding="utf-8")).group(1)
 
 HERE = pathlib.Path(__file__).resolve().parent
 SKILLS = HERE.parent / "skills" if (HERE.parent / "skills" / "handoff-ledger").is_dir() else HERE / "skills"
@@ -39,6 +40,8 @@ SCRIPTS = {
     "prs": HERE / "prs.py",
     "edition": HERE / "status_edition.py",
     "budget-append": HERE / "budget_append.py",
+    "usage-ingest": HERE / "usage_ingest.py",
+    "telemetry": HERE / "telemetry.py",
     "mcp": HERE / "mcp_server.py",
     "zips": HERE / "extract.py",
 }
